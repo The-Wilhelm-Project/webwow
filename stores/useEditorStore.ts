@@ -6,6 +6,22 @@ import type { Layer, Breakpoint, Asset, AssetCategoryFilter } from '../types';
 import { useCanvasTextEditorStore } from './useCanvasTextEditorStore';
 import { updateUrlQueryParam } from '@/hooks/use-editor-url';
 
+// Debounce window for the `?layer=…` URL mirror. Long enough to coalesce
+// rapid clicks (which would otherwise each trigger a Router-wide re-render
+// through Next.js's patched `history.replaceState`), short enough that the
+// URL is up-to-date by the time anyone copies it.
+const LAYER_URL_DEBOUNCE_MS = 250;
+let pendingLayerUrlTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingLayerUrlValue: string | null = null;
+
+function scheduleLayerUrlUpdate(id: string | null): void {
+  pendingLayerUrlValue = id;
+  if (pendingLayerUrlTimer !== null) return;
+  pendingLayerUrlTimer = setTimeout(() => {
+    pendingLayerUrlTimer = null;
+    updateUrlQueryParam('layer', pendingLayerUrlValue);
+  }, LAYER_URL_DEBOUNCE_MS);
+}
 interface HistoryEntry {
   pageId: string;
   layers: Layer[];
@@ -20,6 +36,7 @@ export interface ComponentNavigationEntry {
   id: string; // pageId or componentId
   name: string; // Display name for breadcrumb
   layerId?: string | null; // Layer to restore when returning
+  variantId?: string | null; // Variant to restore when returning to a component
 }
 
 export type EditorSidebarTab = 'layers' | 'pages' | 'cms';
@@ -61,6 +78,7 @@ interface EditorActions {
   setActiveUIState: (state: UIState) => void;
   setActiveTextStyleKey: (key: string | null) => void;
   setEditingComponentId: (id: string | null, returnPageId?: string | null, returnToLayerId?: string | null) => void;
+  setEditingComponentVariantId: (id: string | null) => void;
   pushComponentNavigation: (entry: ComponentNavigationEntry) => void;
   getReturnDestination: () => ComponentNavigationEntry | null;
   setBuilderDataPreloaded: (preloaded: boolean) => void;
@@ -70,6 +88,23 @@ interface EditorActions {
   canUndo: () => boolean;
   canRedo: () => boolean;
   setInteractionHighlights: (triggerIds: string[], targetIds: string[]) => void;
+  setAiActiveLayerIds: (ids: string[]) => void;
+  /** Set the collections the AI is currently working on (CMS shimmer). */
+  setAiActiveCollectionIds: (ids: string[]) => void;
+  /** Set the collection items the AI is currently editing (CMS row shimmer). */
+  setAiActiveItemIds: (ids: string[]) => void;
+  /** Flag newly-arrived remote layers so the canvas can animate their entrance. */
+  markLayersEntering: (ids: string[]) => void;
+  /** Set the page the AI is actively building (drives the canvas build skeleton). */
+  setAiBuildingPageId: (pageId: string | null) => void;
+  /** Set the component the AI is actively editing (drives auto-opening component
+   * edit mode). Pass the variant it's editing so the right variant opens. */
+  setAiBuildingComponentId: (componentId: string | null, variantId?: string | null) => void;
+  /** Reset the "AI opened component edit mode this turn" flag. */
+  setAiOpenedComponentEdit: (value: boolean) => void;
+  /** Request that the builder auto-exit component edit mode back to the page
+   * (consumed by YCodeBuilderMain after an AI-driven component edit finishes). */
+  setPendingAiComponentExit: (value: boolean) => void;
   setActiveInteraction: (triggerId: string | null, targetIds: string[]) => void;
   clearActiveInteraction: () => void;
   openCollectionItemSheet: (collectionId: string, itemId: string) => void;
@@ -80,6 +115,7 @@ interface EditorActions {
   setPreviewMode: (enabled: boolean) => void;
   setActiveSidebarTab: (tab: EditorSidebarTab) => void;
   setLastDesignUrl: (url: string | null) => void;
+  setPreviewReturn: (url: string | null, tab?: EditorSidebarTab | null) => void;
   openFileManager: (onSelect?: ((asset: Asset) => void | false) | null, assetId?: string | null, category?: AssetCategoryFilter) => void;
   closeFileManager: () => void;
   setKeyboardShortcutsOpen: (open: boolean) => void;
@@ -110,6 +146,10 @@ interface EditorStoreWithHistory extends EditorState {
   historyIndex: number;
   maxHistorySize: number;
   editingComponentId: string | null;
+  // Currently selected variant id while editing a component. `null` means
+  // "use the first variant" (also the default for components with a single
+  // variant). Cleared whenever `editingComponentId` is cleared.
+  editingComponentVariantId: string | null;
   returnToPageId: string | null;
   returnToLayerId: string | null; // Layer to restore when exiting component edit mode
   componentNavigationStack: ComponentNavigationEntry[]; // Breadcrumb stack for nested component editing
@@ -117,6 +157,30 @@ interface EditorStoreWithHistory extends EditorState {
   builderDataPreloaded: boolean;
   interactionTriggerLayerIds: string[];
   interactionTargetLayerIds: string[];
+  /** Layer IDs the AI agent is currently editing (drives the canvas shimmer overlay) */
+  aiActiveLayerIds: string[];
+  /** Collection IDs the AI agent is currently working on (drives the CMS shimmer) */
+  aiActiveCollectionIds: string[];
+  /** Collection item IDs the AI agent is currently editing (drives the CMS row shimmer) */
+  aiActiveItemIds: string[];
+  /** Outermost layer IDs that just arrived from a remote source (AI/MCP/collaborator),
+   * consumed by the canvas to play a staggered entrance animation. */
+  canvasEnterLayerIds: string[];
+  /** Bumped on every markLayersEntering call so the canvas reacts even when the
+   * same ids repeat across consecutive remote updates. */
+  canvasEnterNonce: number;
+  /** Page the AI is currently building. When this matches the open page and the
+   * canvas is still empty, a skeleton placeholder is shown for instant feedback. */
+  aiBuildingPageId: string | null;
+  /** Component the AI is currently editing. Drives auto-opening component edit
+   * mode so the user watches the changes happen in the right place. */
+  aiBuildingComponentId: string | null;
+  aiBuildingComponentVariantId: string | null;
+  /** True when the AI (not the user) opened component edit mode this turn, so the
+   * builder can return the user to their page once the turn finishes. */
+  aiOpenedComponentEdit: boolean;
+  /** Set at turn end to trigger the auto-exit back to the page. */
+  pendingAiComponentExit: boolean;
   activeInteractionTriggerLayerId: string | null;
   activeInteractionTargetLayerIds: string[];
   activeTextStyleKey: string | null; // Currently active text style (e.g., 'bold', 'italic')
@@ -130,6 +194,9 @@ interface EditorStoreWithHistory extends EditorState {
   activeSidebarTab: EditorSidebarTab;
   /** Last visited design route URL for restoring navigation */
   lastDesignUrl: string | null;
+  /** URL and sidebar tab to return to when exiting preview from a non-design route */
+  previewReturnUrl: string | null;
+  previewReturnTab: EditorSidebarTab | null;
   fileManager: {
     open: boolean;
     onSelect: ((asset: Asset) => void | false) | null;
@@ -152,9 +219,18 @@ interface EditorStoreWithHistory extends EditorState {
   // Slider transition state (hides outlines during slide animation)
   isSliderAnimating: boolean;
   setSliderAnimating: (value: boolean) => void;
+  // Sidebar resize state (hides outlines during resize drag)
+  isSidebarResizing: boolean;
+  setSidebarResizing: (value: boolean) => void;
+  leftSidebarWidth: number;
+  setLeftSidebarWidth: (value: number) => void;
   // Canvas context menu state (hides overlay while menu is open)
   isCanvasContextMenuOpen: boolean;
   setCanvasContextMenuOpen: (value: boolean) => void;
+  // AI chat "reference a layer" mode: tints canvas outlines teal and shows a
+  // crosshair cursor while the user picks a layer to mention in the AI composer.
+  isAiLayerPicking: boolean;
+  setAiLayerPicking: (value: boolean) => void;
   // Swiper-calculated snap page counts per slider (used for bullet replication)
   sliderSnapCounts: Record<string, number>;
   setSliderSnapCount: (sliderId: string, count: number) => void;
@@ -200,6 +276,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   historyIndex: -1,
   maxHistorySize: 50,
   editingComponentId: null,
+  editingComponentVariantId: null,
   returnToPageId: null,
   returnToLayerId: null,
   componentNavigationStack: [],
@@ -207,6 +284,16 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   builderDataPreloaded: false,
   interactionTriggerLayerIds: [],
   interactionTargetLayerIds: [],
+  aiActiveLayerIds: [],
+  aiActiveCollectionIds: [],
+  aiActiveItemIds: [],
+  canvasEnterLayerIds: [],
+  canvasEnterNonce: 0,
+  aiBuildingPageId: null,
+  aiBuildingComponentId: null,
+  aiBuildingComponentVariantId: null,
+  aiOpenedComponentEdit: false,
+  pendingAiComponentExit: false,
   activeInteractionTriggerLayerId: null,
   activeInteractionTargetLayerIds: [],
   activeTextStyleKey: null,
@@ -216,6 +303,8 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   isPreviewMode: false,
   activeSidebarTab: 'layers' as EditorSidebarTab,
   lastDesignUrl: null,
+  previewReturnUrl: null,
+  previewReturnTab: null,
   fileManager: {
     open: false,
     onSelect: null,
@@ -237,12 +326,23 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   canvasDropTarget: null,
   isSliderAnimating: false,
   setSliderAnimating: (value) => set({ isSliderAnimating: value }),
+  isSidebarResizing: false,
+  setSidebarResizing: (value) => set({ isSidebarResizing: value }),
+  leftSidebarWidth: 256,
+  setLeftSidebarWidth: (value) => set({ leftSidebarWidth: value }),
   isCanvasContextMenuOpen: false,
   setCanvasContextMenuOpen: (value) => set({ isCanvasContextMenuOpen: value }),
+  isAiLayerPicking: false,
+  setAiLayerPicking: (value) => set({ isAiLayerPicking: value }),
   sliderSnapCounts: {},
-  setSliderSnapCount: (sliderId, count) => set((state) => ({
-    sliderSnapCounts: { ...state.sliderSnapCounts, [sliderId]: count },
-  })),
+  setSliderSnapCount: (sliderId, count) => set((state) => {
+    // Swiper fires `update` on every DOM mutation inside its wrapper, which
+    // happens constantly in the iframe (Tailwind class injections, child
+    // re-renders). Bail out when the count hasn't changed so subscribers
+    // — notably slideBullets `LayerItem`s — don't re-render.
+    if (state.sliderSnapCounts[sliderId] === count) return state;
+    return { sliderSnapCounts: { ...state.sliderSnapCounts, [sliderId]: count } };
+  }),
   // Canvas sibling reorder initial state
   isDraggingLayerOnCanvas: false,
   draggedLayerId: null,
@@ -269,8 +369,6 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
 
   setSelectedLayerId: (id) => {
-    // Legacy support - also update selectedLayerIds
-    // Clear active text style and sublayer when changing layers
     set({
       selectedLayerId: id,
       selectedLayerIds: id ? [id] : [],
@@ -280,14 +378,17 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       activeListItemIndex: null,
     });
 
-    // Update URL query param if we're in a route that supports layer selection
-    // Check if we're in /webwow/layers, /webwow/pages, or /webwow/components route
     if (typeof window !== 'undefined') {
       const pathname = window.location.pathname;
-      const isLayerRoute = /^\/webwow\/(layers|pages|components)\//.test(pathname);
-      
+      const isLayerRoute = /^\/ycode\/(layers|pages|components)\//.test(pathname);
+
       if (isLayerRoute) {
-        updateUrlQueryParam('layer', id || null);
+        // Debounce the URL update: Next.js's App Router patches
+        // history.replaceState, so every direct call triggers a Router-wide
+        // re-render (`useSearchParams` consumers, etc.). Coalescing rapid
+        // selections keeps the `?layer=…` deep link accurate without paying
+        // the cascade cost on every click.
+        scheduleLayerUrlUpdate(id || null);
       }
     }
   },
@@ -408,11 +509,16 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
     set({
       editingComponentId: id,
+      // Clear the active variant when leaving component edit mode; callers
+      // entering edit mode are expected to set the variant explicitly
+      // (`use-edit-component` does this once the draft has loaded).
+      editingComponentVariantId: id === null ? null : get().editingComponentVariantId,
       returnToPageId: returnPageId,
       returnToLayerId: layerToReturn,
       componentNavigationStack: newStack,
     });
   },
+  setEditingComponentVariantId: (id: string | null) => set({ editingComponentVariantId: id }),
   setBuilderDataPreloaded: (preloaded) => set({ builderDataPreloaded: preloaded }),
 
   /**
@@ -490,6 +596,62 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     interactionTargetLayerIds: targetIds,
   }),
 
+  setAiActiveLayerIds: (ids) => set((state) => {
+    // Bail out when nothing changes so the canvas overlay doesn't re-run its
+    // outline measurement on every identical sync from the chat store.
+    if (state.aiActiveLayerIds.length === ids.length &&
+        state.aiActiveLayerIds.every((id, i) => id === ids[i])) {
+      return state;
+    }
+    return { aiActiveLayerIds: ids };
+  }),
+
+  setAiActiveCollectionIds: (ids) => set((state) => {
+    if (state.aiActiveCollectionIds.length === ids.length &&
+        state.aiActiveCollectionIds.every((id, i) => id === ids[i])) {
+      return state;
+    }
+    return { aiActiveCollectionIds: ids };
+  }),
+
+  setAiActiveItemIds: (ids) => set((state) => {
+    if (state.aiActiveItemIds.length === ids.length &&
+        state.aiActiveItemIds.every((id, i) => id === ids[i])) {
+      return state;
+    }
+    return { aiActiveItemIds: ids };
+  }),
+
+  markLayersEntering: (ids) => set((state) => {
+    if (ids.length === 0) return state;
+    return {
+      canvasEnterLayerIds: ids,
+      canvasEnterNonce: state.canvasEnterNonce + 1,
+    };
+  }),
+
+  setAiBuildingPageId: (pageId) => set((state) => (
+    state.aiBuildingPageId === pageId ? state : { aiBuildingPageId: pageId }
+  )),
+
+  setAiBuildingComponentId: (componentId, variantId = null) => set((state) => {
+    if (state.aiBuildingComponentId === componentId && state.aiBuildingComponentVariantId === variantId) {
+      return state;
+    }
+    // Opening a component the user wasn't already editing means the AI initiated
+    // it — remember so we can return the user to their page when the turn ends.
+    const aiOpenedFresh = !!componentId && !state.editingComponentId && !state.aiOpenedComponentEdit;
+    return {
+      aiBuildingComponentId: componentId,
+      aiBuildingComponentVariantId: variantId,
+      ...(aiOpenedFresh ? { aiOpenedComponentEdit: true } : {}),
+    };
+  }),
+
+  setAiOpenedComponentEdit: (value) => set({ aiOpenedComponentEdit: value }),
+
+  setPendingAiComponentExit: (value) => set({ pendingAiComponentExit: value }),
+
   setActiveInteraction: (triggerId, targetIds) => set({
     activeInteractionTriggerLayerId: triggerId,
     activeInteractionTargetLayerIds: targetIds,
@@ -519,6 +681,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
   setLastDesignUrl: (url) => set({ lastDesignUrl: url }),
+  setPreviewReturn: (url, tab) => set({ previewReturnUrl: url, previewReturnTab: tab ?? null }),
 
   openFileManager: (onSelect, assetId, category) => set({
     fileManager: {
@@ -627,7 +790,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
     if (typeof window !== 'undefined') {
       const pathname = window.location.pathname;
-      const isLayerRoute = /^\/webwow\/(layers|pages|components)\//.test(pathname);
+      const isLayerRoute = /^\/ycode\/(layers|pages|components)\//.test(pathname);
       if (isLayerRoute) {
         updateUrlQueryParam('layer', layerId);
       }

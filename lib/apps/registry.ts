@@ -6,30 +6,44 @@
  * 1. Adding an AppDefinition here
  * 2. Creating the app module under lib/apps/<app-id>/
  * 3. Adding a logo.svg in lib/apps/<app-id>/logo.svg
- * 4. Creating proxy API routes under app/webwow/api/apps/<app-id>/
+ * 4. Creating proxy API routes under app/ycode/api/apps/<app-id>/
  */
 
 import type { StaticImageData } from 'next/image';
 
+import airtableLogo from './airtable/logo.svg';
+import webflowLogo from './webflow/logo.svg';
 import mailerliteLogo from './mailerlite/logo.svg';
 import mailchimpLogo from './mailchimp/logo.svg';
 import zapierLogo from './zapier/logo.svg';
 import makeLogo from './make/logo.svg';
+import mapboxLogo from './mapbox/logo.png';
+import googleMapsEmbedLogo from './google-maps-embed/logo.png';
+import staticExportLogo from './static-export/logo.svg';
 
 // =============================================================================
 // Types
 // =============================================================================
 
-export type AppCategory = 'popular' | 'marketing' | 'automation' | 'analytics' | 'email' | 'other';
+export type AppCategory = 'popular' | 'cms-data' | 'marketing' | 'automation' | 'analytics' | 'email' | 'maps' | 'other';
 
 export const APP_CATEGORIES: { value: AppCategory; label: string }[] = [
   { value: 'popular', label: 'Popular' },
+  { value: 'cms-data', label: 'CMS Data' },
   { value: 'marketing', label: 'Marketing' },
   { value: 'automation', label: 'Automation' },
   { value: 'analytics', label: 'Analytics' },
   { value: 'email', label: 'Email' },
+  { value: 'maps', label: 'Maps' },
   { value: 'other', label: 'Other' },
 ];
+
+export interface AppAuthor {
+  /** Display name of the author or organization */
+  name: string;
+  /** Optional URL (e.g. GitHub profile) */
+  url?: string;
+}
 
 export interface AppDefinition {
   /** Unique identifier (kebab-case), used as app_id in database */
@@ -44,6 +58,8 @@ export interface AppDefinition {
   categories: AppCategory[];
   /** Whether this app is fully implemented or just a placeholder */
   implemented: boolean;
+  /** Author or contributor credit */
+  author?: AppAuthor;
 }
 
 // =============================================================================
@@ -52,19 +68,38 @@ export interface AppDefinition {
 
 export const apps: AppDefinition[] = [
   {
+    id: 'airtable',
+    name: 'Airtable',
+    description: 'One-way sync from Airtable tables to your Ycode collections with real-time webhook support.',
+    logo: airtableLogo,
+    categories: ['popular', 'cms-data'],
+    implemented: true,
+    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+  },
+  {
+    id: 'webflow',
+    name: 'Webflow',
+    description: 'Migrate Webflow CMS collections into Ycode and paste Webflow designs with global styles intact.',
+    logo: webflowLogo,
+    categories: ['popular', 'cms-data'],
+    implemented: true,
+    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+  },
+  {
     id: 'mailerlite',
     name: 'MailerLite',
     description: 'Send form submissions to MailerLite subscriber groups with field mapping.',
     logo: mailerliteLogo,
-    categories: ['popular', 'marketing'],
+    categories: ['popular', 'email'],
     implemented: true,
+    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
   },
   {
     id: 'mailchimp',
     name: 'Mailchimp',
     description: 'Sync form submissions with Mailchimp audiences and manage email campaigns.',
     logo: mailchimpLogo,
-    categories: ['popular', 'marketing'],
+    categories: ['popular', 'email'],
     implemented: false,
   },
   {
@@ -82,6 +117,33 @@ export const apps: AppDefinition[] = [
     logo: makeLogo,
     categories: ['popular', 'automation'],
     implemented: false,
+  },
+  {
+    id: 'mapbox',
+    name: 'Mapbox',
+    description: 'Add interactive maps to your pages with custom styles and markers using the Mapbox API.',
+    logo: mapboxLogo,
+    categories: ['popular', 'maps'],
+    implemented: true,
+    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+  },
+  {
+    id: 'google-maps-embed',
+    name: 'Google Map',
+    description: 'Add interactive maps to your pages with custom styles using the Google Maps Embed API.',
+    logo: googleMapsEmbedLogo,
+    categories: ['popular', 'maps'],
+    implemented: true,
+    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+  },
+  {
+    id: 'static-export',
+    name: 'Static HTML Export',
+    description: 'Export your site as static HTML/CSS/JS — host anywhere: S3, Netlify, Cloudflare Pages, or local files.',
+    logo: staticExportLogo,
+    categories: ['popular', 'other'],
+    implemented: true,
+    author: { name: 'Serge/Grish', url: 'https://github.com/sj-unit72' },
   },
 ];
 

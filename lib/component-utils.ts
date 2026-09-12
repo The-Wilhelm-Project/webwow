@@ -5,6 +5,8 @@
  */
 
 import type { Layer, Component } from '@/types';
+import { generateId } from '@/lib/utils';
+import { getComponentVariantLayers } from './component-variant-utils';
 import { regenerateIdsWithInteractionRemapping } from './layer-utils';
 
 /**
@@ -224,6 +226,42 @@ export function checkCircularReference(
 }
 
 /**
+ * Build a fresh component-instance layer for a component. Mirrors the editor's
+ * ElementLibrary "add component" flow: a plain block div carrying `componentId`
+ * with empty children (the tree is expanded from the master at render time).
+ *
+ * @param component - The component to instantiate
+ * @param options.variantId - Optional variant to select; ignored when it does not
+ *   match one of the component's variants (render falls back to the first).
+ * @param options.customName - Display name; defaults to the component name
+ * @param options.id - Reuse an existing layer id (for in-place replacement);
+ *   defaults to a freshly generated id
+ */
+export function buildComponentInstanceLayer(
+  component: Component,
+  options?: { variantId?: string; customName?: string; id?: string },
+): Layer {
+  const variantId = options?.variantId && component.variants?.some((v) => v.id === options.variantId)
+    ? options.variantId
+    : undefined;
+
+  const layer: Layer = {
+    id: options?.id ?? generateId('lyr'),
+    name: 'div',
+    customName: options?.customName ?? component.name,
+    componentId: component.id,
+    classes: ['block'], // Ensure it renders as a block element
+    children: [], // Expanded from the master component at render time
+  };
+
+  if (variantId) {
+    layer.componentVariantId = variantId;
+  }
+
+  return layer;
+}
+
+/**
  * Apply a component to a layer
  * Replaces the layer with a component instance (sets componentId)
  * Note: The actual layer tree is replaced during rendering, not here
@@ -237,6 +275,10 @@ export function applyComponentToLayer(layer: Layer, component: Component): Layer
     // but when rendering, we'll use the component's layers
   };
 }
+
+// `getComponentVariantLayers` lives in `lib/component-variant-utils.ts` to
+// avoid a circular import between this module and `lib/layer-utils.ts`.
+export { getComponentVariantLayers } from './component-variant-utils';
 
 /**
  * Detach component from a layer
@@ -258,36 +300,50 @@ export function isComponentInstance(layer: Layer): boolean {
 }
 
 /**
+ * Returns true if the layer tree contains an instance of the given component.
+ * Short-circuits on first match.
+ */
+export function containsComponent(layers: Layer[], componentId: string): boolean {
+  for (const layer of layers) {
+    if (layer.componentId === componentId) return true;
+    if (layer.children && layer.children.length > 0) {
+      if (containsComponent(layer.children, componentId)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Update all layers using a specific component
  * Recursively traverses layer tree and updates component instances
  * This is used when the master component is updated to sync all instances
+ *
+ * Preserves referential identity for subtrees that contain no matching instance,
+ * so React reconciliation can skip untouched branches.
  */
 export function updateLayersWithComponent(
   layers: Layer[],
   componentId: string,
-  newComponentLayers: Layer[]
 ): Layer[] {
-  return layers.map(layer => {
-    // If this layer is an instance of the component, update it
-    // Note: The actual rendering logic will use newComponentLayers
-    // This just ensures the componentId is maintained
+  let changed = false;
+  const result = layers.map(layer => {
     if (layer.componentId === componentId) {
-      return {
-        ...layer,
-        // componentId stays the same, but rendering will use updated component
-      };
+      changed = true;
+      return { ...layer };
     }
 
-    // Recursively update children
     if (layer.children && layer.children.length > 0) {
-      return {
-        ...layer,
-        children: updateLayersWithComponent(layer.children, componentId, newComponentLayers),
-      };
+      const newChildren = updateLayersWithComponent(layer.children, componentId);
+      if (newChildren !== layer.children) {
+        changed = true;
+        return { ...layer, children: newChildren };
+      }
     }
 
     return layer;
   });
+
+  return changed ? result : layers;
 }
 
 /**
@@ -361,14 +417,20 @@ export function detachSpecificLayerFromComponent(
  * @returns Array of layers (component children with new IDs, or stripped layer)
  */
 function replaceLayerWithComponentChildren(layer: Layer, component?: Component): Layer[] {
+  // Use the layers of the variant the instance is actually using, falling back
+  // to the primary variant (or legacy `component.layers`) when none is set.
+  const variantLayers = component
+    ? getComponentVariantLayers(component, layer.componentVariantId)
+    : [];
+
   // If we don't have the component data, just strip the componentId
-  if (!component || !component.layers || component.layers.length === 0) {
-    const { componentId: _, componentOverrides: __, ...rest } = layer;
+  if (!component || variantLayers.length === 0) {
+    const { componentId: _, componentVariantId: __, componentOverrides: ___, ...rest } = layer;
     return [rest as Layer];
   }
 
-  // Clone the component's layers with new IDs and return them
-  const cloned = JSON.parse(JSON.stringify(component.layers)) as Layer[];
+  // Clone the variant's layers with new IDs and return them
+  const cloned = JSON.parse(JSON.stringify(variantLayers)) as Layer[];
   return cloned.map(regenerateIdsWithInteractionRemapping);
 }
 

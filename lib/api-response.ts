@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
  * 
  * This ensures that API responses are NEVER cached by:
  * - Next.js cache
- * - CDN
+ * - Vercel CDN
  * - Browser cache
  * - Any intermediate proxy
  * 
@@ -16,10 +16,16 @@ export function noCache<T = Record<string, unknown>>(data: T, status = 200) {
   return NextResponse.json(data, {
     status,
     headers: {
+      // Standard HTTP cache prevention
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
       'Pragma': 'no-cache',
       'Expires': '0',
+      
+      // Vercel-specific cache prevention
       'CDN-Cache-Control': 'no-store',
+      'Vercel-CDN-Cache-Control': 'no-store',
+      
+      // Additional surrogate control
       'Surrogate-Control': 'no-store',
     },
   });

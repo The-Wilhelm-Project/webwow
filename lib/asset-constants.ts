@@ -6,8 +6,8 @@
 import type { AssetCategory } from '@/types';
 
 /**
- * Storage folder prefix constants.
- * All uploads go to the uploads directory, organized by folder.
+ * Supabase Storage bucket and folder prefix constants.
+ * All uploads go to a single 'assets' bucket, organized by folder.
  */
 export const STORAGE_BUCKET = 'assets';
 export const STORAGE_FOLDERS = {
@@ -84,6 +84,9 @@ export const DEFAULT_ASSETS = {
   AUDIO: '',
 } as const;
 
+/** Maximum upload file size in bytes (50MB) */
+export const MAX_UPLOAD_FILE_SIZE = 50 * 1024 * 1024;
+
 /**
  * Get accept attribute string for file input based on category
  */
@@ -92,4 +95,18 @@ export function getAcceptString(category?: AssetCategory): string {
     return Object.values(ALLOWED_MIME_TYPES).flat().join(',');
   }
   return ALLOWED_MIME_TYPES[category].join(',');
+}
+
+/** Generate a unique storage path for a file upload */
+export function generateStoragePath(filename: string, folder: string = STORAGE_FOLDERS.WEBSITE): string {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 15);
+  const fileExtension = filename.split('.').pop() || '';
+  return `${folder}/${timestamp}-${random}.${fileExtension}`;
+}
+
+/** Extract the display name from a filename (strip extension) */
+export function getDisplayName(filename: string, customName?: string | null): string {
+  const baseName = filename.replace(/\.[^/.]+$/, '');
+  return customName || baseName || filename;
 }

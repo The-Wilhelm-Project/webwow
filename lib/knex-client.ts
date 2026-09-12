@@ -2,23 +2,25 @@ import knex, { Knex } from 'knex';
 import knexfileConfig from '../knexfile';
 
 /**
- * Knex Client for Webwow
+ * Knex Client for Ycode Migrations
  *
- * Creates a knex instance connected to the PostgreSQL database
+ * Creates a knex instance connected to the user's Supabase PostgreSQL database
  * Uses configuration from knexfile.ts based on NODE_ENV
+ *
+ * The instance is stored on globalThis so it survives Next.js HMR in dev mode.
+ * Without this, each hot reload re-evaluates the module, resets the module-level
+ * variable to null, and creates a new pool — leaking the old pool's PostgreSQL
+ * connections until the database is exhausted.
  */
 
-const globalScope = globalThis as typeof globalThis & {
-  __webwowKnexInstance?: Knex;
-};
-let knexInstance: Knex | null = globalScope.__webwowKnexInstance || null;
+const globalForKnex = globalThis as unknown as { __knexInstance?: Knex };
 
 /**
  * Get or create knex instance
  */
 export async function getKnexClient(): Promise<Knex> {
-  if (knexInstance) {
-    return knexInstance;
+  if (globalForKnex.__knexInstance) {
+    return globalForKnex.__knexInstance;
   }
 
   const environment = process.env.NODE_ENV || 'development';
@@ -28,25 +30,23 @@ export async function getKnexClient(): Promise<Knex> {
     throw new Error(`No knex configuration found for environment: ${environment}`);
   }
 
-  knexInstance = knex(config);
-  globalScope.__webwowKnexInstance = knexInstance;
+  globalForKnex.__knexInstance = knex(config);
 
-  return knexInstance;
+  return globalForKnex.__knexInstance;
 }
 
 /**
  * Close knex connection
  */
 export async function closeKnexClient(): Promise<void> {
-  if (knexInstance) {
-    await knexInstance.destroy();
-    globalScope.__webwowKnexInstance = undefined;
-    knexInstance = null;
+  if (globalForKnex.__knexInstance) {
+    await globalForKnex.__knexInstance.destroy();
+    globalForKnex.__knexInstance = undefined;
   }
 }
 
 /**
- * Test database connection
+ * Test database connection using stored credentials
  */
 export async function testKnexConnection(): Promise<boolean> {
   try {
@@ -54,12 +54,13 @@ export async function testKnexConnection(): Promise<boolean> {
     await client.raw('SELECT 1');
     return true;
   } catch (error) {
-    console.error('[testKnexConnection] Database connection test failed:', {
+    console.error('[testKnexConnection] ✗ Database connection test failed:', {
       message: error instanceof Error ? error.message : 'Unknown error',
       code: (error as any)?.code,
       detail: (error as any)?.detail,
     });
 
+    // Clean up on error
     try {
       await closeKnexClient();
     } catch (closeError) {
@@ -71,34 +72,63 @@ export async function testKnexConnection(): Promise<boolean> {
 }
 
 /**
- * Test a database connection URL before persisting it
+ * Test database connection with Supabase credentials
+ * Used during setup to validate credentials before storing them
  */
-export async function testDatabaseConnection(connectionUrl: string): Promise<{
+export async function testSupabaseDirectConnection(credentials: {
+  dbHost: string;
+  dbPort: number;
+  dbName: string;
+  dbUser: string;
+  dbPassword: string;
+  ssl?: boolean;
+}): Promise<{
   success: boolean;
   error?: string;
 }> {
   let testClient: Knex | null = null;
 
   try {
+
+    // Create a temporary knex instance with the provided credentials
     testClient = knex({
       client: 'pg',
-      connection: connectionUrl,
-      pool: { min: 0, max: 1 },
+      connection: {
+        host: credentials.dbHost,
+        port: credentials.dbPort,
+        database: credentials.dbName,
+        user: credentials.dbUser,
+        password: credentials.dbPassword,
+        ssl: credentials.ssl === false ? false : { rejectUnauthorized: false },
+      },
+      pool: {
+        min: 0,
+        max: 1,
+      },
     });
 
+    // Test the connection
     await testClient.raw('SELECT 1');
+
     return { success: true };
   } catch (error) {
+    console.error('[testSupabaseDirectConnection] ✗ Database connection test failed:', {
+      message: error instanceof Error ? error.message : 'Unknown error',
+      code: (error as any)?.code,
+      detail: (error as any)?.detail,
+    });
+
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Database connection failed',
     };
   } finally {
+    // Always clean up the test client
     if (testClient) {
       try {
         await testClient.destroy();
-      } catch {
-        // Ignore cleanup errors
+      } catch (closeError) {
+        console.error('[testSupabaseDirectConnection] Error closing test connection:', closeError);
       }
     }
   }

@@ -35,6 +35,7 @@ interface FontsState {
 
 interface FontsActions {
   loadFonts: () => Promise<void>;
+  refreshFonts: () => Promise<void>;
   setFonts: (fonts: Font[]) => void;
   addFont: (font: Font) => void;
   removeFont: (fontId: string) => void;
@@ -72,7 +73,7 @@ export const useFontsStore = create<FontsStore>((set, get) => ({
     set({ isLoading: true, error: null });
 
     try {
-      const response = await fetch('/webwow/api/fonts');
+      const response = await fetch('/ycode/api/fonts');
       if (!response.ok) throw new Error('Failed to fetch fonts');
 
       const { data: fonts } = await response.json();
@@ -93,6 +94,24 @@ export const useFontsStore = create<FontsStore>((set, get) => ({
     }
   },
 
+  /**
+   * Re-fetch fonts from the API even if already loaded. Used when fonts change
+   * server-side (e.g. the AI agent installs a font) so the canvas picks them
+   * up without a page reload.
+   */
+  refreshFonts: async () => {
+    try {
+      const response = await fetch('/ycode/api/fonts');
+      if (!response.ok) throw new Error('Failed to fetch fonts');
+
+      const { data: fonts } = await response.json();
+      set({ fonts: fonts || [], isLoaded: true });
+      get().rebuildCss();
+    } catch (error) {
+      console.error('Failed to refresh fonts:', error);
+    }
+  },
+
   /** Set fonts directly (e.g., from initial load) */
   setFonts: (fonts: Font[]) => {
     set({ fonts, isLoaded: true });
@@ -101,10 +120,17 @@ export const useFontsStore = create<FontsStore>((set, get) => ({
 
   /** Add a font to the store */
   addFont: (font: Font) => {
-    set((state) => ({
-      fonts: [...state.fonts, font],
-    }));
-    get().rebuildCss();
+    let added = false;
+    set((state) => {
+      // Idempotent: skip if a font with this id already exists so the list can
+      // never hold a duplicate id (which crashes keyed list renders). Guards
+      // against double-invokes (React StrictMode, rapid retries) and any future
+      // realtime create path that could deliver the same font more than once.
+      if (state.fonts.some((existing) => existing.id === font.id)) return state;
+      added = true;
+      return { fonts: [...state.fonts, font] };
+    });
+    if (added) get().rebuildCss();
   },
 
   /** Remove a font from the store */
@@ -123,7 +149,7 @@ export const useFontsStore = create<FontsStore>((set, get) => ({
         formData.append('file', file);
       }
 
-      const response = await fetch('/webwow/api/fonts', {
+      const response = await fetch('/ycode/api/fonts', {
         method: 'POST',
         body: formData,
       });
@@ -193,7 +219,7 @@ export const useFontsStore = create<FontsStore>((set, get) => ({
         payload.axes = googleFont.axes;
       }
 
-      const response = await fetch('/webwow/api/fonts', {
+      const response = await fetch('/ycode/api/fonts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -223,7 +249,7 @@ export const useFontsStore = create<FontsStore>((set, get) => ({
   /** Delete a font */
   deleteFont: async (fontId: string) => {
     try {
-      const response = await fetch(`/webwow/api/fonts/${fontId}`, {
+      const response = await fetch(`/ycode/api/fonts/${fontId}`, {
         method: 'DELETE',
       });
 
@@ -243,7 +269,7 @@ export const useFontsStore = create<FontsStore>((set, get) => ({
     if (get().isCatalogLoaded) return;
 
     try {
-      const response = await fetch('/webwow/api/fonts/google');
+      const response = await fetch('/ycode/api/fonts/google');
       if (!response.ok) throw new Error('Failed to load Google Fonts catalog');
 
       const { data } = await response.json();
@@ -288,7 +314,7 @@ export const useFontsStore = create<FontsStore>((set, get) => ({
    */
   injectFontsCss: (iframeDocument?: Document | null) => {
     const { fonts, fontsCss } = get();
-    const styleId = 'webwow-fonts-style';
+    const styleId = 'ycode-fonts-style';
 
     // Inject into main document (builder)
     injectStyleIntoDocument(document, styleId, fontsCss);
@@ -339,7 +365,7 @@ function injectStyleIntoDocument(doc: Document, styleId: string, css: string) {
  * especially in cross-origin iframe contexts.
  */
 function injectGoogleFontLinks(doc: Document, fonts: Font[]) {
-  const prefix = 'webwow-gfont-';
+  const prefix = 'ycode-gfont-';
   const googleFonts = fonts.filter(f => f.type === 'google');
 
   // Track which links already exist

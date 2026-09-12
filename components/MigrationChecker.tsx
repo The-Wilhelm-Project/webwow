@@ -14,26 +14,6 @@ interface MigrationCheckerProps {
   onComplete: () => void;
 }
 
-interface SetupStatusResponse {
-  is_configured: boolean;
-  is_setup_complete: boolean;
-}
-
-async function parseResponseSafely(response: Response): Promise<any> {
-  const contentType = response.headers.get('content-type') || '';
-  const rawText = await response.text();
-
-  if (contentType.includes('application/json')) {
-    try {
-      return JSON.parse(rawText);
-    } catch {
-      return { error: rawText || 'Invalid JSON response' };
-    }
-  }
-
-  return { error: rawText || `HTTP ${response.status}: ${response.statusText}` };
-}
-
 export default function MigrationChecker({ onComplete }: MigrationCheckerProps) {
   const [isChecking, setIsChecking] = useState(true);
   const [progress, setProgress] = useState('Checking database status...');
@@ -45,39 +25,22 @@ export default function MigrationChecker({ onComplete }: MigrationCheckerProps) 
   const checkAndRunMigrations = useCallback(async () => {
     try {
       setIsChecking(true);
-      setProgress('Checking database status...');
+      setProgress('Checking and running migrations...');
       setError(null);
 
-      const statusResponse = await fetch('/webwow/api/setup/status', {
-        method: 'GET',
-      });
-      const statusResult = await parseResponseSafely(statusResponse) as SetupStatusResponse & { error?: string };
-
-      if (!statusResponse.ok) {
-        console.error('Setup status request failed', statusResult);
-        onComplete(); // Do not block builder on status check failure
-        return;
-      }
-
-      if (statusResult.is_setup_complete) {
-        onComplete();
-        return;
-      }
-
-      setProgress('Running database migrations...');
-
-      // Setup is incomplete - run migrations once.
-      const response = await fetch('/webwow/api/setup/migrate', {
+      // Single API call: checks AND runs migrations if needed
+      const response = await fetch('/ycode/api/setup/migrate', {
         method: 'POST',
       });
-      const result = await parseResponseSafely(response);
 
       if (!response.ok) {
         console.error('Migration request failed');
-        console.error(result);
+        console.error(await response.json());
         onComplete(); // Allow builder to load anyway
         return;
       }
+
+      const result = await response.json();
 
       if (result.error) {
         setError(result.error);

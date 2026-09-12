@@ -4,7 +4,7 @@ import type {
   WebflowImportPayload,
   WebflowImportResult,
   WebflowImportStatus,
-} from '@/types';
+} from '@/types/webwow';
 
 export interface CreateWebflowImportData {
   payload: WebflowImportPayload;

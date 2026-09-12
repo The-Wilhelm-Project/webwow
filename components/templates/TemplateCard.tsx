@@ -8,8 +8,8 @@
 
 import React from 'react';
 import { cn } from '@/lib/utils';
-import Icon from '@/components/ui/icon';
 import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
 
 export interface TemplateCardProps {
   name: string;
@@ -29,15 +29,32 @@ export function TemplateCard({
   onClick,
 }: TemplateCardProps) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <div
       className={cn(
         'group relative flex flex-col overflow-hidden',
       )}
     >
       {/* Preview Image */}
-      <div className="relative w-full overflow-hidden bg-muted rounded-lg cursor-pointer">
+
+      <div className="relative w-full overflow-hidden bg-muted rounded-lg">
+
+        <div className="absolute inset-0 z-10 opacity-0 group-hover:opacity-100 bg-black/80 flex flex-col items-stretch p-4 gap-2 justify-center transition ease-in-out">
+
+          <Button onClick={onClick} variant="white">Use template</Button>
+
+          {/* Live Preview Link */}
+          {livePreviewUrl && (
+            <Button asChild variant="secondary">
+              <a
+                href={livePreviewUrl} target="_blank"
+                rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
+              >
+                Preview
+              </a>
+            </Button>
+          )}
+        </div>
+
         {preview ? (
           /* eslint-disable-next-line @next/next/no-img-element */
           <img
@@ -76,22 +93,8 @@ export function TemplateCard({
       {/* Content */}
       <div className="flex flex-1 flex-col py-4">
         <Label>{name}</Label>
-
-        {/* Live Preview Link */}
-        {livePreviewUrl && (
-          <a
-            href={livePreviewUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className="mt-3 inline-flex items-center gap-1 text-xs text-blue-500 hover:text-blue-600 hover:underline"
-          >
-            <Icon name="link" className="h-3 w-3" />
-            View Demo
-          </a>
-        )}
       </div>
-    </button>
+    </div>
   );
 }
 

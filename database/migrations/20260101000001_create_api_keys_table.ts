@@ -22,9 +22,22 @@ export async function up(knex: Knex): Promise<void> {
   // Create index on key_hash for fast lookups during validation
   await knex.schema.raw('CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash)');
 
+  // Enable Row Level Security
+  await knex.schema.raw('ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY');
+
+  // Create RLS policy - only authenticated users can manage API keys
+  // Using FOR ALL covers SELECT, INSERT, UPDATE, DELETE
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can manage api_keys"
+      ON api_keys FOR ALL
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
 }
 
 export async function down(knex: Knex): Promise<void> {
+  // Drop policy
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can manage api_keys" ON api_keys');
+
   // Drop table
   await knex.schema.dropTableIfExists('api_keys');
 }

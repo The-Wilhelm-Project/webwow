@@ -37,7 +37,7 @@ function InputGroup({ className, size = 'xs', ...props }: InputGroupProps) {
           'has-[>[data-align=block-end]]:h-auto has-[>[data-align=block-end]]:flex-col has-[>[data-align=block-end]]:[&>input]:pt-3',
 
           // Focus state.
-          'has-[[data-slot=input-group-control]:focus-visible]:border-ring has-[[data-slot=input-group-control]:focus-visible]:ring-ring/50 has-[[data-slot=input-group-control]:focus-visible]:ring-[0px]',
+          'has-[[data-slot=input-group-control]:focus-visible]:border-ring has-[[data-slot=input-group-control]:focus-visible]:ring-ring/50 has-[[data-slot=input-group-control]:focus-visible]:ring-0',
 
           // Error state.
           'has-[[data-slot][aria-invalid=true]]:ring-destructive/20 has-[[data-slot][aria-invalid=true]]:border-destructive dark:has-[[data-slot][aria-invalid=true]]:ring-destructive/40',
@@ -209,22 +209,22 @@ function InputGroupInput({
       {stepper && !props.disabled && (
         <InputGroupAddon align="inline-end" className="p-0 px-1.5 hidden group-hover:flex absolute right-0 top-0 h-full items-center rounded-r-[10px]">
           <div className="flex flex-col -gap-px">
-            <span
-              role="button"
+            <button
+              type="button"
               tabIndex={-1}
               className="p-0 opacity-50 hover:opacity-100 transition-opacity cursor-pointer"
               onClick={handleIncrement}
             >
               <Icon name="chevronUp" className="size-2.5" />
-            </span>
-            <span
-              role="button"
+            </button>
+            <button
+              type="button"
               tabIndex={-1}
               className="p-0 opacity-50 hover:opacity-100 transition-opacity cursor-pointer -mt-0.5"
               onClick={handleDecrement}
             >
               <Icon name="chevronDown" className="size-2.5" />
-            </span>
+            </button>
           </div>
         </InputGroupAddon>
       )}

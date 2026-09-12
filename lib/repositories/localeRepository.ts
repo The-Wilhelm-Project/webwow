@@ -5,21 +5,29 @@
  * Supports draft/published workflow with composite primary key (id, is_published)
  */
 
-import { getKnexClient } from '@/lib/knex-client';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { Locale, CreateLocaleData, UpdateLocaleData } from '@/types';
 
 /**
  * Get all locales (draft by default)
  */
-export async function getAllLocales(isPublished: boolean = false): Promise<Locale[]> {
-  const db = await getKnexClient();
+export async function getAllLocales(isPublished: boolean = false, tenantId?: string): Promise<Locale[]> {
+  const client = await getSupabaseAdmin(tenantId);
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const data = await db('locales')
+  const { data, error } = await client
+    .from('locales')
     .select('*')
-    .where('is_published', isPublished)
-    .whereNull('deleted_at')
-    .orderBy('is_default', 'desc')
-    .orderBy('label', 'asc');
+    .eq('is_published', isPublished)
+    .is('deleted_at', null)
+    .order('is_default', { ascending: false })
+    .order('label', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to fetch locales: ${error.message}`);
+  }
 
   return data || [];
 }
@@ -29,48 +37,81 @@ export async function getAllLocales(isPublished: boolean = false): Promise<Local
  * With composite primary key, we need to specify is_published to get a single row
  */
 export async function getLocaleById(id: string, isPublished: boolean = false): Promise<Locale | null> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const data = await db('locales')
+  const { data, error } = await client
+    .from('locales')
     .select('*')
-    .where('id', id)
-    .where('is_published', isPublished)
-    .whereNull('deleted_at')
-    .first();
+    .eq('id', id)
+    .eq('is_published', isPublished)
+    .is('deleted_at', null)
+    .single();
 
-  return data || null;
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return null; // Not found
+    }
+    throw new Error(`Failed to fetch locale: ${error.message}`);
+  }
+
+  return data;
 }
 
 /**
  * Get locale by code (draft by default)
  */
 export async function getLocaleByCode(code: string, isPublished: boolean = false): Promise<Locale | null> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const data = await db('locales')
+  const { data, error } = await client
+    .from('locales')
     .select('*')
-    .where('code', code)
-    .where('is_published', isPublished)
-    .whereNull('deleted_at')
-    .first();
+    .eq('code', code)
+    .eq('is_published', isPublished)
+    .is('deleted_at', null)
+    .single();
 
-  return data || null;
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return null; // Not found
+    }
+    throw new Error(`Failed to fetch locale: ${error.message}`);
+  }
+
+  return data;
 }
 
 /**
  * Get the default locale (draft by default)
  */
 export async function getDefaultLocale(isPublished: boolean = false): Promise<Locale | null> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const data = await db('locales')
+  const { data, error } = await client
+    .from('locales')
     .select('*')
-    .where('is_default', true)
-    .where('is_published', isPublished)
-    .whereNull('deleted_at')
-    .first();
+    .eq('is_default', true)
+    .eq('is_published', isPublished)
+    .is('deleted_at', null)
+    .single();
 
-  return data || null;
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return null; // No default locale set
+    }
+    throw new Error(`Failed to fetch default locale: ${error.message}`);
+  }
+
+  return data;
 }
 
 /**
@@ -81,49 +122,66 @@ export async function getDefaultLocale(isPublished: boolean = false): Promise<Lo
 export async function createLocale(
   localeData: CreateLocaleData
 ): Promise<{ locale: Locale; locales: Locale[] }> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // Check if a locale with this code already exists (including soft-deleted)
-  const existingLocale = await db('locales')
+  const { data: existingLocale } = await client
+    .from('locales')
     .select('*')
-    .where('code', localeData.code)
-    .where('is_published', false)
-    .first();
+    .eq('code', localeData.code)
+    .eq('is_published', false)
+    .maybeSingle();
 
   // If this is set as default, unset any existing default
   if (localeData.is_default) {
-    await db('locales')
-      .where('is_default', true)
-      .where('is_published', false)
-      .update({ is_default: false });
+    await client
+      .from('locales')
+      .update({ is_default: false })
+      .eq('is_default', true)
+      .eq('is_published', false);
   }
 
   let data: Locale;
 
   if (existingLocale) {
     // Update existing locale (restore if soft-deleted)
-    const [updatedData] = await db('locales')
-      .where('id', existingLocale.id)
-      .where('is_published', false)
+    const { data: updatedData, error } = await client
+      .from('locales')
       .update({
         label: localeData.label,
         is_default: localeData.is_default || false,
-        deleted_at: null,
+        deleted_at: null, // Restore if soft-deleted
         updated_at: new Date().toISOString(),
       })
-      .returning('*');
+      .eq('id', existingLocale.id)
+      .eq('is_published', false)
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`Failed to update locale: ${error.message}`);
+    }
 
     data = updatedData;
   } else {
     // Create new locale
-    const [newData] = await db('locales')
+    const { data: newData, error } = await client
+      .from('locales')
       .insert({
         code: localeData.code,
         label: localeData.label,
         is_default: localeData.is_default || false,
         is_published: false,
       })
-      .returning('*');
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`Failed to create locale: ${error.message}`);
+    }
 
     data = newData;
   }
@@ -142,25 +200,35 @@ export async function updateLocale(
   id: string,
   updates: UpdateLocaleData
 ): Promise<{ locale: Locale; locales: Locale[] }> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // If this is being set as default, unset any existing default
   if (updates.is_default) {
-    await db('locales')
-      .where('is_default', true)
-      .where('is_published', false)
-      .where('id', '!=', id)
-      .update({ is_default: false });
+    await client
+      .from('locales')
+      .update({ is_default: false })
+      .eq('is_default', true)
+      .eq('is_published', false)
+      .neq('id', id);
   }
 
-  const [data] = await db('locales')
-    .where('id', id)
-    .where('is_published', false)
+  const { data, error } = await client
+    .from('locales')
     .update({
       ...updates,
       updated_at: new Date().toISOString(),
     })
-    .returning('*');
+    .eq('id', id)
+    .eq('is_published', false)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update locale: ${error.message}`);
+  }
 
   // Always return all locales so client can update all is_default flags
   const allLocales = await getAllLocales(false);
@@ -172,7 +240,10 @@ export async function updateLocale(
  * Delete a locale (soft delete - sets deleted_at timestamp)
  */
 export async function deleteLocale(id: string): Promise<void> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // Check if this is the default locale
   const locale = await getLocaleById(id, false);
@@ -180,33 +251,48 @@ export async function deleteLocale(id: string): Promise<void> {
     throw new Error('Cannot delete the default locale');
   }
 
-  await db('locales')
-    .where('id', id)
-    .where('is_published', false)
-    .update({ deleted_at: new Date().toISOString() });
+  const { error } = await client
+    .from('locales')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('is_published', false);
+
+  if (error) {
+    throw new Error(`Failed to delete locale: ${error.message}`);
+  }
 }
 
 /**
  * Set a locale as the default
  */
 export async function setDefaultLocale(id: string): Promise<Locale> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // Unset current default
-  await db('locales')
-    .where('is_default', true)
-    .where('is_published', false)
-    .update({ is_default: false });
+  await client
+    .from('locales')
+    .update({ is_default: false })
+    .eq('is_default', true)
+    .eq('is_published', false);
 
   // Set new default
-  const [data] = await db('locales')
-    .where('id', id)
-    .where('is_published', false)
+  const { data, error } = await client
+    .from('locales')
     .update({
       is_default: true,
       updated_at: new Date().toISOString(),
     })
-    .returning('*');
+    .eq('id', id)
+    .eq('is_published', false)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to set default locale: ${error.message}`);
+  }
 
   return data;
 }

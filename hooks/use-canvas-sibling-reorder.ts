@@ -523,11 +523,12 @@ export function useCanvasSiblingReorder({
     iframeDoc.addEventListener('mousedown', handleIframeMouseDown);
     // Listen to mousemove and mouseup on BOTH documents
     // (iframe events don't bubble to parent document)
-    // Use passive: true for mousemove to improve scroll performance
-    iframeDoc.addEventListener('mousemove', handleDocumentMouseMove, { passive: true });
+    // Not passive: handleDocumentMouseMove calls preventDefault() to cancel the
+    // native text selection when a drag-to-reorder starts.
+    iframeDoc.addEventListener('mousemove', handleDocumentMouseMove);
     iframeDoc.addEventListener('mouseup', handleDocumentMouseUp);
     iframeDoc.addEventListener('selectstart', handleSelectStart);
-    document.addEventListener('mousemove', handleDocumentMouseMove, { passive: true });
+    document.addEventListener('mousemove', handleDocumentMouseMove);
     document.addEventListener('mouseup', handleDocumentMouseUp);
 
     return () => {

@@ -1,9 +1,10 @@
 /**
- * Check for Webwow updates from the official repository.
+ * Check for Ycode updates from the official repository.
  * Extracted for reuse and to allow cloud overlay to return "no update" in hosted deployments.
  */
 
-const UPSTREAM_REPO = 'webwow/webwow'; // Official Webwow repo
+// Webwow: releases/updates come from the Webwow repository, not from ycode/ycode (override via WEBWOW_UPDATE_REPO).
+const UPSTREAM_REPO = process.env.WEBWOW_UPDATE_REPO || 'The-Wilhelm-Project/webwow';
 
 export interface CheckUpdatesResult {
   available: boolean;
@@ -41,7 +42,7 @@ function compareVersions(a: string, b: string): number {
 }
 
 /**
- * Check for updates from the official Webwow repository
+ * Check for updates from the official Ycode repository
  */
 export async function checkForUpdates(currentVersion: string): Promise<CheckUpdatesResult> {
   try {
@@ -50,7 +51,7 @@ export async function checkForUpdates(currentVersion: string): Promise<CheckUpda
       {
         headers: {
           'Accept': 'application/vnd.github.v3+json',
-          'User-Agent': 'Webwow-Update-Checker',
+          'User-Agent': 'Ycode-Update-Checker',
         },
         cache: 'no-store',
       }
@@ -71,15 +72,85 @@ export async function checkForUpdates(currentVersion: string): Promise<CheckUpda
       latestVersion !== currentVersion &&
       compareVersions(latestVersion, currentVersion) > 0;
 
-    const updateMethod: 'github-sync' | 'git-pull' | 'manual' = 'github-sync';
-    const autoSyncUrl = `https://github.com/${UPSTREAM_REPO}`;
-    const steps = [
-      'Go to your forked GitHub repository',
-      'Click the <span class="!font-semibold">"Sync fork"</span> button',
-      'Click <span class="!font-semibold">"Update branch"</span>',
-      'Your deployment will automatically redeploy with the latest changes',
-      'Please reload builder after deployment to apply the latest migrations',
-    ];
+    // Detect deployment environment
+    const isVercel = process.env.VERCEL === '1';
+    const vercelGitProvider = process.env.VERCEL_GIT_PROVIDER;
+    const vercelGitRepoOwner = process.env.VERCEL_GIT_REPO_OWNER;
+    const vercelGitRepoSlug = process.env.VERCEL_GIT_REPO_SLUG;
+
+    // Check if user's repo is a fork of the official repo
+    let isFork = false;
+    if (vercelGitProvider === 'github' && vercelGitRepoOwner && vercelGitRepoSlug) {
+      try {
+        const repoResponse = await fetch(
+          `https://api.github.com/repos/${vercelGitRepoOwner}/${vercelGitRepoSlug}`,
+          {
+            headers: {
+              'Accept': 'application/vnd.github.v3+json',
+              'User-Agent': 'Ycode-Update-Checker',
+            },
+            cache: 'no-store',
+          }
+        );
+
+        if (repoResponse.ok) {
+          const repoData = await repoResponse.json();
+          isFork =
+            repoData.fork && repoData.parent?.full_name === UPSTREAM_REPO;
+        }
+      } catch (error) {
+        console.error('Failed to check fork status:', error);
+      }
+    }
+
+    // Determine update method
+    let updateMethod: 'github-sync' | 'git-pull' | 'manual' = 'manual';
+    let autoSyncUrl: string | undefined;
+    let steps: string[] = [];
+
+    if (
+      isVercel &&
+      vercelGitProvider === 'github' &&
+      vercelGitRepoOwner &&
+      vercelGitRepoSlug
+    ) {
+      if (isFork) {
+        updateMethod = 'github-sync';
+        autoSyncUrl = `https://github.com/${vercelGitRepoOwner}/${vercelGitRepoSlug}`;
+        steps = [
+          `Go to <a href="https://github.com/${vercelGitRepoOwner}/${vercelGitRepoSlug}" target="_blank" class="underline font-semibold">your GitHub repository</a>`,
+          'Click the <strong class="text-white">"Sync fork"</strong> button (above the file list)',
+          'Click <strong class="text-white">"Update branch"</strong>',
+          'Vercel will automatically redeploy with the latest changes',
+          '⚠️ Please reload this page (Ycode builder) after deployment to apply the latest migrations',
+        ];
+      } else {
+        updateMethod = 'git-pull';
+        autoSyncUrl = `https://github.com/${vercelGitRepoOwner}/${vercelGitRepoSlug}`;
+        steps = [
+          '⚠️ <strong class="text-yellow-300">Your repo is not a fork.</strong> For easier one-click updates in the future, consider forking the official repo first.',
+          '',
+          '<strong class="text-white">To update now:</strong>',
+          'Open terminal in your project directory',
+          `Add upstream remote (first time only):<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git remote add upstream https://github.com/${UPSTREAM_REPO}.git</code>`,
+          `Fetch latest changes:<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git fetch upstream</code>`,
+          `Merge updates:<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git merge upstream/main</code>`,
+          `Push to your repo:<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git push origin main</code>`,
+          'Vercel will automatically redeploy',
+          '⚠️ Please reload this page (Ycode builder) after deployment to apply the latest migrations',
+        ];
+      }
+    } else {
+      updateMethod = 'github-sync';
+      autoSyncUrl = `https://github.com/${UPSTREAM_REPO}`;
+      steps = [
+        'Go to your forked GitHub repository',
+        'Click the <span class="!font-semibold">"Sync fork"</span> button',
+        'Click <span class="!font-semibold">"Update branch"</span>',
+        'Your deployment will automatically redeploy with the latest changes',
+        'Please reload builder after deployment to apply the latest migrations',
+      ];
+    }
 
     return {
       available: hasUpdate,

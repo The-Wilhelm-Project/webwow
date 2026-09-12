@@ -62,9 +62,35 @@ export async function up(knex: Knex): Promise<void> {
     WHERE session_id IS NOT NULL
   `);
 
+  // Enable Row Level Security
+  await knex.schema.raw('ALTER TABLE versions ENABLE ROW LEVEL SECURITY');
+
+  // RLS policies
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can view versions"
+      ON versions FOR SELECT
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can create versions"
+      ON versions FOR INSERT
+      WITH CHECK ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can update versions"
+      ON versions FOR UPDATE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
 }
 
 export async function down(knex: Knex): Promise<void> {
+  // Drop policies
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can view versions" ON versions');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can create versions" ON versions');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can update versions" ON versions');
+
   // Drop table
   await knex.schema.dropTableIfExists('versions');
 }

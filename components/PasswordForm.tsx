@@ -3,10 +3,23 @@
 import { useState, FormEvent } from 'react';
 
 /**
- * Password Form Component
+ * Password Form Component (fallback only)
  *
- * A client-side form for entering passwords to access protected pages.
- * Submits to /api/page-auth/verify and handles success/error states.
+ * Modern installs render the password gate as editable layers on the 401
+ * system page (a `form` layer with `settings.form.form_type === 'password_protected'`
+ * containing input/error-alert/submit-button — see `DEFAULT_ERROR_PAGES` in
+ * `lib/page-utils.ts`). LayerRendererPublic wires that form's submit handler
+ * to `/api/page-auth/verify` automatically.
+ *
+ * This standalone client component is kept as a safety net for two cases:
+ *  1. Existing 401 pages that pre-date the editable form (covered by the
+ *     `add_password_form_to_401_page` migration, but the fallback protects
+ *     unmigrated databases).
+ *  2. Customised 401 pages where the user explicitly removed the password form
+ *     layer (despite `restrictions: { copy: false, delete: false }`).
+ *
+ * `PageRenderer` only renders this component when the 401 page tree contains
+ * no password-protected form layer.
  */
 
 export interface PasswordFormProps {
@@ -72,14 +85,14 @@ export default function PasswordForm({ pageId, folderId, redirectUrl, isPublishe
   };
 
   return (
-    <form onSubmit={handleSubmit} className="webwow-password-form">
-      <div className="webwow-password-form-field">
+    <form onSubmit={handleSubmit} className="ycode-password-form">
+      <div className="ycode-password-form-field">
         <input
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="Enter password"
-          className="webwow-password-input"
+          className="ycode-password-input"
           disabled={isLoading}
           autoFocus
           required
@@ -87,7 +100,7 @@ export default function PasswordForm({ pageId, folderId, redirectUrl, isPublishe
       </div>
 
       {error && (
-        <div className={`webwow-password-error ${isRateLimited ? 'webwow-password-rate-limited' : ''}`}>
+        <div className={`ycode-password-error ${isRateLimited ? 'ycode-password-rate-limited' : ''}`}>
           {isRateLimited && (
             <svg
               width="16" height="16"
@@ -104,13 +117,13 @@ export default function PasswordForm({ pageId, folderId, redirectUrl, isPublishe
       <button
         type="submit"
         disabled={isLoading || !password}
-        className="webwow-password-submit"
+        className="ycode-password-submit"
       >
         {isLoading ? 'Verifying...' : 'Submit'}
       </button>
 
       <style jsx>{`
-        .webwow-password-form {
+        .ycode-password-form {
           display: flex;
           flex-direction: column;
           gap: 12px;
@@ -120,11 +133,11 @@ export default function PasswordForm({ pageId, folderId, redirectUrl, isPublishe
           padding: 0 16px 48px;
         }
 
-        .webwow-password-form-field {
+        .ycode-password-form-field {
           width: 100%;
         }
 
-        .webwow-password-input {
+        .ycode-password-input {
           width: 100%;
           padding: 10px 14px;
           font-size: 14px;
@@ -134,23 +147,23 @@ export default function PasswordForm({ pageId, folderId, redirectUrl, isPublishe
           transition: border-color 0.15s ease, box-shadow 0.15s ease;
         }
 
-        .webwow-password-input:focus {
+        .ycode-password-input:focus {
           border-color: #3b82f6;
           box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
         }
 
-        .webwow-password-input:disabled {
+        .ycode-password-input:disabled {
           background-color: #f3f4f6;
           cursor: not-allowed;
         }
 
-        .webwow-password-error {
+        .ycode-password-error {
           color: #dc2626;
           font-size: 13px;
           text-align: center;
         }
 
-        .webwow-password-rate-limited {
+        .ycode-password-rate-limited {
           display: flex;
           align-items: center;
           justify-content: center;
@@ -161,7 +174,7 @@ export default function PasswordForm({ pageId, folderId, redirectUrl, isPublishe
           font-weight: 500;
         }
 
-        .webwow-password-submit {
+        .ycode-password-submit {
           width: 100%;
           padding: 10px 16px;
           font-size: 14px;
@@ -174,11 +187,11 @@ export default function PasswordForm({ pageId, folderId, redirectUrl, isPublishe
           transition: background-color 0.15s ease;
         }
 
-        .webwow-password-submit:hover:not(:disabled) {
+        .ycode-password-submit:hover:not(:disabled) {
           background-color: #2563eb;
         }
 
-        .webwow-password-submit:disabled {
+        .ycode-password-submit:disabled {
           background-color: #9ca3af;
           cursor: not-allowed;
         }

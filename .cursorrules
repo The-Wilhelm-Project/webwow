@@ -1,8 +1,8 @@
-# Webwow Cursor AI Rules
+# YCode Cursor AI Rules
 
 ## 🎯 Project Context
 
-**Webwow** is a self-hosted visual website builder built with Next.js 15, TypeScript, Tailwind CSS, and Supabase. This is a **fast-moving team project** where multiple developers use Cursor simultaneously. Code consistency and abstraction are critical.
+**YCode** is a self-hosted visual website builder built with Next.js 15, TypeScript, Tailwind CSS, and Supabase. This is a **fast-moving team project** where multiple developers use Cursor simultaneously. Code consistency and abstraction are critical.
 
 ---
 
@@ -334,7 +334,7 @@ export default async function Page({ params }: { params: { slug: string } }) {
 }
 
 // ✅ Client Component (with directive)
-// app/webwow/components/LayersTree.tsx
+// app/ycode/components/LayersTree.tsx
 'use client';
 
 import { useState } from 'react';
@@ -1143,7 +1143,7 @@ npm run type-check  # Verify TypeScript
 
 ```typescript
 // ✅ CORRECT formatting
-const config = { name: 'Webwow', version: '1.0' };
+const config = { name: 'YCode', version: '1.0' };
 
 <Button
   variant="primary"
@@ -1152,7 +1152,7 @@ const config = { name: 'Webwow', version: '1.0' };
 />
 
 // ❌ WRONG formatting
-const config={name:'Webwow',version:'1.0'};
+const config={name:'YCode',version:'1.0'};
 
 <Button variant="primary" size="lg" onClick={handleClick}/>
 ```

@@ -421,7 +421,22 @@ export function useDesignSync({
       // Also capture Tailwind opacity modifier (e.g., text-[#0073ff]/23 → #0073ff/23)
       const arbitraryMatch = inheritedClass.match(/\[([^\]]+)\](?:\/(\d+))?/);
       if (arbitraryMatch) {
-        return arbitraryMatch[2] ? `${arbitraryMatch[1]}/${arbitraryMatch[2]}` : arbitraryMatch[1];
+        let extractedValue = arbitraryMatch[2] ? `${arbitraryMatch[1]}/${arbitraryMatch[2]}` : arbitraryMatch[1];
+        // Strip default units for transform properties so inputs show raw numbers
+        if (['rotate', 'skewX', 'skewY'].includes(property) && extractedValue.endsWith('deg')) {
+          extractedValue = extractedValue.slice(0, -3);
+        }
+        if (['translateX', 'translateY'].includes(property) && extractedValue.endsWith('px')) {
+          extractedValue = extractedValue.slice(0, -2);
+        }
+        if (['duration', 'delay'].includes(property)) {
+          if (extractedValue.endsWith('ms')) {
+            extractedValue = extractedValue.slice(0, -2);
+          } else if (extractedValue.endsWith('s')) {
+            extractedValue = String(parseFloat(extractedValue) * 1000);
+          }
+        }
+        return extractedValue;
       }
 
       // CSS variable reference for background-image
@@ -586,14 +601,34 @@ function mapClassToDesignValue(className: string, property: string): string | un
 
   // Special cases for properties where classes don't have dashes or are complete values
   const noSplitProperties = [
-    'position',        // static, absolute, relative, fixed, sticky
-    'display',         // block, inline, flex, grid, hidden (some have dashes like inline-block)
-    'textTransform',   // uppercase, lowercase, capitalize, normal-case
-    'textDecoration',  // underline, overline, line-through, no-underline
+    'position',            // static, absolute, relative, fixed, sticky
+    'display',             // block, inline, flex, grid, hidden (some have dashes like inline-block)
+    'textTransform',       // uppercase, lowercase, capitalize, normal-case
+    'textDecoration',      // underline, overline, line-through, no-underline
   ];
 
   if (noSplitProperties.includes(property)) {
     return cleanClass;
+  }
+
+  // Full-class mappings for properties where the entire class maps to a value
+  const fullClassMappings: Record<string, Record<string, string>> = {
+    transitionProperty: {
+      'transition': 'default',
+      'transition-all': 'all',
+      'transition-colors': 'colors',
+      'transition-opacity': 'opacity',
+      'transition-shadow': 'shadow',
+      'transition-transform': 'transform',
+      'transition-none': 'none',
+    },
+    overflow: {
+      'truncate': 'ellipsis',
+    },
+  };
+
+  if (fullClassMappings[property]?.[cleanClass]) {
+    return fullClassMappings[property][cleanClass];
   }
 
   // Multi-segment prefix properties need special handling.
@@ -605,6 +640,14 @@ function mapClassToDesignValue(className: string, property: string): string | un
     minHeight: 'min-h-',
     gridColumnSpan: 'col-span-',
     gridRowSpan: 'row-span-',
+    lineClamp: 'line-clamp-',
+    textShadow: 'text-shadow-',
+    translateX: 'translate-x-',
+    translateY: 'translate-y-',
+    skewX: 'skew-x-',
+    skewY: 'skew-y-',
+    transformOrigin: 'origin-',
+    backdropBlur: 'backdrop-blur-',
   };
 
   const knownPrefix = multiSegmentPrefixes[property];
@@ -660,6 +703,12 @@ function mapClassToDesignValue(className: string, property: string): string | un
       'wrap': 'wrap',
       'wrap-reverse': 'wrap-reverse',
       'nowrap': 'nowrap',
+    },
+    easing: {
+      'linear': 'linear',
+      'in': 'in',
+      'out': 'out',
+      'in-out': 'in-out',
     },
   };
 

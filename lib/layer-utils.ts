@@ -4,21 +4,62 @@
 
 import { Layer, FieldVariable, CollectionVariable, CollectionItemWithValues, CollectionField, Component, ComponentVariable, Breakpoint, LayerVariables, DesignColorVariable, BoundColorStop } from '@/types';
 import { generateId } from '@/lib/utils';
-import { iconExists, IconProps } from '@/components/ui/icon';
-import { getBlockIcon, getBlockName } from '@/lib/templates/blocks';
-import { isSliderLayerName } from '@/lib/templates/utilities';
 import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
 import { DEFAULT_TEXT_STYLES } from '@/lib/text-format-utils';
 import { getCmsFieldBinding } from '@/lib/tiptap-utils';
 import { applyComponentOverrides } from '@/lib/resolve-components';
+import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
-import { parseMultiReferenceValue } from '@/lib/collection-utils';
+import { compareDateFilter, isDateFieldType, isDatePreset, parseItemIdList, resolveDateFilterValue } from '@/lib/collection-field-utils';
+import { parseMultiReferenceValue, normalizeBooleanValue } from '@/lib/collection-utils';
 import { getInheritedValue } from '@/lib/tailwind-class-mapper';
-import { cloneDeep } from 'lodash';
+import cloneDeep from 'lodash/cloneDeep';
 import { layerHasLink, hasLinkInTree, hasRichTextLinks } from '@/lib/link-utils';
+import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 
 // Alias for backwards compatibility within this file
 const hasLinkSettings = layerHasLink;
+
+/**
+ * Parse an inline CSS style string into a React style object.
+ * Splits on the first colon per rule so values containing colons (e.g. urls) survive.
+ * CSS custom properties (--var) are preserved verbatim; other props are camelCased.
+ */
+export function parseStyleStringToObject(style: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const rule of style.split(';')) {
+    const trimmed = rule.trim();
+    if (!trimmed) continue;
+    const colonIndex = trimmed.indexOf(':');
+    if (colonIndex === -1) continue;
+    const prop = trimmed.slice(0, colonIndex).trim();
+    const value = trimmed.slice(colonIndex + 1).trim();
+    if (!prop || !value) continue;
+    const key = prop.startsWith('--') ? prop : prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * Apply user-defined custom attributes onto a React props object, mapping HTML
+ * attribute names to their JSX equivalents. A string `style` attribute is parsed
+ * into an object and merged with any existing style (React rejects style strings).
+ */
+export function applyCustomAttributes(
+  target: Record<string, unknown>,
+  customAttributes: Record<string, string>,
+): void {
+  for (const [name, value] of Object.entries(customAttributes)) {
+    const jsxName = HTML_TO_REACT_ATTRS[name.toLowerCase()] || name;
+    if (jsxName === 'style' && typeof value === 'string') {
+      const existing = (typeof target.style === 'object' && target.style ? target.style : {}) as Record<string, string>;
+      target.style = { ...existing, ...parseStyleStringToObject(value) };
+      continue;
+    }
+    target[jsxName] = value;
+  }
+}
 
 // ─── Cached Layer Index ───
 
@@ -120,6 +161,24 @@ export function canCopyLayer(layer: Layer): boolean {
  */
 export function canDeleteLayer(layer: Layer): boolean {
   return layer.restrictions?.delete !== false;
+}
+
+/**
+ * Recursively check if a layer tree contains a password-protected form layer.
+ * Used by PageRenderer to decide whether to inject the hardcoded PasswordForm
+ * fallback when the 401 page has been customised without a password form.
+ */
+export function hasPasswordFormLayer(layers: Layer[] | undefined | null): boolean {
+  if (!layers || layers.length === 0) return false;
+  for (const layer of layers) {
+    if (layer.name === 'form' && layer.settings?.form?.form_type === 'password_protected') {
+      return true;
+    }
+    if (layer.children && hasPasswordFormLayer(layer.children)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -293,7 +352,8 @@ export function canConvertToCollection(layer: Layer): boolean {
 const FILTER_INPUT_TYPES = ['input', 'select', 'textarea', 'checkbox', 'radio'];
 
 /**
- * Check if a layer is an input-type element that is a descendant of a 'filter' layer.
+ * Check if a layer is an input-type element (or a parent/sibling of one)
+ * that is a descendant of a 'filter' layer.
  * Used to validate element picker targets for collection filter linking.
  */
 export function isInputInsideFilter(layerId: string, layers: Layer[]): boolean {
@@ -303,8 +363,15 @@ export function isInputInsideFilter(layerId: string, layers: Layer[]): boolean {
   ): boolean => {
     for (const layer of searchLayers) {
       if (layer.id === layerId) {
-        if (!FILTER_INPUT_TYPES.includes(layer.name)) return false;
-        return ancestors.some(a => a.name === 'filter');
+        if (FILTER_INPUT_TYPES.includes(layer.name)) {
+          return ancestors.some(a => a.name === 'filter');
+        }
+        if (ancestors.some(a => a.name === 'filter')) {
+          if (layer.children?.some(c => FILTER_INPUT_TYPES.includes(c.name))) return true;
+          const parent = ancestors[ancestors.length - 1];
+          if (parent?.children?.some(c => FILTER_INPUT_TYPES.includes(c.name))) return true;
+        }
+        return false;
       }
       if (layer.children) {
         if (findWithAncestors(layer.children, [...ancestors, layer])) {
@@ -315,6 +382,37 @@ export function isInputInsideFilter(layerId: string, layers: Layer[]): boolean {
     return false;
   };
   return findWithAncestors(layers, []);
+}
+
+/**
+ * Resolve a clicked layer ID to the actual input layer ID for filter linking.
+ * If the clicked layer is already an input, returns its ID.
+ * If it's a wrapper/label, finds the associated input child or sibling.
+ */
+export function resolveFilterInputId(layerId: string, layers: Layer[]): string {
+  const layer = findLayerById(layers, layerId);
+  if (!layer) return layerId;
+  if (FILTER_INPUT_TYPES.includes(layer.name)) return layerId;
+
+  if (layer.children) {
+    const inputChild = layer.children.find(c => FILTER_INPUT_TYPES.includes(c.name));
+    if (inputChild) return inputChild.id;
+  }
+
+  const findParent = (searchLayers: Layer[]): Layer | null => {
+    for (const l of searchLayers) {
+      if (l.children?.some(c => c.id === layerId)) return l;
+      if (l.children) { const found = findParent(l.children); if (found) return found; }
+    }
+    return null;
+  };
+  const parent = findParent(layers);
+  if (parent?.children) {
+    const siblingInput = parent.children.find(c => FILTER_INPUT_TYPES.includes(c.name));
+    if (siblingInput) return siblingInput.id;
+  }
+
+  return layerId;
 }
 
 /**
@@ -363,6 +461,38 @@ export function findLayerById(layers: Layer[], id: string): Layer | null {
 export function containsLayerId(layer: Layer, targetId: string): boolean {
   if (layer.id === targetId) return true;
   return layer.children?.some(child => containsLayerId(child, targetId)) ?? false;
+}
+
+/** Collect every layer id in a tree into a Set (used to diff trees). */
+export function collectLayerIdSet(layers: Layer[], set: Set<string> = new Set()): Set<string> {
+  for (const layer of layers) {
+    set.add(layer.id);
+    if (layer.children) collectLayerIdSet(layer.children, set);
+  }
+  return set;
+}
+
+/**
+ * Find every newly-added layer between two versions of a tree, in document
+ * (pre-order) order — parents before children, top to bottom.
+ *
+ * Returns all ids present in `newLayers` but not `oldLayers`. The document order
+ * lets the canvas reveal a freshly-built section step by step (container first,
+ * then its contents) so it reads as if the page is being assembled live.
+ */
+export function findAddedLayerIds(oldLayers: Layer[], newLayers: Layer[]): string[] {
+  const oldIds = collectLayerIdSet(oldLayers);
+  const added: string[] = [];
+
+  const walk = (siblings: Layer[]) => {
+    for (const layer of siblings) {
+      if (!oldIds.has(layer.id)) added.push(layer.id);
+      if (layer.children) walk(layer.children);
+    }
+  };
+
+  walk(newLayers);
+  return added;
 }
 
 /**
@@ -535,6 +665,54 @@ export function isTextContentLayer(layer: Layer | null | undefined): boolean {
   return layer.name === 'heading' || layer.name === 'text';
 }
 
+/** Auto-assigned layer labels that should track the text/heading element type. */
+const AUTO_TEXT_HEADING_LABELS = new Set(['Text', 'Heading']);
+
+/**
+ * Build the props to convert a text layer into a heading (or the reverse).
+ * Switches the element `name` and its default HTML tag while preserving
+ * content, classes, and design.
+ *
+ * Only genuine block-level text and headings qualify: inline text used as
+ * button captions, alert messages, or labels (tag `span`/`label`) is excluded
+ * so conversion never emits an `<h2>` inside a `<button>` or `<p>`.
+ *
+ * An auto-assigned "Text"/"Heading" label is dropped so the layer shows its
+ * text content in the Layers panel; a user's custom layer name is preserved.
+ */
+export function getTextHeadingConversion(
+  layer: Layer | null | undefined
+): Pick<Layer, 'name' | 'settings' | 'customName'> | null {
+  if (!layer) return null;
+
+  // Drop an auto-assigned "Text"/"Heading" label so the converted layer shows
+  // its content again; keep a user-defined custom name.
+  const clearLabel = !!layer.customName && AUTO_TEXT_HEADING_LABELS.has(layer.customName);
+
+  // Heading (incl. legacy text with an h1-h6 tag) → paragraph text.
+  if (isHeadingLayer(layer)) {
+    return {
+      name: 'text',
+      settings: { ...layer.settings, tag: 'p' },
+      ...(clearLabel ? { customName: undefined } : {}),
+    };
+  }
+
+  // Block-level paragraph text → heading (skip inline span/label variants).
+  if (layer.name === 'text') {
+    const tag = layer.settings?.tag;
+    if (!tag || tag === 'p') {
+      return {
+        name: 'heading',
+        settings: { ...layer.settings, tag: 'h2' },
+        ...(clearLabel ? { customName: undefined } : {}),
+      };
+    }
+  }
+
+  return null;
+}
+
 /**
  * Check if a layer is a rich text element (block-level text with full formatting).
  */
@@ -566,6 +744,7 @@ const SUBLAYER_ICON_MAP: Record<string, string> = {
   richTextComponent: 'component',
   richTextImage: 'image',
   horizontalRule: 'separator',
+  table: 'table',
 };
 
 /**
@@ -581,6 +760,7 @@ export function contentBlockToStyleKey(block: { type: string; attrs?: Record<str
     case 'blockquote': return 'blockquote';
     case 'richTextImage': return 'richTextImage';
     case 'horizontalRule': return 'horizontalRule';
+    case 'table': return 'table';
     default: return null;
   }
 }
@@ -652,18 +832,14 @@ export function getRichTextSublayers(layer: Layer, cmsContent?: any): RichTextSu
   const layerDoc = (textVar.data as any)?.content;
   if (!layerDoc?.content || !Array.isArray(layerDoc.content)) return [];
 
-  // When content is bound to a CMS field, use the resolved CMS content for sublayers
+  // CMS-bound: show all possible element types since content is dynamic
   const binding = getCmsFieldBinding(layerDoc);
   if (binding) {
-    let resolvedDoc = cmsContent;
-    if (typeof resolvedDoc === 'string') {
-      try { resolvedDoc = JSON.parse(resolvedDoc); } catch { resolvedDoc = null; }
-    }
-    if (!resolvedDoc?.content || !Array.isArray(resolvedDoc.content)) return [];
-    return buildSublayersFromDoc(resolvedDoc, layer);
+    return buildAllStyleSublayers(layer);
   }
 
-  return buildSublayersFromDoc(layerDoc, layer);
+  // Non-CMS: show unique element types only (styling one applies to all of same type)
+  return buildUniqueStyleSublayersFromDoc(layerDoc, layer);
 }
 
 /** Build sublayer metadata from a Tiptap document's content blocks. */
@@ -685,6 +861,7 @@ function buildSublayersFromDoc(doc: any, layer: Layer): RichTextSublayer[] {
         richTextImage: 'Image',
         codeBlock: 'Code Block',
         horizontalRule: 'Separator',
+        table: 'Table',
       };
 
       const textContent = extractBlockText(block).trim();
@@ -693,6 +870,34 @@ function buildSublayersFromDoc(doc: any, layer: Layer): RichTextSublayer[] {
         : (SUBLAYER_FALLBACK_MAP[type] || type);
 
       const children: RichTextSublayer[] = [];
+
+      if (type === 'table') {
+        const tableContent = Array.isArray(block.content) ? block.content : [];
+        tableContent.forEach((row: any, rowIdx: number) => {
+          if (row.type !== 'tableRow') return;
+          const rowCells: RichTextSublayer[] = [];
+          const rowCellsRaw = Array.isArray(row.content) ? row.content : [];
+          rowCellsRaw.forEach((cell: any, cellIdx: number) => {
+            if (cell.type !== 'tableCell' && cell.type !== 'tableHeader') return;
+            const isHeader = cell.type === 'tableHeader';
+            rowCells.push({
+              type: cell.type,
+              label: isHeader ? `Header ${cellIdx + 1}` : `Cell ${cellIdx + 1}`,
+              icon: 'table-cell',
+              kind: 'style' as const,
+              styleKey: isHeader ? 'tableHeader' : 'tableCell',
+            });
+          });
+          children.push({
+            type: 'tableRow',
+            label: `Row ${rowIdx + 1}`,
+            icon: 'table-row',
+            kind: 'style' as const,
+            styleKey: 'tableRow',
+            children: rowCells.length > 0 ? rowCells : undefined,
+          });
+        });
+      }
 
       const isList = type === 'bulletList' || type === 'orderedList';
       if (isList && block.content && Array.isArray(block.content)) {
@@ -728,14 +933,131 @@ function buildSublayersFromDoc(doc: any, layer: Layer): RichTextSublayer[] {
           });
         });
 
+      const isTable = type === 'table';
       return {
         type, kind: 'content' as const, icon,
-        label: isList ? (SUBLAYER_FALLBACK_MAP[type] || type) : label,
+        label: (isList || isTable) ? (SUBLAYER_FALLBACK_MAP[type] || type) : label,
         styleKey: contentBlockToStyleKey(block) ?? undefined,
         children: children.length > 0 ? children : undefined,
       };
     });
 }
+
+/**
+ * Build a flat list of unique element types found in a Tiptap doc.
+ * Used for non-CMS-bound rich text where styling one element styles all of the same type.
+ */
+function buildUniqueStyleSublayersFromDoc(doc: any, layer: Layer): RichTextSublayer[] {
+  const seenStyleKeys = new Set<string>();
+  const sublayers: RichTextSublayer[] = [];
+
+  const allStyles = { ...DEFAULT_TEXT_STYLES, ...layer.textStyles };
+
+  function collectBlockTypes(blocks: any[]) {
+    for (const block of blocks) {
+      const styleKey = contentBlockToStyleKey(block);
+      if (styleKey && !seenStyleKeys.has(styleKey)) {
+        seenStyleKeys.add(styleKey);
+        sublayers.push({
+          type: block.type,
+          label: allStyles[styleKey]?.label || styleKey,
+          icon: STYLE_SUBLAYER_ICON_MAP[styleKey] || SUBLAYER_ICON_MAP[block.type] || 'box',
+          kind: 'style' as const,
+          styleKey,
+        });
+      }
+
+      // For lists, add listItem as a unique style target
+      const isList = block.type === 'bulletList' || block.type === 'orderedList';
+      if (isList && !seenStyleKeys.has('listItem') && block.content?.some((c: any) => c.type === 'listItem')) {
+        seenStyleKeys.add('listItem');
+        sublayers.push({
+          type: 'listItem',
+          label: allStyles.listItem?.label || 'List Item',
+          icon: STYLE_SUBLAYER_ICON_MAP.listItem || 'text',
+          kind: 'style' as const,
+          styleKey: 'listItem',
+        });
+      }
+
+      // For tables, add tableRow / tableHeader / tableCell as unique style targets
+      if (block.type === 'table' && Array.isArray(block.content)) {
+        for (const row of block.content) {
+          if (row.type !== 'tableRow') continue;
+          if (!seenStyleKeys.has('tableRow')) {
+            seenStyleKeys.add('tableRow');
+            sublayers.push({
+              type: 'tableRow',
+              label: allStyles.tableRow?.label || 'Table Row',
+              icon: 'table-row',
+              kind: 'style' as const,
+              styleKey: 'tableRow',
+            });
+          }
+          if (!Array.isArray(row.content)) continue;
+          for (const cell of row.content) {
+            const cellKey = cell.type === 'tableHeader' ? 'tableHeader' : 'tableCell';
+            if (!seenStyleKeys.has(cellKey)) {
+              seenStyleKeys.add(cellKey);
+              sublayers.push({
+                type: cell.type,
+                label: allStyles[cellKey]?.label || cellKey,
+                icon: 'table-cell',
+                kind: 'style' as const,
+                styleKey: cellKey,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  collectBlockTypes(doc.content.filter((b: any) => b.type !== 'paragraph' || b.content?.length));
+
+  // Collect unique inline marks across all blocks
+  const allMarks = extractInlineMarks(doc);
+  INLINE_STYLE_KEYS
+    .filter(k => allMarks.includes(k))
+    .forEach(markType => {
+      sublayers.push({
+        type: markType,
+        label: allStyles[markType]?.label || markType,
+        icon: STYLE_SUBLAYER_ICON_MAP[markType] || 'type',
+        kind: 'style' as const,
+        styleKey: markType,
+      });
+    });
+
+  return sublayers.sort((a, b) => {
+    const ia = SUBLAYER_SORT_ORDER.indexOf(a.styleKey!);
+    const ib = SUBLAYER_SORT_ORDER.indexOf(b.styleKey!);
+    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+  });
+}
+
+/** Build the full list of stylable element types for CMS-bound rich text. */
+function buildAllStyleSublayers(layer: Layer): RichTextSublayer[] {
+  const allStyles = { ...DEFAULT_TEXT_STYLES, ...layer.textStyles };
+
+  return SUBLAYER_SORT_ORDER.map(styleKey => ({
+    type: styleKey,
+    label: allStyles[styleKey]?.label || styleKey,
+    icon: STYLE_SUBLAYER_ICON_MAP[styleKey] || SUBLAYER_ICON_MAP[styleKey] || 'box',
+    kind: 'style' as const,
+    styleKey,
+  }));
+}
+
+const SUBLAYER_SORT_ORDER = [
+  'paragraph', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'link',
+  'bold', 'italic', 'underline', 'strike', 'superscript', 'subscript',
+  'bulletList', 'orderedList', 'listItem',
+  'blockquote',
+  'table', 'tableRow', 'tableHeader', 'tableCell',
+  'richTextImage', 'horizontalRule',
+];
 
 const STYLE_SUBLAYER_ICON_MAP: Record<string, string> = {
   paragraph: 'paragraph',
@@ -749,6 +1071,8 @@ const STYLE_SUBLAYER_ICON_MAP: Record<string, string> = {
   italic: 'italic',
   underline: 'underline',
   strike: 'strikethrough',
+  superscript: 'superscript',
+  subscript: 'subscript',
   link: 'link',
   bulletList: 'listUnordered',
   orderedList: 'listOrdered',
@@ -756,10 +1080,14 @@ const STYLE_SUBLAYER_ICON_MAP: Record<string, string> = {
   blockquote: 'quote',
   richTextImage: 'image',
   horizontalRule: 'separator',
+  table: 'table',
+  tableHeader: 'table-cell',
+  tableCell: 'table-cell',
+  tableRow: 'table-row',
 };
 
 /** Inline mark style keys shown for all text layers */
-const INLINE_STYLE_KEYS = ['bold', 'italic', 'underline', 'strike', 'link'];
+const INLINE_STYLE_KEYS = ['bold', 'italic', 'underline', 'strike', 'superscript', 'subscript', 'link'];
 
 /**
  * Get text style sublayers for a layer.
@@ -887,6 +1215,20 @@ export function getText(layer: Layer): string | undefined {
 }
 
 /**
+ * Best-effort label for a layer used in builder error messages emitted from
+ * this template-free module. The full pretty-name resolution lives in
+ * `lib/layer-display-utils.ts`; consumers that want it can call
+ * `getLayerName()` directly with the layer info.
+ */
+function layerLabelFallback(layer: Layer): string {
+  if (layer.id === 'body') return 'Body';
+  return layer.customName || layer.name;
+}
+
+/** Layer types rendered as iframes, where a wrapping link can't receive clicks. */
+export const LINK_UNSUPPORTED_LAYER_NAMES = new Set(['htmlEmbed', 'map']);
+
+/**
  * Check if a layer can have a link added
  * @param layer - The layer to check
  * @param allLayers - All layers in the current context (page or component)
@@ -897,8 +1239,18 @@ export function canLayerHaveLink(
   layer: Layer,
   allLayers: Layer[],
   type: 'layer' | 'richText' = 'layer'
-): { canHaveLinks: boolean; issue?: { type: 'self' | 'ancestor' | 'child' | 'richText'; layerName?: string } } {
+): { canHaveLinks: boolean; issue?: { type: 'self' | 'ancestor' | 'child' | 'richText' | 'unsupported'; layerName?: string } } {
   if (type === 'layer') {
+    // Iframe-based layers (Code embed, Map) capture pointer events, so a
+    // wrapping <a> never receives the click — a layer-level link would
+    // silently do nothing. Block it rather than offer a broken affordance.
+    if (LINK_UNSUPPORTED_LAYER_NAMES.has(layer.name)) {
+      return {
+        canHaveLinks: false,
+        issue: { type: 'unsupported' }
+      };
+    }
+
     // Checking if a layer-level link can be added
     // Can't add layer link if the layer has rich text links
     if (hasRichTextLinks(layer)) {
@@ -918,7 +1270,7 @@ export function canLayerHaveLink(
     if (hasAncestorWithLink) {
       return {
         canHaveLinks: false,
-        issue: { type: 'ancestor', layerName: getLayerName(hasAncestorWithLink) }
+        issue: { type: 'ancestor', layerName: layerLabelFallback(hasAncestorWithLink) }
       };
     }
 
@@ -941,7 +1293,7 @@ export function canLayerHaveLink(
   if (hasLinkSettings(layer)) {
     return {
       canHaveLinks: false,
-      issue: { type: 'self', layerName: getLayerName(layer) }
+      issue: { type: 'self', layerName: layerLabelFallback(layer) }
     };
   }
 
@@ -955,7 +1307,7 @@ export function canLayerHaveLink(
   if (hasAncestorWithLink) {
     return {
       canHaveLinks: false,
-      issue: { type: 'ancestor', layerName: getLayerName(hasAncestorWithLink) }
+      issue: { type: 'ancestor', layerName: layerLabelFallback(hasAncestorWithLink) }
     };
   }
 
@@ -992,6 +1344,31 @@ export function canAddChild(parent: Layer, child: Layer): boolean {
   return true;
 }
 
+export const LINK_NESTING_ERROR = {
+  title: 'Links cannot be nested',
+  description: 'The pasted layer contains a link and cannot be placed inside a link.',
+} as const;
+
+/**
+ * Check if a layer can be pasted as a child of a target parent,
+ * considering both the direct parent and ancestor link nesting.
+ */
+export function canPasteIntoParent(layers: Layer[], parentId: string, childToPaste: Layer): boolean {
+  const parent = findLayerById(layers, parentId);
+  if (!parent) return true;
+
+  if (!canAddChild(parent, childToPaste)) {
+    return false;
+  }
+
+  const hasLinkAncestor = findAncestor(layers, parentId, (ancestor) => layerHasLink(ancestor));
+  if (hasLinkAncestor && hasLinkInTree(childToPaste)) {
+    return false;
+  }
+
+  return true;
+}
+
 /**
  * Check if a layer can have children based on its name/type
  */
@@ -1006,7 +1383,7 @@ export function canHaveChildren(layer: Layer, childLayerType?: string): boolean 
     'icon', 'image', 'audio', 'video', 'iframe',
     'heading', 'text', 'richText', 'span', 'label', 'hr',
     'input', 'textarea', 'select', 'checkbox', 'radio',
-    'htmlEmbed',
+    'htmlEmbed', 'map',
   ];
 
   // Sections cannot contain other sections
@@ -1184,7 +1561,8 @@ export function resolveFieldValue(
   fieldVariable: FieldVariable,
   collectionItemData?: Record<string, string>,
   pageCollectionItemData?: Record<string, string> | null,
-  layerDataMap?: Record<string, Record<string, string>>
+  layerDataMap?: Record<string, Record<string, string>>,
+  globalsData?: Record<string, string>
 ): string | undefined {
   const { field_id, source, collection_layer_id, relationships = [] } = fieldVariable.data;
   if (!field_id) {
@@ -1203,7 +1581,8 @@ export function resolveFieldValue(
     collectionItemData,
     pageCollectionItemData,
     collection_layer_id,
-    layerDataMap
+    layerDataMap,
+    globalsData
   );
 }
 
@@ -1220,7 +1599,7 @@ export function getTextWithBinding(
   const textVariable = layer.variables?.text;
   if (textVariable && textVariable.type === 'dynamic_text') {
     const content = textVariable.data.content;
-    if (content.includes('<webwow-inline-variable>')) {
+    if (content.includes('<ycode-inline-variable>')) {
       // Resolve inline variables with timezone-aware date formatting
       return resolveInlineVariablesFromData(content, collectionItemData, null, timezone);
     }
@@ -1368,170 +1747,96 @@ export function getLayoutTypeName(layoutType: LayoutType): string | null {
   }
 }
 
-// Layout custom names that should use breakpoint-aware icons/names
-const LAYOUT_CUSTOM_NAMES = ['Columns', 'Rows', 'Grid'];
-
-/**
- * Get the icon name (for `components/ui/Icon.tsx`) for a layer
- *
- * @param layer - The layer to get the icon for
- * @param defaultIcon - Fallback icon (default: 'box')
- * @param breakpoint - Optional breakpoint for layout-aware icons
- */
-export function getLayerIcon(
-  layer: Layer,
-  defaultIcon: IconProps['name'] = 'box',
-  breakpoint?: Breakpoint
-): IconProps['name'] {
-  // Body layers
-  if (layer.id === 'body') return 'layout';
-
-  // Component layers
-  if (layer.componentId) return 'component';
-
-  // Collection layers (skip when optionsSource manages the binding, e.g. checkbox groups)
-  if (getCollectionVariable(layer) && !layer.settings?.optionsSource) {
-    return 'database';
-  }
-
-  // Heading layers
-  if (layer.name === 'heading') return 'heading';
-
-  // Rich text layers
-  if (layer.name === 'richText') return 'rich-text';
-
-  // Text layers (backward compat: text with h1-h6 tag still shows heading icon)
-  if (layer.name === 'text') {
-    return ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(layer.settings?.tag || '') ? 'heading' : 'text';
-  }
-
-  // Layout layers (Columns, Rows, Grid) - breakpoint-aware icons
-  if (layer.customName && LAYOUT_CUSTOM_NAMES.includes(layer.customName)) {
-    if (breakpoint) {
-      const layoutType = getLayoutTypeForBreakpoint(layer, breakpoint);
-      if (layoutType === 'columns') return 'columns';
-      if (layoutType === 'rows') return 'rows';
-      if (layoutType === 'grid') return 'grid';
-      if (layoutType === 'hidden') return 'eye-off';
-    }
-    // Fallback to custom name when no breakpoint
-    if (layer.customName === 'Columns') return 'columns';
-    if (layer.customName === 'Rows') return 'rows';
-    if (layer.customName === 'Grid') return 'grid';
-  }
-
-  // Other named layers
-  if (layer.customName === 'Container') return 'container';
-
-  // Checkbox wrapper div (contains a checkbox input child)
-  if (layer.name === 'div' && layer.children?.some(c => c.name === 'input' && c.attributes?.type === 'checkbox')) {
-    return 'checkbox';
-  }
-
-  // Radio wrapper div (contains a radio input child)
-  if (layer.name === 'div' && layer.children?.some(c => c.name === 'input' && c.attributes?.type === 'radio')) {
-    return 'radio';
-  }
-
-  // Fallback to block icon (based on name)
-  return getBlockIcon(layer.name, defaultIcon);
-}
-
-/**
- * Get the label for a layer (for display in the UI)
- *
- * @param layer - The layer to get the name for
- * @param context - Optional context (component_name, collection_name, source_field_name)
- * @param breakpoint - Optional breakpoint for layout-aware names
- */
-export function getLayerName(
-  layer: Layer,
-  context?: {
-    component_name?: string | undefined | null;
-    collection_name?: string | undefined | null;
-    /** When collection is bound to a field (reference/multi-reference/multi-asset), the field name */
-    source_field_name?: string | undefined | null;
-  },
-  breakpoint?: Breakpoint
-): string {
-  // Special case for Body layer
-  if (layer.id === 'body') {
-    return 'Body';
-  }
-
-  // Use component name if this is a component instance
-  if (layer.componentId) {
-    return context?.component_name || 'Component';
-  }
-
-  // Use field name or collection name in parentheses after "Collection" (skip when optionsSource manages the binding)
-  if (getCollectionVariable(layer) && !layer.settings?.optionsSource) {
-    const label = context?.source_field_name ?? context?.collection_name;
-    return label ? `Collection (${label})` : 'Collection';
-  }
-
-  // Layout layers (Columns, Rows, Grid) - breakpoint-aware names
-  if (breakpoint && layer.customName && LAYOUT_CUSTOM_NAMES.includes(layer.customName)) {
-    const layoutType = getLayoutTypeForBreakpoint(layer, breakpoint);
-    const layoutName = getLayoutTypeName(layoutType);
-    if (layoutName) {
-      return layoutName;
-    }
-  }
-
-  // Use custom name if available
-  if (layer.customName) {
-    return layer.customName;
-  }
-
-  // Checkbox wrapper div (contains a checkbox input child)
-  if (layer.name === 'div' && layer.children?.some(c => c.name === 'input' && c.attributes?.type === 'checkbox')) {
-    return 'Checkbox';
-  }
-
-  // Radio wrapper div (contains a radio input child)
-  if (layer.name === 'div' && layer.children?.some(c => c.name === 'input' && c.attributes?.type === 'radio')) {
-    return 'Radio';
-  }
-
-  return getBlockName(layer.name) || 'Layer';
-}
+// `getLayerIcon` / `getLayerName` were moved to `lib/layer-display-utils.ts`
+// to keep this module free of `lib/templates/*` imports — those drag the
+// entire ~1.5 MB template tree into any bundle that touches `layer-utils`,
+// including the public-site renderer.
 
 /**
  * Get the HTML tag name for a layer
  */
-export function getLayerHtmlTag(layer: Layer): string {
-  // Body layer should render as div (actual <body> is managed by Next.js)
+const LAYER_NAME_TO_HTML_TAG: Record<string, string> = {
+  // Content
+  text: 'p',
+  heading: 'h2',
+  richText: 'div',
+  span: 'span',
+  label: 'label',
+
+  // Media
+  image: 'img',
+  icon: 'span',
+  video: 'video',
+  audio: 'audio',
+
+  // Structure (valid HTML tags — pass through via fallback)
+  // div, section, form, button, hr, iframe, input, textarea, select
+
+  // Table
+  table: 'table',
+  thead: 'thead',
+  tbody: 'tbody',
+  tr: 'tr',
+  td: 'td',
+  th: 'th',
+
+  // Embedded / special
+  htmlEmbed: 'div',
+  map: 'div',
+
+  // Slider family
+  slider: 'div',
+  slides: 'div',
+  slide: 'div',
+  slideNavigationWrapper: 'div',
+  slideButtonPrev: 'button',
+  slideButtonNext: 'button',
+  slidePaginationWrapper: 'div',
+  slideBullets: 'div',
+  slideBullet: 'button',
+  slideFraction: 'div',
+
+  // Lightbox
+  lightbox: 'div',
+
+  // Locale selector
+  localeSelector: 'div',
+
+  // Filter
+  filter: 'div',
+
+  // Checkbox / radio (the input itself is valid HTML; these are Ycode wrapper names)
+  checkbox: 'input',
+  radio: 'input',
+};
+
+export function getLayerHtmlTag(layer: Layer, parentName?: string): string {
   if (layer.id === 'body' || layer.name === 'body') {
     return 'div';
   }
 
-  // Legacy/imported image layers may miss settings.tag.
-  // Ensure they render as valid HTML <img>, never <image>.
-  if (layer.name === 'image') {
-    return 'img';
-  }
-
   if (layer.settings?.tag) {
-    return layer.settings.tag;
+    return coerceSliderNavChildTag(layer.settings.tag, layer, parentName);
   }
 
-  // Heading layers default to h2 when no tag is set
-  if (layer.name === 'heading') {
-    return 'h2';
+  const tag = LAYER_NAME_TO_HTML_TAG[layer.name] || layer.name || 'div';
+  return coerceSliderNavChildTag(tag, layer, parentName);
+}
+
+/**
+ * Prev/next slider wrappers render as <button>. Their visual child is stored
+ * as a `div`, which is invalid inside a button — coerce it to `span`.
+ */
+function coerceSliderNavChildTag(tag: string, layer: Layer, parentName?: string): string {
+  if (
+    (parentName === 'slideButtonPrev' || parentName === 'slideButtonNext')
+    && layer.name === 'div'
+    && tag === 'div'
+  ) {
+    return 'span';
   }
 
-  // Rich text renders as div (contains block-level content)
-  if (layer.name === 'richText') {
-    return 'div';
-  }
-
-  // Slider sub-layers always render as divs
-  if (isSliderLayerName(layer.name)) {
-    return 'div';
-  }
-
-  return layer.name || 'div';
+  return tag;
 }
 
 /**
@@ -1577,7 +1882,7 @@ export function hasSingleInlineVariable(layer: Layer): boolean {
   const content = textVariable.data.content;
 
   // Match all inline variable tags
-  const regex = /<webwow-inline-variable>[\s\S]*?<\/webwow-inline-variable>/g;
+  const regex = /<ycode-inline-variable>[\s\S]*?<\/ycode-inline-variable>/g;
   const matches = content.match(regex);
 
   if (!matches || matches.length !== 1) {
@@ -1628,7 +1933,7 @@ export function getLayerCmsFieldBinding(layer: Layer): CmsFieldBindingInfo | nul
   // Legacy dynamic_text inline variables
   if (vars.text?.type === 'dynamic_text') {
     const content = vars.text.data.content;
-    const match = content.match(/<webwow-inline-variable>([\s\S]*?)<\/webwow-inline-variable>/);
+    const match = content.match(/<ycode-inline-variable>([\s\S]*?)<\/ycode-inline-variable>/);
     if (match) {
       try {
         const parsed = JSON.parse(match[1]);
@@ -1790,6 +2095,12 @@ export interface VisibilityContext {
   pageCollectionCounts?: Record<string, number>;
   /** Field definitions for type-aware comparison */
   collectionFields?: CollectionField[];
+  /** ID of the item currently being evaluated (used by `source: 'self'` conditions). */
+  currentItemId?: string;
+  /** ID of the dynamic page's collection item, when on a dynamic page. */
+  pageCollectionItemId?: string | null;
+  /** Project timezone (IANA) used for day-aware date condition comparisons. */
+  timezone?: string;
 }
 
 /**
@@ -1798,11 +2109,29 @@ export interface VisibilityContext {
  * @param context - The context containing field values and collection counts
  * @returns True if condition is met, false otherwise
  */
-function evaluateCondition(
+export function evaluateCondition(
   condition: import('@/types').VisibilityCondition,
   context: VisibilityContext
 ): boolean {
-  const { collectionLayerData, pageCollectionData, pageCollectionCounts } = context;
+  const { collectionLayerData, pageCollectionData, pageCollectionCounts, currentItemId, pageCollectionItemId } = context;
+  const timezone = context.timezone || 'UTC';
+
+  // Self conditions: compare the item being evaluated against a set of item
+  // IDs (statically picked and/or the current dynamic page item). Used for
+  // patterns like "only show the current item" or "exclude the current item
+  // from a related list". If we don't know the current item, the condition
+  // can't be evaluated meaningfully — fall through to `true` to avoid hiding
+  // everything by accident (matches the default behaviour of unset conditions).
+  if (condition.source === 'self') {
+    if (!currentItemId) return true;
+    const compareIds = new Set<string>();
+    for (const id of parseItemIdList(condition.value)) compareIds.add(id);
+    if (condition.includesCurrentPageItem && pageCollectionItemId) {
+      compareIds.add(pageCollectionItemId);
+    }
+    const matches = compareIds.has(currentItemId);
+    return condition.operator === 'is_not_one_of' ? !matches : matches;
+  }
 
   if (condition.source === 'page_collection') {
     // Page collection conditions
@@ -1835,29 +2164,97 @@ function evaluateCondition(
     const fieldId = condition.fieldId;
     if (!fieldId) return true;
 
-    // Use source-aware resolution (collection layer data first, then page data)
+    // Use source-aware resolution (collection layer data first, then page data).
+    // Multi-reference / multi-asset values can arrive already parsed as arrays
+    // (e.g. from the SSR collection cache). `String([...])` would comma-join them
+    // into an unparseable string, so serialize arrays back to JSON — the form
+    // every downstream parser (parseMultiReferenceValue, JSON.parse, `[`-prefix
+    // checks) expects.
     const rawValue = resolveFieldFromSources(fieldId, undefined, collectionLayerData, pageCollectionData);
-    const value = String(rawValue ?? '');
-    const compareValue = String(condition.value ?? '');
+    const value = Array.isArray(rawValue) ? JSON.stringify(rawValue) : String(rawValue ?? '');
     const fieldType = condition.fieldType || 'text';
+    const isDateOnly = fieldType === 'date_only';
+
+    // Resolve the compare value. In 'current_page' mode it is bound to the
+    // current dynamic page item instead of the static `condition.value`:
+    //   - reference fields inject the page item's own ID into the compared ID
+    //     set (alongside any statically picked IDs), so reference operators parse
+    //     it normally — this is the "Current Category/Tag" pattern
+    //   - scalar fields compare against the page item's `currentPageFieldId` value
+    // Reference detection also keys off the operator so it stays correct even if
+    // `fieldType` was not persisted on the condition.
+    let compareValue = String(condition.value ?? '');
+    if (condition.valueMode === 'current_page') {
+      const isReferenceField = fieldType === 'reference'
+        || fieldType === 'multi_reference'
+        || ['is_one_of', 'is_not_one_of', 'contains_all_of', 'contains_exactly'].includes(condition.operator);
+
+      // When the page item context is unavailable (e.g. the editor preview before
+      // a CMS item is selected), skip the condition instead of filtering everything
+      // out — mirrors the `self` source returning true when there is no current item.
+      if (isReferenceField && !pageCollectionItemId) return true;
+      if (!isReferenceField && !pageCollectionData) return true;
+
+      if (isReferenceField) {
+        const ids = parseItemIdList(condition.value);
+        if (pageCollectionItemId && !ids.includes(pageCollectionItemId)) {
+          ids.push(pageCollectionItemId);
+        }
+        compareValue = JSON.stringify(ids);
+      } else if (condition.currentPageFieldId) {
+        compareValue = String(pageCollectionData?.[condition.currentPageFieldId] ?? '');
+      }
+    }
+    let compareValue2 = condition.value2;
+    let effectiveOperator = condition.operator;
+
+    // In 'current_page' mode the compare set is a single injected page-item id, so
+    // 'contains exactly' (exact set equality) can essentially never match a real
+    // multi-reference field — it would only keep items whose entire reference set is
+    // just the current item. The intent of the "Current X" pattern is "contains the
+    // current item", so treat it as 'contains_all_of'.
+    if (condition.valueMode === 'current_page' && effectiveOperator === 'contains_exactly') {
+      effectiveOperator = 'contains_all_of';
+    }
+
+    if (isDateFieldType(fieldType) && isDatePreset(compareValue)) {
+      const resolved = resolveDateFilterValue(effectiveOperator, compareValue, compareValue2, timezone);
+      if (resolved) {
+        effectiveOperator = resolved.operator as typeof effectiveOperator;
+        compareValue = resolved.value;
+        compareValue2 = resolved.value2;
+      }
+    }
 
     // Check if value is present (non-empty)
     const isPresent = rawValue !== undefined && rawValue !== null && rawValue !== '';
 
-    switch (condition.operator) {
+    switch (effectiveOperator) {
       // Text operators
       case 'is':
         if (fieldType === 'boolean') {
-          return value.toLowerCase() === compareValue.toLowerCase();
+          // Booleans may be stored as 'true'/'false', '1'/'0', or '' (depending
+          // on import source — UI, Airtable sync, CSV, etc.). Normalize both
+          // sides so the comparison is source-agnostic.
+          return normalizeBooleanValue(value) === normalizeBooleanValue(compareValue);
         }
         if (fieldType === 'number') {
           return parseFloat(value) === parseFloat(compareValue);
         }
+        if (isDateFieldType(fieldType)) {
+          return compareDateFilter(value, 'is', compareValue, undefined, timezone, isDateOnly);
+        }
         return value === compareValue;
 
       case 'is_not':
+        if (fieldType === 'boolean') {
+          return normalizeBooleanValue(value) !== normalizeBooleanValue(compareValue);
+        }
         if (fieldType === 'number') {
           return parseFloat(value) !== parseFloat(compareValue);
+        }
+        if (isDateFieldType(fieldType)) {
+          return !compareDateFilter(value, 'is', compareValue, undefined, timezone, isDateOnly);
         }
         return value !== compareValue;
 
@@ -1886,25 +2283,16 @@ function evaluateCondition(
       case 'gte':
         return parseFloat(value) >= parseFloat(compareValue);
 
-      // Date operators
-      case 'is_before': {
-        const dateValue = new Date(value);
-        const compareDateValue = new Date(compareValue);
-        return dateValue < compareDateValue;
-      }
+      // Date operators (day-aware: `YYYY-MM-DD` filter values span the full day
+      // in the project timezone; `date_only` fields compare in UTC)
+      case 'is_before':
+        return compareDateFilter(value, 'is_before', compareValue, undefined, timezone, isDateOnly);
 
-      case 'is_after': {
-        const dateValue = new Date(value);
-        const compareDateValue = new Date(compareValue);
-        return dateValue > compareDateValue;
-      }
+      case 'is_after':
+        return compareDateFilter(value, 'is_after', compareValue, undefined, timezone, isDateOnly);
 
-      case 'is_between': {
-        const dateValue = new Date(value);
-        const startDate = new Date(compareValue);
-        const endDate = new Date(condition.value2 ?? '');
-        return dateValue >= startDate && dateValue <= endDate;
-      }
+      case 'is_between':
+        return compareDateFilter(value, 'is_between', compareValue, compareValue2, timezone, isDateOnly);
 
       case 'is_not_empty':
         return isPresent;
@@ -2114,15 +2502,37 @@ function remapInteractionLayerIds(
 }
 
 /**
+ * Recursively tag a layer subtree with `_masterComponentId` so translation
+ * lookups in `injectTranslatedText` resolve to component-scoped keys.
+ * Mirrors `tagLayersWithComponentId` in `lib/resolve-components.ts`.
+ */
+function tagLayerSubtreeWithComponentId(layer: Layer, componentId: string): Layer {
+  return {
+    ...layer,
+    _masterComponentId: componentId,
+    children: layer.children
+      ? layer.children.map(child => tagLayerSubtreeWithComponentId(child, componentId))
+      : layer.children,
+  };
+}
+
+/**
  * Transform component layers with instance-specific IDs
  * This ensures each component instance has unique layer IDs for proper targeting
  */
 function transformLayersForInstance(
   layers: Layer[],
-  instanceLayerId: string
+  instanceLayerId: string,
+  rootMasterId?: string,
 ): Layer[] {
   // Build ID map: original ID -> instance-specific ID
   const idMap = new Map<string, string>();
+
+  // The component root renders with the instance ID, so map its master ID
+  // to the instance ID for child tweens/interactions that target the root.
+  if (rootMasterId && rootMasterId !== instanceLayerId) {
+    idMap.set(rootMasterId, instanceLayerId);
+  }
 
   // First pass: collect all layer IDs and generate new ones
   const collectIds = (layerList: Layer[]) => {
@@ -2143,6 +2553,9 @@ function transformLayersForInstance(
     const transformedLayer: Layer = {
       ...layer,
       id: newId,
+      // Preserve the original layer ID so injectTranslatedText can resolve
+      // component-scoped translation keys (which use the template layer ID).
+      _originalLayerId: layer._originalLayerId || layer.id,
     };
 
     // Remap interaction IDs and tween layer_id references
@@ -2178,6 +2591,7 @@ function resolveComponentsInLayers(
   components: Component[],
   parentComponentVariables?: ComponentVariable[],
   parentOverrides?: Layer['componentOverrides'],
+  _visitedComponentIds?: Set<string>,
 ): Layer[] {
   // First, resolve variableLinks at this level using applyComponentOverrides
   // This handles nested component instances whose variableLinks point to parentComponentVariables
@@ -2185,25 +2599,40 @@ function resolveComponentsInLayers(
     ? applyComponentOverrides(layers, parentOverrides, parentComponentVariables)
     : layers;
 
+  const visited = _visitedComponentIds ?? new Set<string>();
+
   return effectiveLayers.map(layer => {
     // If this layer is a component instance, populate its children from the component
     if (layer.componentId) {
+      // Circular reference guard
+      if (visited.has(layer.componentId)) {
+        console.warn('[resolveComponentsInLayers] Circular component reference detected, skipping:', layer.componentId);
+        return { ...layer, children: [] };
+      }
+
       const component = components.find(c => c.id === layer.componentId);
 
-      if (component && component.layers && component.layers.length > 0) {
-        // The component's first layer is the actual content (Section, etc.)
-        const componentContent = component.layers[0];
+      // Pick the variant layer tree this instance is bound to (silent fallback
+      // to the first variant when the requested one was deleted).
+      const variantLayers = component ? getComponentVariantLayers(component, layer.componentVariantId) : [];
+
+      if (component && variantLayers.length > 0) {
+        const innerVisited = new Set(visited);
+        innerVisited.add(layer.componentId);
+
+        // The variant's first layer is the actual content (Section, etc.)
+        const componentContent = variantLayers[0];
 
         // Transform all component children with instance-specific IDs
         // This ensures unique layer IDs when multiple instances of the same component exist
         const transformedChildren = componentContent.children
-          ? transformLayersForInstance(componentContent.children, layer.id)
+          ? transformLayersForInstance(componentContent.children, layer.id, componentContent.id)
           : [];
 
         // Recursively resolve any nested components within the transformed children
         // Pass current component's variables and this instance's overrides
         const resolvedChildren = resolveComponentsInLayers(
-          transformedChildren, components, component.variables, layer.componentOverrides,
+          transformedChildren, components, component.variables, layer.componentOverrides, innerVisited,
         );
 
         // Build ID map for remapping root layer interactions
@@ -2237,8 +2666,20 @@ function resolveComponentsInLayers(
           component.variables,
         );
 
+        // Tag children with the master component ID so injectTranslatedText
+        // resolves component-scoped translation keys (component:{componentId}:...)
+        // instead of falling back to page scope. Mirrors the server-side
+        // resolveComponents pipeline so the canvas matches what the published
+        // page renders.
+        const taggedChildren = overriddenChildren.map(child =>
+          tagLayerSubtreeWithComponentId(child, component.id)
+        );
+
         // Return the wrapper with the component's content merged in
         // IMPORTANT: Keep componentId so LayerRenderer knows this is a component instance
+        // _originalLayerId is the component's root template ID — translations on the
+        // root wrapper itself are stored under that ID, while the runtime ID is the
+        // page-instance ID.
         const resolved = {
           ...layer,
           ...componentContent, // Merge the component's properties (classes, design, etc.)
@@ -2246,7 +2687,9 @@ function resolveComponentsInLayers(
           componentId: layer.componentId, // Keep the original componentId for selection
           componentOverrides: layer.componentOverrides, // Keep instance overrides
           interactions: remappedInteractions, // Use remapped interactions
-          children: overriddenChildren,
+          children: taggedChildren,
+          _masterComponentId: component.id,
+          _originalLayerId: componentContent.id,
         };
 
         return resolved;
@@ -2257,7 +2700,7 @@ function resolveComponentsInLayers(
     if (layer.children && layer.children.length > 0) {
       return {
         ...layer,
-        children: resolveComponentsInLayers(layer.children, components, parentComponentVariables, parentOverrides),
+        children: resolveComponentsInLayers(layer.children, components, parentComponentVariables, parentOverrides, visited),
       };
     }
 
@@ -2274,15 +2717,12 @@ export function serializeLayers(
   components: Component[] = [],
   editingComponentVariables?: ComponentVariable[],
 ): { layers: Layer[]; componentMap: Record<string, string> } {
-  // First build the component map (before resolving)
   const componentMap = buildComponentMap(layers);
-
-  // Then resolve component instances
   const resolvedLayers = resolveComponentsInLayers(layers, components, editingComponentVariables);
+  const cloned = JSON.parse(JSON.stringify(resolvedLayers));
 
-  // Deep clone to avoid mutations
   return {
-    layers: JSON.parse(JSON.stringify(resolvedLayers)),
+    layers: cloned,
     componentMap,
   };
 }
@@ -2415,7 +2855,7 @@ export async function createComponentViaApi(
   layers: Layer[]
 ): Promise<Component | null> {
   try {
-    const response = await fetch('/webwow/api/components', {
+    const response = await fetch('/ycode/api/components', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2461,8 +2901,11 @@ export function replaceLayerWithComponentInstance(
 ): Layer[] {
   return layers.map((layer) => {
     if (layer.id === layerId) {
+      // Drop the original customName so the instance shows the component's
+      // name instead of the layer's previous rename.
+      const { customName: _customName, ...rest } = layer;
       return {
-        ...layer,
+        ...rest,
         componentId,
         children: [],
       };
@@ -2480,7 +2923,7 @@ export function replaceLayerWithComponentInstance(
 // ─── CMS Data-Binding Reset Utilities ─────────────────────────────────
 
 /** Regex for matching inline variable tags (duplicated from inline-variables to avoid circular imports) */
-const INLINE_VAR_REGEX = /<webwow-inline-variable>([\s\S]*?)<\/webwow-inline-variable>/g;
+const INLINE_VAR_REGEX = /<ycode-inline-variable>([\s\S]*?)<\/ycode-inline-variable>/g;
 
 /**
  * Represents the collection context available at a specific position in the layer tree.
@@ -4030,4 +4473,50 @@ export function updateLayerProps(
     }
     return layer;
   });
+}
+
+/** Append a child to the parent layer with `parentId`, returning a new tree. */
+export function addChildToLayerTree(
+  layers: Layer[],
+  parentId: string,
+  child: Layer
+): Layer[] {
+  return layers.map(layer => {
+    if (layer.id === parentId) {
+      return { ...layer, children: [...(layer.children || []), child] };
+    }
+    if (layer.children && layer.children.length > 0) {
+      return { ...layer, children: addChildToLayerTree(layer.children, parentId, child) };
+    }
+    return layer;
+  });
+}
+
+/**
+ * Find all layers with a custom anchor ID (settings.id takes priority over attributes.id).
+ * Deduplicates by anchor ID since an `#id` link resolves to the first match, so a
+ * repeated ID (e.g. duplicated component instances) would otherwise produce duplicate
+ * dropdown options and React key collisions.
+ * Used by link settings to populate anchor selection dropdowns.
+ */
+export function findLayersWithAnchorId(layers: Layer[]): Array<{ layer: Layer; id: string }> {
+  const result: Array<{ layer: Layer; id: string }> = [];
+  const seen = new Set<string>();
+  const stack: Layer[] = [...layers];
+
+  while (stack.length > 0) {
+    const layer = stack.pop()!;
+
+    const layerId = layer.settings?.id || layer.attributes?.id;
+    if (layerId && !seen.has(layerId)) {
+      seen.add(layerId);
+      result.push({ layer, id: layerId });
+    }
+
+    if (layer.children) {
+      stack.push(...layer.children);
+    }
+  }
+
+  return result;
 }

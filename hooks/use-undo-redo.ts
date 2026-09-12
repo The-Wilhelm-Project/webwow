@@ -11,7 +11,7 @@ import { usePagesStore } from '@/stores/usePagesStore';
 import { useComponentsStore } from '@/stores/useComponentsStore';
 import { useLayerStylesStore } from '@/stores/useLayerStylesStore';
 import { applyPatch, createPatch, createInversePatch, isPatchEmpty, doesPatchChangeState, generatePatchDescription, JsonPatch } from '@/lib/version-utils';
-import { markUndoRedoSave } from '@/lib/version-tracking';
+import { markUndoRedoSave, componentVersionEntityId } from '@/lib/version-tracking';
 import { generatePageLayersHash } from '@/lib/hash-utils';
 import { stripUIProperties } from '@/lib/layer-utils';
 import { useEditorStore } from '@/stores/useEditorStore';
@@ -110,6 +110,12 @@ interface UseUndoRedoOptions {
   entityType: VersionEntityType;
   /** Entity ID (page_id, component_id, or style_id) */
   entityId: string | null;
+  /**
+   * Active component variant being edited. Undo/redo is scoped per variant so
+   * editing a non-primary variant has its own history. Ignored for non-component
+   * entities.
+   */
+  variantId?: string | null;
   /** Whether to auto-initialize on mount */
   autoInit?: boolean;
 }
@@ -131,17 +137,24 @@ interface UseUndoRedoReturn {
   initialize: () => Promise<void>;
 }
 
-// Cache for tracking the previous state of entities
-const previousStateCache = new Map<string, any>();
+// Cache for tracking the previous state of entities.
+// Stored as JSON strings to cut V8 retained memory (~3x smaller than parsed objects).
+const previousStateCache = new Map<string, string>();
 
-// Local undo/redo buffer for unsaved changes (per entity)
+// Local undo/redo buffer for unsaved changes (per entity).
+// `state` is JSON-stringified to avoid keeping a parsed deep clone per entry.
 interface LocalChange {
-  state: any;
+  state: string;
   timestamp: number;
 }
 
 const localUndoBuffer = new Map<string, LocalChange[]>();
 const localRedoBuffer = new Map<string, LocalChange[]>();
+
+// Hard cap per entity to prevent unbounded memory growth on long unsaved-edit
+// sessions (e.g. rapid drag/resize before debounced auto-save fires). The
+// `versionSaved` event clears the buffer; this cap only matters in worst case.
+const MAX_LOCAL_BUFFER_SIZE = 100;
 
 // Operation lock to prevent concurrent undo/redo operations per entity
 const operationLocks = new Map<string, boolean>();
@@ -149,9 +162,41 @@ const operationLocks = new Map<string, boolean>();
 // Track entities currently being initialized to prevent false change detection
 const initializingEntities = new Set<string>();
 
+/** Store a state in the cache as a JSON string. */
+function setCachedState(cacheKey: string, state: unknown): void {
+  try {
+    previousStateCache.set(cacheKey, JSON.stringify(state));
+  } catch {
+    // ignore — stringify failures shouldn't crash the editor
+  }
+}
+
+/** Store an already-stringified state (no re-stringify). */
+function setCachedStateRaw(cacheKey: string, stateJson: string): void {
+  previousStateCache.set(cacheKey, stateJson);
+}
+
+/** Read and parse a cached state. Returns undefined when missing/invalid. */
+function getCachedState(cacheKey: string): any {
+  const stored = previousStateCache.get(cacheKey);
+  if (!stored) return undefined;
+  try {
+    return JSON.parse(stored);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Trim a buffer to MAX_LOCAL_BUFFER_SIZE by dropping the oldest entries. */
+function trimBuffer(buffer: LocalChange[]): void {
+  const overflow = buffer.length - MAX_LOCAL_BUFFER_SIZE;
+  if (overflow > 0) buffer.splice(0, overflow);
+}
+
 export function useUndoRedo({
   entityType,
   entityId,
+  variantId = null,
   autoInit = true,
 }: UseUndoRedoOptions): UseUndoRedoReturn {
   const {
@@ -164,8 +209,18 @@ export function useUndoRedo({
     setUndoRedoInProgress,
   } = useVersionsStore();
 
+  // Version bookkeeping id. Components scope history per variant so a
+  // non-primary variant edit gets its own undo/redo stack; other entities use
+  // the plain entity id. `entityId` still refers to the real component/page id
+  // when reading or writing the underlying draft.
+  const versionEntityId = useMemo(() => {
+    if (!entityId) return null;
+    if (entityType === 'component') return componentVersionEntityId(entityId, variantId);
+    return entityId;
+  }, [entityType, entityId, variantId]);
+
   // Subscribe directly to the entity state to properly react to changes
-  const entityKey = entityId ? `${entityType}:${entityId}` : null;
+  const entityKey = versionEntityId ? `${entityType}:${versionEntityId}` : null;
   const entityState = useVersionsStore((state) => {
     if (!entityKey) return null;
     // Access the entity state directly - this ensures proper reactivity
@@ -178,11 +233,25 @@ export function useUndoRedo({
   const updateComponentDraft = useComponentsStore((state) => state.updateComponentDraft);
   const styles = useLayerStylesStore((state) => state.styles);
 
-  // Entity key for caching
+  // Entity key for caching (variant-scoped for components)
   const cacheKey = useMemo(() => {
-    if (!entityId) return null;
-    return `${entityType}:${entityId}`;
-  }, [entityType, entityId]);
+    if (!versionEntityId) return null;
+    return `${entityType}:${versionEntityId}`;
+  }, [entityType, versionEntityId]);
+
+  // Resolve which component variant undo/redo should read/write. Prefers the
+  // active variant, then the persisted primary variant, then the first draft.
+  const resolveComponentVariantId = useCallback(
+    (componentId: string, variantDrafts: Record<string, Layer[]>): string | null => {
+      if (variantId && variantDrafts[variantId]) return variantId;
+      const componentEntry = useComponentsStore.getState().getComponentById(componentId);
+      if (componentEntry?.variants && componentEntry.variants.length > 0) {
+        return componentEntry.variants[0].id;
+      }
+      return Object.keys(variantDrafts)[0] || null;
+    },
+    [variantId]
+  );
 
   // Get current state based on entity type
   const getCurrentState = useCallback((): any => {
@@ -194,7 +263,14 @@ export function useUndoRedo({
         return draft?.layers || [];
       }
       case 'component': {
-        return componentDrafts[entityId] || [];
+        // Track the variant currently being edited so undo/redo operates on the
+        // same layer tree the canvas shows. Fall back to the primary variant
+        // when no variant is supplied.
+        const variantDrafts = componentDrafts[entityId];
+        if (!variantDrafts) return [];
+        const targetVariantId = resolveComponentVariantId(entityId, variantDrafts);
+        if (!targetVariantId) return [];
+        return variantDrafts[targetVariantId] || [];
       }
       case 'layer_style': {
         const style = styles.find((s) => s.id === entityId);
@@ -203,7 +279,7 @@ export function useUndoRedo({
       default:
         return null;
     }
-  }, [entityType, entityId, draftsByPageId, componentDrafts, styles]);
+  }, [entityType, entityId, draftsByPageId, componentDrafts, styles, resolveComponentVariantId]);
 
   // Apply state based on entity type
   const applyState = useCallback(
@@ -225,12 +301,19 @@ export function useUndoRedo({
               console.error('   Layer IDs in state:', layerIds);
             }
           }
-          updateComponentDraft(entityId, state as Layer[]);
+          // Apply to the variant being edited — see getCurrentState.
+          const variantDrafts = useComponentsStore.getState().componentDrafts[entityId];
+          const targetVariantId = variantDrafts
+            ? resolveComponentVariantId(entityId, variantDrafts)
+            : null;
+          if (targetVariantId) {
+            updateComponentDraft(entityId, targetVariantId, state as Layer[]);
+          }
           break;
         }
         case 'layer_style': {
           // For layer styles, we need to update via API
-          await fetch(`/webwow/api/layer-styles/${entityId}`, {
+          await fetch(`/ycode/api/layer-styles/${entityId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(state),
@@ -241,12 +324,12 @@ export function useUndoRedo({
         }
       }
     },
-    [entityType, entityId, setDraftLayers, updateComponentDraft]
+    [entityType, entityId, setDraftLayers, updateComponentDraft, resolveComponentVariantId]
   );
 
   // Initialize entity state - only when entityId changes
   const initialize = useCallback(async () => {
-    if (!entityId || !cacheKey) return;
+    if (!entityId || !cacheKey || !versionEntityId) return;
 
     // Mark entity as initializing to prevent false change detection
     initializingEntities.add(cacheKey);
@@ -263,7 +346,7 @@ export function useUndoRedo({
       // false change detection when re-entering edit mode
       // Only update if not already set by loadComponentDraft
       if (currentState && !previousStateCache.has(cacheKey)) {
-        previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+        setCachedState(cacheKey, currentState);
       }
 
       // Clear local buffers when switching entities to prevent stale state interference
@@ -271,29 +354,31 @@ export function useUndoRedo({
       localRedoBuffer.delete(cacheKey);
 
       // Only initialize version history if not already initialized
-      const existingState = useVersionsStore.getState().entityStates[`${entityType}:${entityId}`];
+      const existingState = useVersionsStore.getState().entityStates[`${entityType}:${versionEntityId}`];
       if (existingState && (existingState.undoStack.length > 0 || existingState.redoStack.length > 0)) {
         // Already initialized, don't reset version history
         return;
       }
 
-      initEntityState(entityType, entityId);
+      initEntityState(entityType, versionEntityId);
 
-      // Calculate hash to determine position in history
+      // Calculate hash to determine position in history. Components assume
+      // "at latest" on load (no hash), matching prior behavior — their history
+      // is now scoped per variant.
       let currentHash: string | undefined;
 
       if (currentState && entityType === 'page_layers') {
         currentHash = generatePageLayersHash({ layers: currentState, generated_css: null });
       }
 
-      await loadVersionHistory(entityType, entityId, currentHash);
+      await loadVersionHistory(entityType, versionEntityId, currentHash);
     } finally {
       // Clear initializing flag after a longer delay to ensure all async operations complete
       setTimeout(() => {
         initializingEntities.delete(cacheKey);
       }, 100);
     }
-  }, [entityType, entityId, initEntityState, loadVersionHistory, cacheKey, getCurrentState]);
+  }, [entityType, entityId, versionEntityId, initEntityState, loadVersionHistory, cacheKey, getCurrentState]);
 
   // Auto-initialize on mount - only run once per entityId
   useEffect(() => {
@@ -354,7 +439,7 @@ export function useUndoRedo({
 
     // Initialize cache if needed
     if (!previousStateCache.has(cacheKey)) {
-      previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+      setCachedState(cacheKey, currentState);
       return;
     }
 
@@ -364,7 +449,7 @@ export function useUndoRedo({
     }
 
     // Check if state actually changed
-    const prevState = previousStateCache.get(cacheKey);
+    const prevState = getCachedState(cacheKey);
 
     // Strip UI-only properties (like 'open') before comparison for layer-based entities
     const isLayerEntity = entityType === 'page_layers' || entityType === 'component';
@@ -398,27 +483,34 @@ export function useUndoRedo({
         }
       }
 
-      // Add current state to undo buffer
-      const undoBuffer = localUndoBuffer.get(cacheKey) || [];
-      undoBuffer.push({
-        state: JSON.parse(JSON.stringify(prevState)),
-        timestamp: Date.now(),
-      });
-      localUndoBuffer.set(cacheKey, undoBuffer);
-      setLocalUndoCount(undoBuffer.length);
+      // Add the (full, unstripped) previous state to the undo buffer.
+      // Read the JSON straight from the cache to avoid an extra stringify pass.
+      const prevStateJson = previousStateCache.get(cacheKey);
+      if (prevStateJson) {
+        const undoBuffer = localUndoBuffer.get(cacheKey) || [];
+        undoBuffer.push({
+          state: prevStateJson,
+          timestamp: Date.now(),
+        });
+        trimBuffer(undoBuffer);
+        localUndoBuffer.set(cacheKey, undoBuffer);
+        setLocalUndoCount(undoBuffer.length);
+      }
 
       // Clear redo buffer when new change is made (both local and database)
       localRedoBuffer.delete(cacheKey);
       setLocalRedoCount(0);
 
       // Also clear database redo stack immediately (don't wait for save)
-      useVersionsStore.getState().clearRedoStack(entityType, entityId);
+      if (versionEntityId) {
+        useVersionsStore.getState().clearRedoStack(entityType, versionEntityId);
+      }
 
-      // Update previous state
-      previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+      // Update previous state cache with the (full, unstripped) current state
+      setCachedState(cacheKey, currentState);
 
     }
-  }, [cacheKey, entityId, entityType, getCurrentState, draftsByPageId, componentDrafts, styles]);
+  }, [cacheKey, entityId, entityType, versionEntityId, getCurrentState, draftsByPageId, componentDrafts, styles]);
 
   // Track buffer size in state to trigger re-renders
   const [localUndoCount, setLocalUndoCount] = useState(0);
@@ -437,10 +529,10 @@ export function useUndoRedo({
 
   // Undo operation
   const undo = useCallback(async (): Promise<boolean> => {
-    if (!entityId || !canUndo) return false;
+    if (!entityId || !versionEntityId || !canUndo) return false;
 
     // Prevent concurrent undo/redo operations using synchronous lock
-    const lockKey = `${entityType}:${entityId}`;
+    const lockKey = `${entityType}:${versionEntityId}`;
     if (operationLocks.get(lockKey)) {
       return false;
     }
@@ -458,9 +550,12 @@ export function useUndoRedo({
           localUndoBuffer.set(cacheKey, undoBuffer);
           setLocalUndoCount(undoBuffer.length);
 
+          // Parse the stored state once; reuse below
+          const restoredState = JSON.parse(lastChange.state);
+
           // Validate buffer state for components
           if (process.env.NODE_ENV === 'development' && entityType === 'component') {
-            const layerIds = (lastChange.state as Layer[]).map(l => l.id);
+            const layerIds = (restoredState as Layer[]).map(l => l.id);
             const duplicates = layerIds.filter((id, index) => layerIds.indexOf(id) !== index);
             if (duplicates.length > 0) {
               console.error(`❌ [Local Undo] Component ${entityId} - Buffer state has DUPLICATE IDs:`, duplicates);
@@ -469,21 +564,23 @@ export function useUndoRedo({
             }
           }
 
-          // Add current state to redo buffer
+          // Add current state to redo buffer (stringified to reduce memory)
           const currentState = getCurrentState();
           if (currentState) {
             const redoBuffer = localRedoBuffer.get(cacheKey) || [];
             redoBuffer.push({
-              state: JSON.parse(JSON.stringify(currentState)),
+              state: JSON.stringify(currentState),
               timestamp: Date.now(),
             });
+            trimBuffer(redoBuffer);
             localRedoBuffer.set(cacheKey, redoBuffer);
             setLocalRedoCount(redoBuffer.length);
           }
 
           // Restore the previous state
-          await applyState(lastChange.state);
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(lastChange.state)));
+          await applyState(restoredState);
+          // Cache already has it as a string — store raw, skip a stringify
+          setCachedStateRaw(cacheKey, lastChange.state);
 
           // Auto-save will detect the state change and handle saving with debouncing
           return true;
@@ -491,7 +588,7 @@ export function useUndoRedo({
       }
 
       // No local changes, use database undo
-      const version = await storeUndo(entityType, entityId);
+      const version = await storeUndo(entityType, versionEntityId);
 
       if (!version) {
         return false;
@@ -526,7 +623,7 @@ export function useUndoRedo({
         }
 
         // Mark this entity so auto-save won't create a new version
-        markUndoRedoSave(entityType, entityId);
+        markUndoRedoSave(entityType, versionEntityId);
 
         await applyState(restoredState);
 
@@ -537,7 +634,7 @@ export function useUndoRedo({
 
         // Update cache
         if (cacheKey) {
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(restoredState)));
+          setCachedState(cacheKey, restoredState);
         }
 
         // Auto-save will detect the state change and handle saving with debouncing
@@ -562,11 +659,11 @@ export function useUndoRedo({
         }
 
         // Mark this entity so auto-save won't create a new version
-        markUndoRedoSave(entityType, entityId);
+        markUndoRedoSave(entityType, versionEntityId);
 
         await applyState(version.snapshot);
         if (cacheKey) {
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(version.snapshot)));
+          setCachedState(cacheKey, version.snapshot);
         }
 
         // Restore UI metadata from snapshot
@@ -583,18 +680,18 @@ export function useUndoRedo({
       console.error('Undo failed:', error);
       return false;
     } finally {
-      const lockKey = `${entityType}:${entityId}`;
+      const lockKey = `${entityType}:${versionEntityId}`;
       operationLocks.delete(lockKey);
       setUndoRedoInProgress(false);
     }
-  }, [entityType, entityId, canUndo, storeUndo, getCurrentState, applyState, cacheKey, setUndoRedoInProgress]);
+  }, [entityType, entityId, versionEntityId, canUndo, storeUndo, getCurrentState, applyState, cacheKey, setUndoRedoInProgress]);
 
   // Redo operation
   const redo = useCallback(async (): Promise<boolean> => {
-    if (!entityId || !canRedo) return false;
+    if (!entityId || !versionEntityId || !canRedo) return false;
 
     // Prevent concurrent undo/redo operations using synchronous lock
-    const lockKey = `${entityType}:${entityId}`;
+    const lockKey = `${entityType}:${versionEntityId}`;
     if (operationLocks.get(lockKey)) {
       return false;
     }
@@ -613,21 +710,26 @@ export function useUndoRedo({
           localRedoBuffer.set(cacheKey, redoBuffer);
           setLocalRedoCount(redoBuffer.length);
 
-          // Add current state to undo buffer
+          // Parse the stored state once
+          const nextState = JSON.parse(nextChange.state);
+
+          // Add current state to undo buffer (stringified to reduce memory)
           const currentState = getCurrentState();
           if (currentState) {
             const undoBuffer = localUndoBuffer.get(cacheKey) || [];
             undoBuffer.push({
-              state: JSON.parse(JSON.stringify(currentState)),
+              state: JSON.stringify(currentState),
               timestamp: Date.now(),
             });
+            trimBuffer(undoBuffer);
             localUndoBuffer.set(cacheKey, undoBuffer);
             setLocalUndoCount(undoBuffer.length);
           }
 
           // Restore the next state
-          await applyState(nextChange.state);
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(nextChange.state)));
+          await applyState(nextState);
+          // Cache already has it as a string — store raw, skip a stringify
+          setCachedStateRaw(cacheKey, nextChange.state);
 
           // Auto-save will detect the state change and handle saving with debouncing
           return true;
@@ -635,12 +737,12 @@ export function useUndoRedo({
       }
 
       // No local redo, use database redo
-      const version = await storeRedo(entityType, entityId);
+      const version = await storeRedo(entityType, versionEntityId);
 
       if (version === null) {
         // version === null means "restore to latest"
         // Mark this entity so auto-save won't create a new version
-        markUndoRedoSave(entityType, entityId);
+        markUndoRedoSave(entityType, versionEntityId);
 
         // Reload from database
         if (entityType === 'page_layers') {
@@ -655,7 +757,7 @@ export function useUndoRedo({
         if (cacheKey) {
           const currentState = getCurrentState();
           if (currentState) {
-            previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+            setCachedState(cacheKey, currentState);
           }
         }
 
@@ -693,7 +795,7 @@ export function useUndoRedo({
         }
 
         // Mark this entity so auto-save won't create a new version
-        markUndoRedoSave(entityType, entityId);
+        markUndoRedoSave(entityType, versionEntityId);
 
         await applyState(newState);
 
@@ -706,7 +808,7 @@ export function useUndoRedo({
 
         // Update cache
         if (cacheKey) {
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(newState)));
+          setCachedState(cacheKey, newState);
         }
 
         // Auto-save will detect the state change and handle saving with debouncing
@@ -719,11 +821,11 @@ export function useUndoRedo({
       console.error('Redo failed:', error);
       return false;
     } finally {
-      const lockKey = `${entityType}:${entityId}`;
+      const lockKey = `${entityType}:${versionEntityId}`;
       operationLocks.delete(lockKey);
       setUndoRedoInProgress(false);
     }
-  }, [entityType, entityId, canRedo, storeRedo, getCurrentState, applyState, cacheKey, setUndoRedoInProgress]);
+  }, [entityType, entityId, versionEntityId, canRedo, storeRedo, getCurrentState, applyState, cacheKey, setUndoRedoInProgress]);
 
   // Record a change
   const recordChange = useCallback(
@@ -768,7 +870,7 @@ export function useUndoRedo({
         // Note: snapshot is determined server-side based on version count
         const versionData: CreateVersionData = {
           entity_type: entityType,
-          entity_id: entityId,
+          entity_id: versionEntityId ?? entityId,
           action_type: 'update',
           description: finalDescription,
           redo: redoPatch,
@@ -778,7 +880,7 @@ export function useUndoRedo({
           session_id: getSessionId(),
         };
 
-        const response = await fetch('/webwow/api/versions', {
+        const response = await fetch('/ycode/api/versions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(versionData),
@@ -792,14 +894,14 @@ export function useUndoRedo({
 
           // Update cache
           if (cacheKey) {
-            previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+            setCachedState(cacheKey, currentState);
           }
         }
       } catch (error) {
         console.error('Failed to record change:', error);
       }
     },
-    [entityType, entityId, getSessionId, recordVersion, cacheKey]
+    [entityType, entityId, versionEntityId, getSessionId, recordVersion, cacheKey]
   );
 
   return {
@@ -818,7 +920,7 @@ export function useUndoRedo({
  */
 export function getPreviousState(entityType: VersionEntityType, entityId: string): any {
   const cacheKey = `${entityType}:${entityId}`;
-  return previousStateCache.get(cacheKey);
+  return getCachedState(cacheKey);
 }
 
 /**
@@ -826,7 +928,7 @@ export function getPreviousState(entityType: VersionEntityType, entityId: string
  */
 export function updatePreviousState(entityType: VersionEntityType, entityId: string, state: any): void {
   const cacheKey = `${entityType}:${entityId}`;
-  previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(state)));
+  setCachedState(cacheKey, state);
 }
 
 /**

@@ -3,6 +3,116 @@
  * Centralized helpers for asset type detection, formatting, and categorization
  */
 
+/**
+ * Build a data URL for inline SVG content. When `width`/`height` are provided
+ * and the SVG root lacks them, they're injected so `<img>` consumers get
+ * intrinsic dimensions — otherwise browsers fall back to 300×150 for SVGs
+ * that only carry a viewBox, breaking CSS `w-auto`/`h-auto` sizing.
+ */
+export function buildSvgDataUrl(
+  content: string,
+  width?: number | null,
+  height?: number | null
+): string {
+  let svg = content;
+  if (width && height) {
+    svg = svg.replace(/<svg\b([^>]*)>/i, (match, attrs: string) => {
+      const hasWidth = /\swidth\s*=/i.test(attrs);
+      const hasHeight = /\sheight\s*=/i.test(attrs);
+      if (hasWidth && hasHeight) return match;
+      const injected = `${!hasWidth ? ` width="${width}"` : ''}${!hasHeight ? ` height="${height}"` : ''}`;
+      return `<svg${injected}${attrs}>`;
+    });
+  }
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+/**
+ * Derive a CSS `aspect-ratio` value (e.g. `"24 / 24"`) from an inline icon SVG.
+ *
+ * Icon layers render the SVG at `width: 100%; height: 100%` of their
+ * `[data-icon]` container. When the container has only one dimension set
+ * (common after HTML import or manual edits) the other axis is `auto`, and an
+ * inline-block box that shrink-wraps a 100%-sized child collapses to 0 —
+ * making the icon invisible. Applying this aspect-ratio to the container lets
+ * the missing axis resolve from the icon's true proportions while staying
+ * inert when both width and height are explicitly set.
+ *
+ * Prefers the `viewBox`, falling back to numeric `width`/`height` attributes.
+ * Returns null when no usable ratio can be determined.
+ */
+export function getSvgAspectRatioStyle(svgContent: string | null | undefined): string | null {
+  if (!svgContent) return null;
+
+  const viewBoxMatch = svgContent.match(
+    /viewBox\s*=\s*["']\s*[\d.+-]+\s+[\d.+-]+\s+([\d.+-]+)\s+([\d.+-]+)\s*["']/i
+  );
+  if (viewBoxMatch) {
+    const width = parseFloat(viewBoxMatch[1]);
+    const height = parseFloat(viewBoxMatch[2]);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return `${width} / ${height}`;
+    }
+  }
+
+  const svgTagMatch = svgContent.match(/<svg\b([^>]*)>/i);
+  if (svgTagMatch) {
+    const attrs = svgTagMatch[1];
+    const widthAttr = attrs.match(/\bwidth\s*=\s*["']?\s*([\d.]+)/i);
+    const heightAttr = attrs.match(/\bheight\s*=\s*["']?\s*([\d.]+)/i);
+    if (widthAttr && heightAttr) {
+      const width = parseFloat(widthAttr[1]);
+      const height = parseFloat(heightAttr[1]);
+      if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+        return `${width} / ${height}`;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Derive an inline icon SVG's intrinsic pixel size so a layer can adopt the
+ * icon's real dimensions (instead of inheriting whatever box the previous icon
+ * had). Prefers numeric `width`/`height` attributes, falling back to the
+ * `viewBox` extents. Returns null when no usable pixel size can be determined
+ * (e.g. percentage/`em` dimensions or a missing viewBox).
+ */
+export function getSvgIntrinsicSize(
+  svgContent: string | null | undefined
+): { width: number; height: number } | null {
+  if (!svgContent) return null;
+
+  const svgTagMatch = svgContent.match(/<svg\b([^>]*)>/i);
+  if (svgTagMatch) {
+    const attrs = svgTagMatch[1];
+    // Only accept bare numbers or explicit px — skip %, em, rem, etc.
+    const widthAttr = attrs.match(/\bwidth\s*=\s*["']?\s*([\d.]+)\s*(px)?["'\s>]/i);
+    const heightAttr = attrs.match(/\bheight\s*=\s*["']?\s*([\d.]+)\s*(px)?["'\s>]/i);
+    if (widthAttr && heightAttr) {
+      const width = Math.round(parseFloat(widthAttr[1]));
+      const height = Math.round(parseFloat(heightAttr[1]));
+      if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+        return { width, height };
+      }
+    }
+  }
+
+  const viewBoxMatch = svgContent.match(
+    /viewBox\s*=\s*["']\s*[\d.+-]+\s+[\d.+-]+\s+([\d.+-]+)\s+([\d.+-]+)\s*["']/i
+  );
+  if (viewBoxMatch) {
+    const width = Math.round(parseFloat(viewBoxMatch[1]));
+    const height = Math.round(parseFloat(viewBoxMatch[2]));
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { width, height };
+    }
+  }
+
+  return null;
+}
+
 import type { AssetCategory, AssetCategoryFilter, Layer, Component, ComponentVariable } from '@/types';
 import {
   ASSET_CATEGORIES,
@@ -39,6 +149,34 @@ export function isAssetOfType(
 ): boolean {
   if (!mimeType) return false;
   return ALLOWED_MIME_TYPES[category].includes(mimeType);
+}
+
+/**
+ * Validate a MIME type against a category.
+ * Returns an error message if invalid, or null if valid.
+ */
+export function validateCategoryMimeType(
+  mimeType: string,
+  category: string | null | undefined
+): string | null {
+  if (!category) return null;
+
+  const categoryMap: Record<string, { category: AssetCategory; label: string }> = {
+    [ASSET_CATEGORIES.IMAGES]: { category: ASSET_CATEGORIES.IMAGES, label: 'image' },
+    [ASSET_CATEGORIES.VIDEOS]: { category: ASSET_CATEGORIES.VIDEOS, label: 'video' },
+    [ASSET_CATEGORIES.AUDIO]: { category: ASSET_CATEGORIES.AUDIO, label: 'audio' },
+    [ASSET_CATEGORIES.DOCUMENTS]: { category: ASSET_CATEGORIES.DOCUMENTS, label: 'document' },
+    [ASSET_CATEGORIES.ICONS]: { category: ASSET_CATEGORIES.ICONS, label: 'icon' },
+  };
+
+  const entry = categoryMap[category];
+  if (!entry) return null;
+
+  if (!isAssetOfType(mimeType, entry.category)) {
+    return `Only ${entry.label} files are allowed`;
+  }
+
+  return null;
 }
 
 // Category to label mapping
@@ -244,16 +382,80 @@ export function getAssetProxyUrl(
 }
 
 /**
+ * Default max width applied to bitmap images served to the builder canvas.
+ * Caps decoded image bitmaps so a 11k×6k hero doesn't allocate ~260 MB of
+ * RGBA per copy in the iframe.
+ */
+const EDITOR_DEFAULT_IMAGE_WIDTH = 1920;
+const EDITOR_DEFAULT_IMAGE_QUALITY = 80;
+
+/**
+ * Bitmap MIME types we want to size-cap through the proxy in the editor.
+ * SVGs are skipped (vector, no decode cost) and videos/audio aren't bitmap
+ * decoded at all. GIFs are skipped too — Sharp collapses animated GIFs to a
+ * single static frame, so downscaling would kill the animation.
+ */
+function isBitmapImageMime(mimeType?: string | null): boolean {
+  if (!mimeType) return false;
+  if (!mimeType.startsWith('image/')) return false;
+  if (mimeType === 'image/svg+xml') return false;
+  if (mimeType === 'image/gif') return false;
+  return true;
+}
+
+/**
+ * Build an editor-optimized URL for a bitmap image asset. Routes through the
+ * `/a/{hash}/{slug}.{ext}` proxy with `?width=&quality=` so Sharp can downscale
+ * before the browser decodes the bitmap.
+ *
+ * Returns the asset's existing `public_url` unchanged when:
+ *   - the asset isn't a bitmap image (SVG, video, document, …)
+ *   - there's no `storage_path` (external/inline asset)
+ *   - the URL has already been rewritten to the proxy by an upstream consumer
+ */
+export function getEditorImageUrl(
+  asset: {
+    id: string;
+    filename: string;
+    mime_type: string;
+    storage_path?: string | null;
+    public_url?: string | null;
+  },
+  maxWidth: number = EDITOR_DEFAULT_IMAGE_WIDTH,
+  quality: number = EDITOR_DEFAULT_IMAGE_QUALITY
+): string | null {
+  const existing = asset.public_url ?? null;
+  if (!isBitmapImageMime(asset.mime_type)) return existing;
+  if (!asset.storage_path) return existing;
+
+  const proxyBase = getAssetProxyUrl(asset);
+  if (!proxyBase) return existing;
+
+  // Avoid double-appending if `public_url` already routes through the proxy
+  // (e.g. server pre-rewrote it). Re-append width to enforce the cap.
+  return `${proxyBase}?width=${maxWidth}&quality=${quality}`;
+}
+
+/**
  * Check if a URL is an asset proxy URL (starts with /a/)
  */
 function isProxyUrl(url: string): boolean {
   return url.startsWith('/a/');
 }
 
+/** Cheap extension sniff: does the URL path end in `.gif`? */
+function isGifUrl(url: string): boolean {
+  const path = url.split('?')[0].split('#')[0].toLowerCase();
+  return path.endsWith('.gif');
+}
+
 /**
- * Check if a URL supports image transformation params
+ * Check if a URL supports image transformation params.
+ * GIFs are excluded — Sharp flattens animated GIFs to a single frame, so
+ * appending `width`/`quality` would break the animation.
  */
 function isTransformableUrl(url: string): boolean {
+  if (isGifUrl(url)) return false;
   if (isProxyUrl(url)) return true;
   try {
     const urlObj = new URL(url);
@@ -280,8 +482,14 @@ export function getOptimizedImageUrl(
 
   try {
     if (isProxyUrl(url)) {
-      const separator = url.includes('?') ? '&' : '?';
-      return `${url}${separator}width=${width}&quality=${quality}`;
+      // Use URL parsing against a dummy base so we can `.set()` rather than
+      // append — the store may have already rewritten `public_url` to include
+      // its own `width`/`quality`, and naive concatenation would emit them
+      // twice (e.g. `?width=1920&quality=80&width=200&quality=80`).
+      const proxyUrl = new URL(url, 'http://localhost');
+      proxyUrl.searchParams.set('width', width.toString());
+      proxyUrl.searchParams.set('quality', quality.toString());
+      return `${proxyUrl.pathname}${proxyUrl.search}`;
     }
 
     const urlObj = new URL(url);
@@ -297,30 +505,66 @@ export function getOptimizedImageUrl(
  * Generate responsive image srcset with multiple sizes
  * Creates optimized URLs for different viewport widths
  * @param url - Original image URL
- * @param sizes - Array of widths in pixels (default: [640, 960, 1280, 1920, 2560])
+ * @param sizes - Array of widths in pixels (default: see below)
  * @param quality - Image quality 0-100 (default: 85)
+ * @param intrinsicWidth - Source image natural width. When provided, caps
+ *   variants to it so descriptors match the file the proxy returns (Sharp
+ *   runs with `withoutEnlargement: true`). Without this, a 1512px source
+ *   with a `?width=1920 1920w` descriptor sends a 1512px file: browsers
+ *   then compute `intrinsic = 1512 / (1920/1512) = 1190px` and render the
+ *   image ~21% smaller than intended.
  * @returns Srcset string with multiple size options
+ *
+ * Default ladder: 320, 480, 640, 750, 828, 1080, 1280, 1536, 1920.
+ * Picked to land within ~10% of the natural rendered size for every common
+ * viewport × DPR combination — coarser ladders (e.g. 640 → 960 → 1280) made
+ * mid-range phones download the next-bigger variant and wasted 20–30% of
+ * the byte budget on hero images.
+ *
+ *   320 — tiny viewports / small thumbnails
+ *   480 — older phones at 1x
+ *   640 — medium phones, tablet portrait at 1x
+ *   750 — iPhone SE/8 at 2x DPR (375 × 2)
+ *   828 — iPhone XR/11 at 2x DPR (414 × 2)
+ *  1080 — Pixel / Galaxy at 3x DPR (360 × 3)
+ *  1280 — iPhone 12–15 at ~3x DPR (390–430 × 3)
+ *  1536 — tablets at 2x DPR
+ *  1920 — full-width desktop hero (cap — bigger variants get picked on
+ *         retina laptops even when the rendered size is much smaller).
  *
  * @example
  * generateImageSrcset('https://supabase.co/storage/v1/object/public/assets/image.jpg')
- * // Returns: 'https://.../image.jpg?width=400&quality=85 400w, https://.../image.jpg?width=800&quality=85 800w, ...'
+ * // Returns: 'https://.../image.jpg?width=320&quality=85 320w, https://.../image.jpg?width=480&quality=85 480w, ...'
  */
 export function generateImageSrcset(
   url: string,
-  sizes: number[] = [640, 960, 1280, 1920, 2560],
-  quality: number = 85
+  sizes: number[] = [320, 480, 640, 750, 828, 1080, 1280, 1536, 1920],
+  quality: number = 85,
+  intrinsicWidth?: number | null
 ): string {
   if (!isTransformableUrl(url)) return '';
+
+  // Cap descriptors at the source's natural width when known and smaller than
+  // our default top-end. This keeps `descriptor === file actual width` so the
+  // browser's intrinsic-size math stays correct (see param docs above).
+  let effectiveSizes = sizes;
+  if (intrinsicWidth && intrinsicWidth > 0) {
+    const maxDefault = sizes[sizes.length - 1];
+    if (intrinsicWidth < maxDefault) {
+      effectiveSizes = sizes.filter((w) => w < intrinsicWidth);
+      effectiveSizes.push(intrinsicWidth);
+    }
+  }
 
   try {
     if (isProxyUrl(url)) {
       const baseUrl = url.split('?')[0];
-      return sizes
+      return effectiveSizes
         .map((width) => `${baseUrl}?width=${width}&quality=${quality} ${width}w`)
         .join(', ');
     }
 
-    const srcsetEntries = sizes.map((width) => {
+    const srcsetEntries = effectiveSizes.map((width) => {
       const sizeUrl = new URL(url);
       sizeUrl.searchParams.set('width', width.toString());
       sizeUrl.searchParams.set('quality', quality.toString());
@@ -337,6 +581,159 @@ export function generateImageSrcset(
 /** Returns the default responsive sizes attribute. */
 export function getImageSizes(): string {
   return '100vw';
+}
+
+/**
+ * Parse an image dimension attribute into a positive pixel value.
+ * Accepts `"320"` or `"320px"`. Returns null for empty, zero, or non-numeric input,
+ * preventing meaningless `width="0"` attributes from skewing srcset/sizes math.
+ */
+export function parseImageDimension(value: string | number | undefined | null): number | null {
+  if (value == null) return null;
+  const str = String(value).trim();
+  if (!/^\d+(\.\d+)?(px)?$/i.test(str)) return null;
+  const num = parseFloat(str.replace(/px$/i, ''));
+  return num > 0 ? num : null;
+}
+
+/**
+ * Build a responsive `sizes` attribute. With a known intrinsic width, browsers
+ * pick a smaller srcset variant on desktop; without it, fall back to 100vw.
+ */
+export function buildImageSizes(intrinsicWidth: number | null): string {
+  return intrinsicWidth ? `(max-width: 768px) 100vw, ${intrinsicWidth}px` : getImageSizes();
+}
+
+// Semantic layer names whose descendant images are almost never the LCP
+// (logos, menus, footer marks). Tracked via ancestor walk in
+// `findLcpCandidateLayerId` so we don't accidentally prioritize a header
+// logo over the actual hero image.
+const NON_LCP_ANCESTOR_NAMES = new Set(['header', 'footer', 'nav']);
+
+/**
+ * Heuristic: is this resolved asset a vector graphic (SVG)?
+ * SVGs are used overwhelmingly for logos / icons and should never be picked
+ * as the LCP candidate. We trust `mimeType` when present and fall back to a
+ * URL extension sniff for older callers that only pass `{ url, width }`.
+ */
+function isSvgAsset(asset: { mimeType?: string | null; url?: string | null } | undefined): boolean {
+  if (!asset) return false;
+  if (asset.mimeType && asset.mimeType.toLowerCase().includes('svg')) return true;
+  if (asset.url) return isSvgUrl(asset.url);
+  return false;
+}
+
+/** Cheap extension sniff: does the URL path end in `.svg`? */
+function isSvgUrl(url: string): boolean {
+  const path = url.split('?')[0].split('#')[0].toLowerCase();
+  return path.endsWith('.svg');
+}
+
+/**
+ * Best-effort URL extraction from an image layer's `src` variable when the
+ * variable is a raw URL string (`dynamic_text` / `static_text`) rather than
+ * an `AssetVariable`. Lets the LCP heuristic skip SVG logos that the user
+ * pasted as a URL instead of selecting from the asset library.
+ *
+ * Returns undefined for variable shapes we can't resolve cheaply (e.g. CMS
+ * field bindings) — those fall through to the existing checks.
+ */
+function getInlineImageUrl(srcVar: unknown): string | undefined {
+  if (!srcVar || typeof srcVar !== 'object') return undefined;
+  const v = srcVar as { type?: string; data?: { content?: unknown } };
+  if (v.type !== 'dynamic_text' && v.type !== 'static_text') return undefined;
+  const content = v.data?.content;
+  return typeof content === 'string' ? content : undefined;
+}
+
+export interface LcpCandidate {
+  layerId: string;
+  /** Asset id of the candidate image, when backed by a static asset variable. */
+  assetId?: string;
+}
+
+/**
+ * Find the LCP (Largest Contentful Paint) candidate for a given page tree.
+ * Walks the tree in render order and returns the first `image`-named layer that:
+ *   - is NOT a descendant of a `header`, `footer`, or `nav` layer (logos),
+ *   - is NOT backed by an SVG asset (vector logos / icons), and
+ *   - has an effective intrinsic width unknown or at least `minWidth` pixels.
+ *
+ * Width resolution order:
+ *   1. `layer.attributes.width` (parsed as int)
+ *   2. Asset record width via `resolvedAssets[assetId]`
+ *   3. Unknown — treat as candidate (best effort)
+ *
+ * Returns null if no qualifying image exists in the tree.
+ */
+export function findLcpCandidate(
+  layers: Layer[],
+  resolvedAssets?: Record<string, { width?: number | null; mimeType?: string | null; url?: string | null }>,
+  minWidth: number = 200
+): LcpCandidate | null {
+  const parseWidth = (value: unknown): number | null => {
+    if (typeof value === 'number' && !isNaN(value)) return value;
+    if (typeof value !== 'string') return null;
+    const match = value.match(/^\s*(\d+(?:\.\d+)?)/);
+    if (!match) return null;
+    const n = parseFloat(match[1]);
+    return isNaN(n) ? null : n;
+  };
+
+  const visit = (layer: Layer, inNonLcpAncestor: boolean): LcpCandidate | null => {
+    const inNonLcp = inNonLcpAncestor || NON_LCP_ANCESTOR_NAMES.has(layer.name);
+
+    if (layer.name === 'image' && !inNonLcp) {
+      const srcVar = layer.variables?.image?.src;
+      const assetId = isAssetVariable(srcVar) ? getAssetId(srcVar) : undefined;
+      const asset = assetId ? resolvedAssets?.[assetId] : undefined;
+
+      // Some pages store the image URL directly as a `dynamic_text` /
+      // `static_text` variable (e.g. pasted logo URL) rather than an
+      // `AssetVariable`. Sniff the inline URL so SVG logos in that shape
+      // are still skipped.
+      const inlineUrl = !assetId ? getInlineImageUrl(srcVar) : undefined;
+
+      // SVGs are vector logos / icons in practice — never the hero image.
+      const isSvg = isSvgAsset(asset) || (inlineUrl ? isSvgUrl(inlineUrl) : false);
+
+      if (!isSvg) {
+        let width = parseWidth(layer.attributes?.width);
+        if (width === null && asset?.width) {
+          width = asset.width as number;
+        }
+
+        if (width === null || width >= minWidth) {
+          return { layerId: layer.id, assetId: assetId || undefined };
+        }
+      }
+    }
+
+    if (layer.children) {
+      for (const child of layer.children) {
+        const found = visit(child, inNonLcp);
+        if (found) return found;
+      }
+    }
+
+    return null;
+  };
+
+  for (const layer of layers) {
+    const found = visit(layer, false);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+/** @deprecated Use {@link findLcpCandidate}. Kept for callers that only need the id. */
+export function findLcpCandidateLayerId(
+  layers: Layer[],
+  resolvedAssets?: Record<string, { width?: number | null; mimeType?: string | null; url?: string | null }>,
+  minWidth: number = 200
+): string | null {
+  return findLcpCandidate(layers, resolvedAssets, minWidth)?.layerId ?? null;
 }
 
 // ==========================================
@@ -435,11 +832,17 @@ export function collectLayerAssetIds(
         childAncestors.add(cid);
         const overrides = node.attrs.componentOverrides ?? undefined;
         scanOverrideAssets(overrides, childAncestors);
-        const comp = components.find(c => c.id === cid);
-        if (comp?.layers?.length) {
-          const resolved = applyComponentOverrides(comp.layers, overrides, comp.variables);
-          resolved.forEach(l => scanLayer(l, childAncestors));
-          scanVariableDefaults(comp.variables, childAncestors);
+
+        // Use pre-resolved layers when available (SSR path with slimmed components)
+        if (node.attrs._resolvedLayers?.length) {
+          (node.attrs._resolvedLayers as any[]).forEach(l => scanLayer(l, childAncestors));
+        } else {
+          const comp = components.find(c => c.id === cid);
+          if (comp?.layers?.length) {
+            const resolved = applyComponentOverrides(comp.layers, overrides, comp.variables);
+            resolved.forEach(l => scanLayer(l, childAncestors));
+            scanVariableDefaults(comp.variables, childAncestors);
+          }
         }
       }
     }
@@ -496,12 +899,11 @@ export function collectLayerAssetIds(
     const linkAssetId = layer.variables?.link?.asset?.id;
     addAssetId(linkAssetId);
 
-    // Lightbox file assets
-    if (layer.settings?.lightbox?.files) {
+    // Lightbox file assets (addAssetId guards non-string/non-UUID values,
+    // so nested arrays or external URLs are safely ignored)
+    if (Array.isArray(layer.settings?.lightbox?.files)) {
       for (const fileId of layer.settings.lightbox.files) {
-        if (fileId && !fileId.startsWith('http') && !fileId.startsWith('/')) {
-          addAssetId(fileId);
-        }
+        addAssetId(fileId);
       }
     }
 
@@ -527,8 +929,17 @@ export function collectLayerAssetIds(
     // Collection item values on resolved collection layers
     if (layer._collectionItemValues) {
       for (const value of Object.values(layer._collectionItemValues)) {
-        if (typeof value === 'string' && isValidUUID(value)) {
-          assetIds.add(value);
+        if (typeof value === 'string') {
+          if (isValidUUID(value)) {
+            assetIds.add(value);
+          } else if (value.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(value);
+              if (parsed?.type === 'asset' && parsed?.asset?.id && isValidUUID(parsed.asset.id)) {
+                assetIds.add(parsed.asset.id);
+              }
+            } catch { /* not valid JSON, skip */ }
+          }
         }
         // Scan rich_text values (Tiptap JSON) for embedded image assets
         if (value && typeof value === 'object' && (value as any).type === 'doc') {

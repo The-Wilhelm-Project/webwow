@@ -42,6 +42,39 @@ export async function up(knex: Knex): Promise<void> {
   // Unique index on id for draft assets (allows foreign key references)
   await knex.schema.raw('CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_id_unique ON assets(id) WHERE is_published = false AND deleted_at IS NULL');
 
+  // Enable Row Level Security
+  await knex.schema.raw('ALTER TABLE assets ENABLE ROW LEVEL SECURITY');
+
+  // Create RLS policies
+  // Single SELECT policy: public can view published OR authenticated can view all
+  await knex.schema.raw(`
+    CREATE POLICY "Assets are viewable"
+      ON assets FOR SELECT
+      USING (
+        (is_published = true AND deleted_at IS NULL)
+        OR (SELECT auth.uid()) IS NOT NULL
+      )
+  `);
+
+  // Authenticated users can INSERT/UPDATE/DELETE
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can modify assets"
+      ON assets FOR INSERT
+      WITH CHECK ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can update assets"
+      ON assets FOR UPDATE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can delete assets"
+      ON assets FOR DELETE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
   // Add comment for documentation
   await knex.schema.raw(`
     COMMENT ON COLUMN assets.content IS 'Inline SVG content for icon assets. When set, storage_path and public_url should be NULL.'
@@ -49,6 +82,12 @@ export async function up(knex: Knex): Promise<void> {
 }
 
 export async function down(knex: Knex): Promise<void> {
+  // Drop policies
+  await knex.schema.raw('DROP POLICY IF EXISTS "Assets are viewable" ON assets');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can modify assets" ON assets');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can update assets" ON assets');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can delete assets" ON assets');
+
   // Drop table
   await knex.schema.dropTableIfExists('assets');
 }

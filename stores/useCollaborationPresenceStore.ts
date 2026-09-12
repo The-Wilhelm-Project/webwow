@@ -18,20 +18,6 @@ import {
   getUserStatus,
 } from '../lib/collaboration-utils';
 
-function getSessionId(): string {
-  if (typeof window !== 'undefined') {
-    let id = sessionStorage.getItem('webwow_session_id');
-    if (!id) {
-      id = crypto.randomUUID();
-      sessionStorage.setItem('webwow_session_id', id);
-    }
-    return id;
-  }
-  return 'server';
-}
-
-export { getSessionId };
-
 // Generic resource lock - used for all lockable resources (layers, collection items, etc.)
 export interface ResourceLock {
   resource_type: string; // 'layer' | 'collection_item' | etc.
@@ -43,6 +29,16 @@ export interface ResourceLock {
 
 // Helper to create a resource lock key
 export const getResourceLockKey = (type: string, id: string) => `${type}:${id}`;
+
+/**
+ * How long we coalesce `last_active`-only updates per user.
+ *
+ * `last_active` is only used by `getUserStatus` (active <10s, idle <30s), so
+ * 5s precision is plenty. Honoring every sub-second heartbeat would force
+ * every subscriber of `state.users` (CMS, header avatars, locked layer rows)
+ * to re-render and starve the browser of paint time during cursor sweeps.
+ */
+const LAST_ACTIVE_COALESCE_MS = 5000;
 
 // Resource type constants
 export const RESOURCE_TYPES = {
@@ -99,12 +95,54 @@ export const useCollaborationPresenceStore = create<CollaborationPresenceState>(
     // Basic state setters
     setUsers: (users) => set({ users }),
     
-    updateUser: (userId, updates) => set((state) => ({
-      users: {
-        ...state.users,
-        [userId]: { ...state.users[userId], ...updates }
+    updateUser: (userId, updates) => set((state) => {
+      const existing = state.users[userId];
+
+      // No existing entry — insert as-is (rare path; initialization).
+      if (!existing) {
+        return {
+          users: {
+            ...state.users,
+            [userId]: { ...(updates as CollaborationUser) }
+          }
+        };
       }
-    })),
+
+      // Detect whether any field actually changes. We also coalesce
+      // `last_active`-only heartbeats: those fire every time the user pauses
+      // and would otherwise re-render every `state.users` subscriber.
+      let changed = false;
+      const nextRecord: Record<string, unknown> = { ...(existing as unknown as Record<string, unknown>) };
+      const existingRecord = existing as unknown as Record<string, unknown>;
+      const updatesRecord = updates as unknown as Record<string, unknown>;
+      for (const key in updatesRecord) {
+        const newVal = updatesRecord[key];
+        if (key === 'last_active'
+          && typeof newVal === 'number'
+          && typeof existing.last_active === 'number'
+          && newVal - existing.last_active < LAST_ACTIVE_COALESCE_MS) {
+          continue;
+        }
+        if (existingRecord[key] !== newVal) {
+          nextRecord[key] = newVal;
+          changed = true;
+        }
+      }
+      const next = nextRecord as unknown as CollaborationUser;
+
+      if (!changed) {
+        // Nothing meaningful changed — keep the existing reference so
+        // subscribers don't re-render.
+        return state;
+      }
+
+      return {
+        users: {
+          ...state.users,
+          [userId]: next
+        }
+      };
+    }),
     
     removeUser: (userId) => set((state) => {
       const { [userId]: removed, ...remainingUsers } = state.users;
@@ -254,23 +292,26 @@ export const useCollaborationPresenceStore = create<CollaborationPresenceState>(
   }))
 );
 
-// Subscribe to lock expiration
+// Background cleanup intervals.
+// Both functions are idempotent and reference-counted by the caller — they
+// must be paired with their `stop*` counterpart when the consumer unmounts.
 let lockCheckInterval: NodeJS.Timeout | null = null;
+let notificationCleanupInterval: NodeJS.Timeout | null = null;
 
+/** Periodically release `resourceLocks` whose `expires_at` has passed. */
 export const startLockExpirationCheck = () => {
   if (lockCheckInterval) return;
-  
+
   lockCheckInterval = setInterval(() => {
     const { resourceLocks, releaseResourceLock } = useCollaborationPresenceStore.getState();
     const now = Date.now();
-    
-    // Check all resource locks for expiration
-    Object.entries(resourceLocks).forEach(([key, lock]) => {
+
+    Object.entries(resourceLocks).forEach(([, lock]) => {
       if (now > lock.expires_at) {
         releaseResourceLock(lock.resource_type, lock.resource_id);
       }
     });
-  }, 1000); // Check every second
+  }, 1000);
 };
 
 export const stopLockExpirationCheck = () => {
@@ -280,17 +321,26 @@ export const stopLockExpirationCheck = () => {
   }
 };
 
-// Auto-cleanup notifications after 30 seconds
+/** Periodically drop notifications older than 30 s. */
 export const startNotificationCleanup = () => {
-  setInterval(() => {
+  if (notificationCleanupInterval) return;
+
+  notificationCleanupInterval = setInterval(() => {
     const { notifications, removeNotification } = useCollaborationPresenceStore.getState();
     const now = Date.now();
-    const maxAge = 30000; // 30 seconds
-    
+    const maxAge = 30000;
+
     notifications.forEach(notification => {
       if (now - notification.timestamp > maxAge) {
         removeNotification(notification.id);
       }
     });
-  }, 5000); // Check every 5 seconds
+  }, 5000);
+};
+
+export const stopNotificationCleanup = () => {
+  if (notificationCleanupInterval) {
+    clearInterval(notificationCleanupInterval);
+    notificationCleanupInterval = null;
+  }
 };

@@ -104,7 +104,7 @@ export function WebflowImportDialog({
       formData.append('webflowZip', zipFile);
       csvFiles.forEach((csvFile) => formData.append('csvFiles', csvFile));
 
-      const response = await fetch('/webwow/api/webflow/import', {
+      const response = await fetch('/ycode/api/webflow/import', {
         method: 'POST',
         body: formData,
         signal: abortRef.current.signal,
@@ -245,7 +245,7 @@ export function WebflowImportDialog({
           {step === 'complete' && isCompleted && (
             <Button
               onClick={() => {
-                window.location.href = '/webwow';
+                window.location.href = '/ycode';
               }}
             >
               Builder neu laden

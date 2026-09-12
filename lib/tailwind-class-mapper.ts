@@ -106,8 +106,9 @@ function splitClassesPreservingBrackets(cls: string): string[] {
  * Used to distinguish between text-[color] and text-[size] arbitrary values
  */
 function isColorValue(value: string): boolean {
-  // Check for CSS custom property color references: color:var(--...)
+  // Check for CSS custom property color references: color:var(--...) or var(--...)
   if (/^color:var\(--/.test(value)) return true;
+  if (/^var\(--/.test(value)) return true;
 
   // Check for hex colors (with or without #)
   // Supports: #RGB, RGB, #RRGGBB, RRGGBB, #RRGGBBAA, RRGGBBAA
@@ -190,14 +191,66 @@ function formatMeasurementClass(
     return `${prefix}-[${value}]`;
   }
 
-  // For values starting with a digit but not caught above
-  if (value.match(/^\d/)) {
+  // For values starting with a digit or leading decimal point (e.g. ".875rem")
+  if (value.match(/^\.?\d/)) {
     return `${prefix}-[${value}]`;
   }
 
   // Otherwise use as named class (e.g., "large", "small")
   return `${prefix}-${value}`;
 }
+
+/**
+ * Formats a signed arbitrary Tailwind class (supports negative values).
+ * "-45deg" with prefix "rotate" → "-rotate-[45deg]"
+ * "10px" with prefix "translate-x" → "translate-x-[10px]"
+ */
+function formatSignedArbitraryClass(value: string, prefix: string): string {
+  if (value.startsWith('-')) return `-${prefix}-[${value.slice(1)}]`;
+  return `${prefix}-[${value}]`;
+}
+
+/**
+ * Ensures an angle value has a unit. Plain numbers get "deg" appended.
+ * "45" → "45deg", "45deg" → "45deg", "0.5turn" → "0.5turn"
+ */
+function ensureAngleUnit(value: string): string {
+  const bare = value.startsWith('-') ? value.slice(1) : value;
+  if (/^\d*\.?\d+$/.test(bare)) return `${value}deg`;
+  return value;
+}
+
+/**
+ * Strips the default "deg" unit from an angle value for clean display.
+ * "45deg" → "45", "-90deg" → "-90", "0.5turn" → "0.5turn" (preserved)
+ */
+function stripAngleUnit(value: string): string {
+  if (value.endsWith('deg')) return value.slice(0, -3);
+  return value;
+}
+
+/**
+ * Ensures a length value has a unit. Plain numbers get "px" appended.
+ * "20" → "20px", "-50" → "-50px", "10rem" → "10rem", "50%" → "50%"
+ */
+function ensureLengthUnit(value: string): string {
+  const bare = value.startsWith('-') ? value.slice(1) : value;
+  if (/^\d*\.?\d+$/.test(bare)) return `${value}px`;
+  return value;
+}
+
+/**
+ * Normalizes a grid span value to a bare Tailwind suffix.
+ * Accepts CSS-native shorthand ("span 3") as well as bare values ("3", "full", "auto").
+ */
+function normalizeGridSpanValue(value: string): string {
+  return value.replace(/^span\s+/i, '').trim();
+}
+
+/** Tailwind `display` utility values the editor supports as bare classes. */
+const DISPLAY_VALUES = new Set([
+  'block', 'inline-block', 'inline', 'flex', 'inline-flex', 'grid', 'inline-grid', 'hidden',
+]);
 
 /**
  * Map of Tailwind class prefixes to their property names
@@ -210,6 +263,7 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   flexWrap: /^flex-(wrap|wrap-reverse|nowrap)$/,
   justifyContent: /^justify-(start|end|center|between|around|evenly|stretch)$/,
   alignItems: /^items-(start|end|center|baseline|stretch)$/,
+  alignSelf: /^self-(auto|start|end|center|baseline|stretch)$/,
   alignContent: /^content-(start|end|center|between|around|evenly|stretch)$/,
   gap: /^gap-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   columnGap: /^gap-x-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
@@ -219,48 +273,60 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
 
   // Spacing
   padding: /^p-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
+  paddingX: /^px-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
+  paddingY: /^py-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   paddingTop: /^pt-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   paddingRight: /^pr-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   paddingBottom: /^pb-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   paddingLeft: /^pl-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   margin: /^m-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
+  marginX: /^mx-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
+  marginY: /^my-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   marginTop: /^mt-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   marginRight: /^mr-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   marginBottom: /^mb-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   marginLeft: /^ml-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
 
   // Sizing
-  width: /^w-(\[.+\]|\d+\/\d+|\d+|px|auto|full|screen|min|max|fit)$/,
-  height: /^h-(\[.+\]|\d+\/\d+|\d+|px|auto|full|screen|min|max|fit)$/,
-  minWidth: /^min-w-(\[.+\]|\d+|px|full|min|max|fit)$/,
-  minHeight: /^min-h-(\[.+\]|\d+|px|full|screen|min|max|fit)$/,
-  maxWidth: /^max-w-(\[.+\]|none|xs|sm|md|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|full|min|max|fit|prose|screen-sm|screen-md|screen-lg|screen-xl|screen-2xl)$/,
-  maxHeight: /^max-h-(\[.+\]|\d+|px|full|screen|min|max|fit)$/,
-  overflow: /^overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto)$/,
+  // Match any value after the prefix (including partial keywords typed live,
+  // e.g. h-a, h-au, h-aut) so in-progress classes are replaced instead of
+  // accumulating. Each prefix is exclusive to its property in Tailwind.
+  width: /^w-.+$/,
+  height: /^h-.+$/,
+  minWidth: /^min-w-.+$/,
+  minHeight: /^min-h-.+$/,
+  maxWidth: /^max-w-.+$/,
+  maxHeight: /^max-h-.+$/,
+  overflow: /^(truncate|overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto))$/,
   aspectRatio: /^aspect-(\[.+\]|auto|square|video)$/,
   objectFit: /^object-(contain|cover|fill|none|scale-down)$/,
+  objectPosition: /^object-(left-top|right-top|left-bottom|right-bottom|top|bottom|left|right|center|\[.+\])$/,
   gridColumnSpan: /^col-span-(1|2|3|4|5|6|7|8|9|10|11|12|auto|full)$/,
   gridRowSpan: /^row-span-(1|2|3|4|5|6|7|8|9|10|11|12|auto|full)$/,
 
   // Typography
   fontFamily: /^font-(sans|serif|mono|\[.+\])$/,
   // Updated to match partial arbitrary values like text-n, text-no, text-non (not just complete text-[10rem])
-  // Excludes text-align values (left, center, right, justify, start, end)
-  fontSize: /^text-(?!(?:left|center|right|justify|start|end)(?:\s|$)).+$/,
+  // Excludes text-align values, text-wrap utilities, and text-shadow
+  fontSize: /^text-(?!(?:left|center|right|justify|start|end|wrap|nowrap|balance|pretty|shadow)(?:-|\s|$)).+$/,
   fontWeight: /^font-(thin|extralight|light|normal|medium|semibold|bold|extrabold|black|\[.+\])$/,
   lineHeight: /^leading-(none|tight|snug|normal|relaxed|loose|\d+|\[.+\])$/,
   letterSpacing: /^tracking-(tighter|tight|normal|wide|wider|widest|\[.+\]|.+)$/,
   textAlign: /^text-(left|center|right|justify|start|end)$/,
+  textWrap: /^text-(wrap|nowrap|balance|pretty)$/,
+  fontVariantNumeric: /^(normal-nums|ordinal|slashed-zero|lining-nums|oldstyle-nums|proportional-nums|tabular-nums|diagonal-fractions|stacked-fractions)$/,
   textTransform: /^(uppercase|lowercase|capitalize|normal-case)$/,
   textDecoration: /^(underline|overline|line-through|no-underline)$/,
   textDecorationColor: /^decoration-\[.+\](\/\d+)?$/,
   textDecorationThickness: /^decoration-(\d+|auto|from-font|\[(?!#|rgb|hsl).+\])$/,
   underlineOffset: /^underline-offset-.+$/,
+  lineClamp: /^line-clamp-(none|\d+|\[.+\])$/,
   // Updated to match partial arbitrary values like text-r, text-re, text-red (not just complete text-[#FF0000])
-  // Excludes fontSize named values and text-align values
+  // Excludes fontSize named values, text-align values, and text-wrap utilities
   // Includes opacity modifier: text-[#cc8d8d]/59
-  color: /^text-(?!(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|left|center|right|justify|start|end)(?:\s|$)).+(\/\d+)?$/,
+  color: /^text-(?!(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|left|center|right|justify|start|end|wrap|nowrap|balance|pretty|shadow)(?:-|\s|$)).+(\/\d+)?$/,
   placeholderColor: /^placeholder:text-.+(\/\d+)?$/,
+  textShadow: /^text-shadow(-none|-2xs|-xs|-sm|-md|-lg|-\[.+\])?$/,
 
   // Backgrounds
   backgroundColor: /^bg-(?!(?:auto|cover|contain|bottom|center|left|left-bottom|left-top|right|right-bottom|right-top|top|repeat|no-repeat|repeat-x|repeat-y|repeat-round|repeat-space|none|gradient-to-t|gradient-to-tr|gradient-to-r|gradient-to-br|gradient-to-b|gradient-to-bl|gradient-to-l|gradient-to-tl)$)((\w+)(-\d+)?|\[.+\](?:\/\d+)?)$/,
@@ -271,13 +337,13 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   backgroundClip: /^bg-clip-(text|border|padding|content)$/,
 
   // Borders
-  borderWidth: /^border(-\d+|-\[(?!#|rgb|color:var).+\])?$/,
-  borderTopWidth: /^border-t(-\d+|-\[(?!#|rgb|color:var).+\])?$/,
-  borderRightWidth: /^border-r(-\d+|-\[(?!#|rgb|color:var).+\])?$/,
-  borderBottomWidth: /^border-b(-\d+|-\[(?!#|rgb|color:var).+\])?$/,
-  borderLeftWidth: /^border-l(-\d+|-\[(?!#|rgb|color:var).+\])?$/,
+  borderWidth: /^border(-\d+|-\[(?!#|rgb|color:var|var\().+\])?$/,
+  borderTopWidth: /^border-t(-\d+|-\[(?!#|rgb|color:var|var\().+\])?$/,
+  borderRightWidth: /^border-r(-\d+|-\[(?!#|rgb|color:var|var\().+\])?$/,
+  borderBottomWidth: /^border-b(-\d+|-\[(?!#|rgb|color:var|var\().+\])?$/,
+  borderLeftWidth: /^border-l(-\d+|-\[(?!#|rgb|color:var|var\().+\])?$/,
   borderStyle: /^border-(solid|dashed|dotted|double|hidden|none)$/,
-  borderColor: /^border-(?!(?:solid|dashed|dotted|double|hidden|none)$)(?!t-|r-|b-|l-|x-|y-)((\w+)(-\d+)?|\[(?:#|rgb|color:var).+\])(\/\d+)?$/,
+  borderColor: /^border-(?!(?:solid|dashed|dotted|double|hidden|none|collapse|separate)$)(?!t-|r-|b-|l-|x-|y-|spacing)((\w+)(-\d+)?|\[(?:#|rgb|color:var|var\().+\])(\/\d+)?$/,
   borderRadius: /^rounded(-none|-sm|-md|-lg|-xl|-2xl|-3xl|-full|-\[.+\])?$/,
   borderTopLeftRadius: /^rounded-tl(-none|-sm|-md|-lg|-xl|-2xl|-3xl|-full|-\[.+\])?$/,
   borderTopRightRadius: /^rounded-tr(-none|-sm|-md|-lg|-xl|-2xl|-3xl|-full|-\[.+\])?$/,
@@ -285,14 +351,14 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   borderBottomLeftRadius: /^rounded-bl(-none|-sm|-md|-lg|-xl|-2xl|-3xl|-full|-\[.+\])?$/,
 
   // Dividers
-  divideX: /^divide-x(-\d+|-\[(?!#|rgb|color:var).+\])?$/,
-  divideY: /^divide-y(-\d+|-\[(?!#|rgb|color:var).+\])?$/,
+  divideX: /^divide-x(-\d+|-\[(?!#|rgb|color:var|var\().+\])?$/,
+  divideY: /^divide-y(-\d+|-\[(?!#|rgb|color:var|var\().+\])?$/,
   divideStyle: /^divide-(solid|dashed|dotted|double|none)$/,
-  divideColor: /^divide-((\w+)(-\d+)?|\[(?:#|rgb|color:var).+\])(\/\d+)?$/,
+  divideColor: /^divide-((\w+)(-\d+)?|\[(?:#|rgb|color:var|var\().+\])(\/\d+)?$/,
 
   // Outline
-  outlineWidth: /^outline(-\d+|-\[(?!#|rgb|color:var).+\])?$/,
-  outlineColor: /^outline-((\w+)(-\d+)?|\[(?:#|rgb|color:var).+\])(\/\d+)?$/,
+  outlineWidth: /^outline(-\d+|-\[(?!#|rgb|color:var|var\().+\])?$/,
+  outlineColor: /^outline-((\w+)(-\d+)?|\[(?:#|rgb|color:var|var\().+\])(\/\d+)?$/,
   outlineOffset: /^outline-offset-(\d+|-?\[.+\])$/,
 
   // Effects
@@ -300,6 +366,8 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   boxShadow: /^shadow(-none|-sm|-md|-lg|-xl|-2xl|-inner|-\[.+\])?$/,
   blur: /^blur(-none|-sm|-md|-lg|-xl|-2xl|-3xl|-\[.+\])?$/,
   backdropBlur: /^backdrop-blur(-none|-sm|-md|-lg|-xl|-2xl|-3xl|-\[.+\])?$/,
+  mixBlendMode: /^mix-blend-(normal|multiply|screen|overlay|darken|lighten|color-dodge|color-burn|hard-light|soft-light|difference|exclusion|hue|saturation|color|luminosity)$/,
+  cursor: /^cursor-.+$/,
 
   // Positioning
   position: /^(static|fixed|absolute|relative|sticky)$/,
@@ -308,7 +376,129 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   bottom: /^bottom-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   left: /^left-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   zIndex: /^z-(\[.+\]|\d+|auto)$/,
+
+  // Transforms
+  scale: /^scale-(\[.+\]|\d+)$/,
+  rotate: /^-?rotate-(\[.+\]|\d+)$/,
+  translateX: /^-?translate-x-(\[.+\]|\d+\/\d+|\d+|px|full)$/,
+  translateY: /^-?translate-y-(\[.+\]|\d+\/\d+|\d+|px|full)$/,
+  skewX: /^-?skew-x-(\[.+\]|\d+)$/,
+  skewY: /^-?skew-y-(\[.+\]|\d+)$/,
+  transformOrigin: /^origin-(center|top|top-right|right|bottom-right|bottom|bottom-left|left|top-left)$/,
+
+  // Transitions
+  transitionProperty: /^transition(-all|-colors|-opacity|-shadow|-transform|-none)?$/,
+  duration: /^duration-(\[.+\]|\d+)$/,
+  easing: /^ease-(linear|in|out|in-out)$/,
+  delay: /^delay-(\[.+\]|\d+)$/,
 };
+
+/**
+ * Spacing shorthands and the properties they override. Adding a shorthand
+ * clears conflicting classes lower in the hierarchy: full (p-/m-) overrides
+ * both axes and all sides; an axis (px-/py-/mx-/my-) overrides its two sides.
+ */
+const SPACING_OVERRIDES: Record<string, string[]> = {
+  padding: ['paddingX', 'paddingY', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'],
+  margin: ['marginX', 'marginY', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft'],
+  paddingX: ['paddingLeft', 'paddingRight'],
+  paddingY: ['paddingTop', 'paddingBottom'],
+  marginX: ['marginLeft', 'marginRight'],
+  marginY: ['marginTop', 'marginBottom'],
+};
+
+/**
+ * Per-side spacing inputs fall back through more general shorthands so the UI
+ * reflects axis/full classes (e.g. paddingTop reads py-* then p-* when no pt-*).
+ */
+const SPACING_SIDE_FALLBACKS: Record<string, string[]> = {
+  paddingTop: ['paddingY', 'padding'],
+  paddingBottom: ['paddingY', 'padding'],
+  paddingLeft: ['paddingX', 'padding'],
+  paddingRight: ['paddingX', 'padding'],
+  marginTop: ['marginY', 'margin'],
+  marginBottom: ['marginY', 'margin'],
+  marginLeft: ['marginX', 'margin'],
+  marginRight: ['marginX', 'margin'],
+};
+
+/**
+ * For each spacing shorthand, the sides it controls. A shorthand is redundant
+ * once every side it controls is covered by a more specific class (full p-/m-
+ * may be covered by an axis, an axis only by its sides).
+ */
+const SPACING_SHORTHAND_CONTROLS: Record<string, string[]> = {
+  paddingX: ['paddingLeft', 'paddingRight'],
+  paddingY: ['paddingTop', 'paddingBottom'],
+  padding: ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'],
+  marginX: ['marginLeft', 'marginRight'],
+  marginY: ['marginTop', 'marginBottom'],
+  margin: ['marginTop', 'marginRight', 'marginBottom', 'marginLeft'],
+};
+
+/** Maps a spacing side property to the axis shorthand that covers it. */
+const SPACING_SIDE_AXIS: Record<string, string> = {
+  paddingTop: 'paddingY',
+  paddingBottom: 'paddingY',
+  paddingLeft: 'paddingX',
+  paddingRight: 'paddingX',
+  marginTop: 'marginY',
+  marginBottom: 'marginY',
+  marginLeft: 'marginX',
+  marginRight: 'marginX',
+};
+
+/** Full shorthands that can be covered by axis classes (not just sides). */
+const SPACING_FULL_SHORTHANDS = new Set(['padding', 'margin']);
+
+/** All spacing property names, used to gate redundancy cleanup. */
+const SPACING_PROPERTY_NAMES = new Set([
+  ...Object.keys(SPACING_SHORTHAND_CONTROLS),
+  ...Object.keys(SPACING_SIDE_AXIS),
+]);
+
+/**
+ * Identify which spacing property a prefix-stripped class matches, if any.
+ */
+function getSpacingProperty(baseClass: string): string | null {
+  for (const property of SPACING_PROPERTY_NAMES) {
+    if (CLASS_PROPERTY_MAP[property].test(baseClass)) return property;
+  }
+  return null;
+}
+
+/**
+ * Remove spacing shorthands fully overridden by more specific classes (e.g.
+ * px-* once both pl-* and pr-* are set, or p-* once every side/axis is covered).
+ * Scoped per breakpoint + UI state so responsive/state values stay independent.
+ */
+export function removeRedundantSpacingShorthands(classes: string[]): string[] {
+  // "breakpoint|uiState" → spacing properties explicitly present in that group
+  const presentByGroup = new Map<string, Set<string>>();
+  classes.forEach((cls) => {
+    const { breakpoint, uiState, baseClass } = parseFullClass(cls);
+    const property = getSpacingProperty(baseClass);
+    if (!property) return;
+    const key = `${breakpoint}|${uiState}`;
+    if (!presentByGroup.has(key)) presentByGroup.set(key, new Set());
+    presentByGroup.get(key)!.add(property);
+  });
+
+  const isRedundant = (shorthand: string, present: Set<string>): boolean => {
+    const allowAxisCoverage = SPACING_FULL_SHORTHANDS.has(shorthand);
+    return SPACING_SHORTHAND_CONTROLS[shorthand].every(
+      (side) => present.has(side) || (allowAxisCoverage && present.has(SPACING_SIDE_AXIS[side]))
+    );
+  };
+
+  return classes.filter((cls) => {
+    const { breakpoint, uiState, baseClass } = parseFullClass(cls);
+    const property = getSpacingProperty(baseClass);
+    if (!property || !SPACING_SHORTHAND_CONTROLS[property]) return true;
+    const present = presentByGroup.get(`${breakpoint}|${uiState}`);
+    return present ? !isRedundant(property, present) : true;
+  });
+}
 
 /**
  * Get the conflicting class pattern for a given property
@@ -395,6 +585,19 @@ export function removeConflictingClasses(
         if (property === 'color' && !isColor) {
           return true; // Keep this class, it's a size not a color
         }
+      }
+    }
+
+    // Special handling for font-[...] arbitrary values
+    // Distinguish fontWeight (numeric, e.g. font-[700]) from fontFamily
+    // (non-numeric, e.g. font-[Gelasio_Regular]) — both match each other's
+    // pattern via \[.+\], so keep the mismatched one instead of removing it.
+    if (baseClass.startsWith('font-[')) {
+      const value = extractArbitraryValue(baseClass);
+      if (value) {
+        const isNumeric = /^\d/.test(value);
+        if (property === 'fontWeight' && !isNumeric) return true;
+        if (property === 'fontFamily' && isNumeric) return true;
       }
     }
 
@@ -500,8 +703,12 @@ export function propertyToClass(
   // Layout conversions
   if (category === 'layout') {
     switch (property) {
-      case 'display':
-        return value.toLowerCase();
+      case 'display': {
+        // Map CSS synonyms (e.g. "none") to Tailwind's canonical value and
+        // ignore unsupported values so we never emit an invalid class like "none".
+        const normalized = value.toLowerCase() === 'none' ? 'hidden' : value.toLowerCase();
+        return DISPLAY_VALUES.has(normalized) ? normalized : null;
+      }
       case 'flexDirection':
         if (value === 'row') return 'flex-row';
         if (value === 'column') return 'flex-col';
@@ -529,6 +736,13 @@ export function propertyToClass(
           'flex-end': 'end',
         };
         return `items-${itemsMap[value] || value}`;
+      }
+      case 'alignSelf': {
+        const selfMap: Record<string, string> = {
+          'flex-start': 'start',
+          'flex-end': 'end',
+        };
+        return `self-${selfMap[value] || value}`;
       }
       case 'alignContent': {
         const contentMap: Record<string, string> = {
@@ -569,10 +783,10 @@ export function propertyToClass(
         // Google/custom fonts: replace spaces with underscores for Tailwind arbitrary values
         return `font-[${value.replace(/\s+/g, '_')}]`;
       case 'lineHeight':
-        return value.match(/^\d/) ? `leading-[${value}]` : `leading-${value}`;
+        return value.match(/^\.?\d/) ? `leading-[${value}]` : `leading-${value}`;
       case 'letterSpacing':
-        // Check if value starts with digit/minus and doesn't already have a unit
-        if (value.match(/^-?\d/)) {
+        // Check if value starts with digit/minus/decimal and doesn't already have a unit
+        if (value.match(/^-?\.?\d/)) {
           // Check if value already has a unit (ends with letters or %)
           const hasUnit = /[a-z%]$/i.test(value);
           return hasUnit ? `tracking-[${value}]` : `tracking-[${value}em]`;
@@ -580,6 +794,10 @@ export function propertyToClass(
         return `tracking-${value}`;
       case 'textAlign':
         return `text-${value}`;
+      case 'textWrap':
+        return `text-${value}`;
+      case 'fontVariantNumeric':
+        return value === 'normal' ? 'normal-nums' : value;
       case 'textTransform':
         if (value === 'none') return 'normal-case';
         return value; // uppercase, lowercase, capitalize
@@ -606,6 +824,16 @@ export function propertyToClass(
         return formatMeasurementClass(value, 'decoration');
       case 'underlineOffset':
         return formatMeasurementClass(value, 'underline-offset');
+      case 'lineClamp':
+        if (value === 'none') return 'line-clamp-none';
+        if (/^\d+$/.test(value)) return `line-clamp-${value}`;
+        return `line-clamp-[${value}]`;
+      case 'textShadow':
+        if (value === 'none') return 'text-shadow-none';
+        if (['2xs', 'xs', 'sm', 'md', 'lg'].includes(value)) {
+          return `text-shadow-${value}`;
+        }
+        return `text-shadow-[${value.replace(/\s+/g, '_')}]`;
       case 'color':
         // Check if value is a gradient (linear-gradient or radial-gradient)
         if (value.includes('gradient(')) {
@@ -685,12 +913,20 @@ export function propertyToClass(
       // Special case: 100% → full
       if (value === '100%') return `${prefix}-full`;
 
+      // Tailwind fraction values (e.g. "1/2" → w-1/2); n/n equals 100% → full
+      const fractionMatch = value.match(/^(\d+)\/([1-9]\d*)$/);
+      if (fractionMatch) {
+        if (fractionMatch[1] === fractionMatch[2]) return `${prefix}-full`;
+        return `${prefix}-${value}`;
+      }
+
       // Use abstracted helper with allowed named values
       return formatMeasurementClass(value, prefix, ['auto', 'full', 'screen', 'min', 'max', 'fit', 'none']);
     }
 
     // Overflow
     if (property === 'overflow') {
+      if (value === 'ellipsis') return 'truncate'; // overflow-hidden + text-ellipsis + whitespace-nowrap
       return `overflow-${value}`; // overflow-visible, overflow-hidden, overflow-scroll, overflow-auto
     }
 
@@ -705,14 +941,21 @@ export function propertyToClass(
       return `object-${value}`;
     }
 
+    // Object Position
+    if (property === 'objectPosition') {
+      return `object-${value}`;
+    }
+
     // Grid Column Span
     if (property === 'gridColumnSpan') {
-      return value === 'full' ? 'col-span-full' : `col-span-${value}`;
+      const span = normalizeGridSpanValue(value);
+      return span === 'full' ? 'col-span-full' : `col-span-${span}`;
     }
 
     // Grid Row Span
     if (property === 'gridRowSpan') {
-      return value === 'full' ? 'row-span-full' : `row-span-${value}`;
+      const span = normalizeGridSpanValue(value);
+      return span === 'full' ? 'row-span-full' : `row-span-${span}`;
     }
   }
 
@@ -872,6 +1115,11 @@ export function propertyToClass(
           return `backdrop-blur-${value}`;
         }
         return `backdrop-blur-[${value}]`;
+      case 'mixBlendMode':
+        if (value === 'normal') return '';
+        return `mix-blend-${value}`;
+      case 'cursor':
+        return `cursor-${value}`;
     }
   }
 
@@ -888,6 +1136,53 @@ export function propertyToClass(
       case 'zIndex':
         if (value === 'auto') return 'z-auto';
         return value.match(/^\d/) ? `z-[${value}]` : `z-${value}`;
+    }
+  }
+
+  // Transform conversions
+  if (category === 'transforms') {
+    switch (property) {
+      case 'scale': {
+        const num = parseFloat(value);
+        if (!isNaN(num)) return `scale-[${value}]`;
+        return `scale-${value}`;
+      }
+      case 'rotate':
+        return formatSignedArbitraryClass(ensureAngleUnit(value), 'rotate');
+      case 'translateX':
+        if (value === 'full') return 'translate-x-full';
+        return formatSignedArbitraryClass(ensureLengthUnit(value), 'translate-x');
+      case 'translateY':
+        if (value === 'full') return 'translate-y-full';
+        return formatSignedArbitraryClass(ensureLengthUnit(value), 'translate-y');
+      case 'skewX':
+        return formatSignedArbitraryClass(ensureAngleUnit(value), 'skew-x');
+      case 'skewY':
+        return formatSignedArbitraryClass(ensureAngleUnit(value), 'skew-y');
+      case 'transformOrigin':
+        return `origin-${value}`;
+    }
+  }
+
+  // Transition conversions
+  if (category === 'transitions') {
+    switch (property) {
+      case 'transitionProperty':
+        if (value === 'none') return 'transition-none';
+        if (value === 'all') return 'transition-all';
+        if (['colors', 'opacity', 'shadow', 'transform'].includes(value)) {
+          return `transition-${value}`;
+        }
+        return 'transition';
+      case 'duration':
+      case 'delay': {
+        const prefix = property === 'duration' ? 'duration' : 'delay';
+        const bare = value.replace(/^-/, '');
+        if (/^\d*\.?\d+$/.test(bare)) return `${prefix}-[${value}ms]`;
+        return `${prefix}-[${value}]`;
+      }
+      case 'easing':
+        return `ease-${value}`;
     }
   }
 
@@ -953,6 +1248,10 @@ export function getAffectedProperties(className: string): string[] {
     if (baseClass === 'bg-clip-text') properties.push('color');
     return properties;
   }
+  if (baseClass.startsWith('text-shadow')) {
+    properties.push('textShadow');
+    return properties;
+  }
   if (baseClass === 'text-transparent') {
     properties.push('color');
     return properties;
@@ -991,6 +1290,19 @@ export function getAffectedProperties(className: string): string[] {
         properties.push('fontSize');
         return properties;
       }
+    }
+  }
+
+  // Special handling for font-[...] arbitrary values
+  // Must distinguish between fontWeight (numeric, e.g. font-[700]) and
+  // fontFamily (non-numeric, e.g. font-[Gelasio_Regular]). Both share the
+  // font-[…] namespace, so without this an arbitrary weight would be treated
+  // as a family (and vice versa) and strip its sibling typography class.
+  if (baseClass.startsWith('font-[')) {
+    const value = extractArbitraryValue(baseClass);
+    if (value) {
+      properties.push(/^\d/.test(value) ? 'fontWeight' : 'fontFamily');
+      return properties;
     }
   }
 
@@ -1056,6 +1368,12 @@ export function removeConflictsForClass(
   // Remove conflicts for each affected property
   affectedProperties.forEach(property => {
     result = removeConflictingClasses(result, property);
+
+    // A spacing shorthand also overrides more specific classes, so clear those
+    // too (e.g. p-[10px] removes px-/py-/pt-/pr-/pb-/pl-; px-[10px] removes pl-/pr-).
+    SPACING_OVERRIDES[property]?.forEach(overridden => {
+      result = removeConflictingClasses(result, overridden);
+    });
   });
 
   // Additional check: if newClass is a standard color class (e.g., text-blue-500),
@@ -1104,6 +1422,8 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     backgrounds: {},
     effects: {},
     positioning: {},
+    transforms: {},
+    transitions: {},
   };
 
   // Check if this is a text gradient (bg-[gradient] + bg-clip-text)
@@ -1113,11 +1433,13 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     cls.startsWith('bg-[') && extractArbitraryValue(cls)?.includes('gradient(')
   );
 
-  // If we have all the gradient text indicators, extract the gradient and store as text color
+  // If we have all the gradient text indicators, extract the gradient and store as text color.
+  // Arbitrary Tailwind values encode spaces as underscores (e.g. "#605dba_20%"), so restore
+  // them — an un-decoded gradient is invalid CSS and the text-transparent fill renders blank.
   if (hasBgClipText && hasTextTransparent && gradientBgClass) {
     const gradientValue = extractArbitraryValue(gradientBgClass);
     if (gradientValue) {
-      design.typography!.color = gradientValue;
+      design.typography!.color = gradientValue.replace(/_/g, ' ');
     }
   }
 
@@ -1169,6 +1491,14 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
       const value = cls.replace('items-', '');
       if (['start', 'end', 'center', 'baseline', 'stretch'].includes(value)) {
         design.layout!.alignItems = value;
+      }
+    }
+
+    // Align Self
+    if (cls.startsWith('self-')) {
+      const value = cls.replace('self-', '');
+      if (['auto', 'start', 'end', 'center', 'baseline', 'stretch'].includes(value)) {
+        design.layout!.alignSelf = value;
       }
     }
 
@@ -1241,6 +1571,17 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     if (cls === 'text-right') design.typography!.textAlign = 'right';
     if (cls === 'text-justify') design.typography!.textAlign = 'justify';
 
+    // Text Wrap
+    if (cls === 'text-wrap') design.typography!.textWrap = 'wrap';
+    if (cls === 'text-nowrap') design.typography!.textWrap = 'nowrap';
+    if (cls === 'text-balance') design.typography!.textWrap = 'balance';
+    if (cls === 'text-pretty') design.typography!.textWrap = 'pretty';
+
+    // Font Variant Numeric
+    if (CLASS_PROPERTY_MAP.fontVariantNumeric.test(cls)) {
+      design.typography!.fontVariantNumeric = cls === 'normal-nums' ? 'normal' : cls;
+    }
+
     // Text Transform
     if (cls === 'uppercase') design.typography!.textTransform = 'uppercase';
     if (cls === 'lowercase') design.typography!.textTransform = 'lowercase';
@@ -1272,6 +1613,27 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     if (cls.startsWith('underline-offset-[')) {
       const value = extractArbitraryValue(cls);
       if (value) design.typography!.underlineOffset = value;
+    }
+
+    // Line Clamp
+    if (cls === 'line-clamp-none') {
+      design.typography!.lineClamp = 'none';
+    } else if (/^line-clamp-\d+$/.test(cls)) {
+      design.typography!.lineClamp = cls.slice('line-clamp-'.length);
+    } else if (cls.startsWith('line-clamp-[')) {
+      const value = extractArbitraryValue(cls);
+      if (value) design.typography!.lineClamp = value;
+    }
+
+    // Text Shadow
+    if (cls.startsWith('text-shadow-[')) {
+      const value = extractArbitraryValue(cls);
+      if (value) design.typography!.textShadow = value;
+    } else if (cls === 'text-shadow-none') {
+      design.typography!.textShadow = 'none';
+    } else if (cls.match(/^text-shadow-(2xs|xs|sm|md|lg)$/)) {
+      const match = cls.match(/^text-shadow-(.+)$/);
+      if (match) design.typography!.textShadow = match[1];
     }
 
     // Line Height
@@ -1423,9 +1785,14 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
 
     // Object Fit
     if (cls.startsWith('object-')) {
-      const match = cls.match(/^object-(contain|cover|fill|none|scale-down)$/);
-      if (match) {
-        design.sizing!.objectFit = match[1];
+      const fitMatch = cls.match(/^object-(contain|cover|fill|none|scale-down)$/);
+      if (fitMatch) {
+        design.sizing!.objectFit = fitMatch[1];
+      }
+      // Object Position (disjoint value set from object-fit)
+      const positionMatch = cls.match(/^object-(left-top|right-top|left-bottom|right-bottom|top|bottom|left|right|center|\[.+\])$/);
+      if (positionMatch) {
+        design.sizing!.objectPosition = positionMatch[1];
       }
     }
 
@@ -1442,6 +1809,16 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
       const match = cls.match(/^row-span-(1|2|3|4|5|6|7|8|9|10|11|12|auto|full)$/);
       if (match) {
         design.sizing!.gridRowSpan = match[1];
+      }
+    }
+
+    // Overflow
+    if (cls === 'truncate') {
+      design.sizing!.overflow = 'ellipsis';
+    } else if (cls.startsWith('overflow-')) {
+      const match = cls.match(/^overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto)$/);
+      if (match) {
+        design.sizing!.overflow = match[1];
       }
     }
 
@@ -1466,8 +1843,8 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
       if (value) design.borders!.borderBottomLeftRadius = value;
     }
 
-    // Border Width (all)
-    if (cls.startsWith('border-[') && !cls.includes('#') && !cls.includes('rgb')) {
+    // Border Width (all) — exclude color values (hex, rgb, var references)
+    if (cls.startsWith('border-[') && !cls.includes('#') && !cls.includes('rgb') && !cls.includes('var(')) {
       const value = extractArbitraryValue(cls);
       if (value) design.borders!.borderWidth = value;
     }
@@ -1479,8 +1856,8 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     if (cls === 'border-double') design.borders!.borderStyle = 'double';
     if (cls === 'border-none') design.borders!.borderStyle = 'none';
 
-    // Border Color
-    if (cls.startsWith('border-[#') || cls.startsWith('border-[rgb') || cls.startsWith('border-[color:var(')) {
+    // Border Color — also handle raw var() references without color: prefix
+    if (cls.startsWith('border-[#') || cls.startsWith('border-[rgb') || cls.startsWith('border-[color:var(') || cls.startsWith('border-[var(')) {
       const value = extractArbitraryValueWithOpacity(cls);
       if (value) design.borders!.borderColor = value;
     }
@@ -1508,22 +1885,22 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     if (cls === 'divide-double') design.borders!.divideStyle = 'double';
     if (cls === 'divide-none') design.borders!.divideStyle = 'none';
 
-    // Divide Color
-    if (cls.startsWith('divide-[#') || cls.startsWith('divide-[rgb') || cls.startsWith('divide-[color:var(')) {
+    // Divide Color — also handle raw var() references without color: prefix
+    if (cls.startsWith('divide-[#') || cls.startsWith('divide-[rgb') || cls.startsWith('divide-[color:var(') || cls.startsWith('divide-[var(')) {
       const value = extractArbitraryValueWithOpacity(cls);
       if (value) design.borders!.divideColor = value;
     }
 
-    // Outline Width
-    if (cls.startsWith('outline-[') && !cls.includes('#') && !cls.includes('rgb') && !cls.includes('color:var')) {
+    // Outline Width — exclude color values (hex, rgb, var references)
+    if (cls.startsWith('outline-[') && !cls.includes('#') && !cls.includes('rgb') && !cls.includes('var(')) {
       const value = extractArbitraryValue(cls);
       if (value) design.borders!.outlineWidth = value;
     } else if (cls.match(/^outline-\d+$/)) {
       design.borders!.outlineWidth = cls.replace('outline-', '') + 'px';
     }
 
-    // Outline Color
-    if (cls.startsWith('outline-[#') || cls.startsWith('outline-[rgb') || cls.startsWith('outline-[color:var(')) {
+    // Outline Color — also handle raw var() references without color: prefix
+    if (cls.startsWith('outline-[#') || cls.startsWith('outline-[rgb') || cls.startsWith('outline-[color:var(') || cls.startsWith('outline-[var(')) {
       const value = extractArbitraryValueWithOpacity(cls);
       if (value) design.borders!.outlineColor = value;
     }
@@ -1536,7 +1913,7 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
 
     // ===== BACKGROUNDS =====
     // Background Color
-    if (cls.startsWith('bg-[#') || cls.startsWith('bg-[rgb') || cls.startsWith('bg-[color:var(')) {
+    if (cls.startsWith('bg-[#') || cls.startsWith('bg-[rgb') || cls.startsWith('bg-[color:var(') || cls.startsWith('bg-[var(')) {
       const value = extractArbitraryValueWithOpacity(cls);
       if (value) design.backgrounds!.backgroundColor = value;
     }
@@ -1593,6 +1970,18 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
       if (match) design.effects!.backdropBlur = match[1];
     }
 
+    // Mix Blend Mode
+    if (cls.startsWith('mix-blend-')) {
+      const match = cls.match(/^mix-blend-(.+)$/);
+      if (match) design.effects!.mixBlendMode = match[1];
+    }
+
+    // Cursor
+    if (cls.startsWith('cursor-')) {
+      const value = cls.slice('cursor-'.length);
+      if (value) design.effects!.cursor = value;
+    }
+
     // ===== POSITIONING =====
     // Position
     if (cls === 'static') design.positioning!.position = 'static';
@@ -1623,6 +2012,104 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     if (cls.startsWith('z-[')) {
       const value = extractArbitraryValue(cls);
       if (value) design.positioning!.zIndex = value;
+    }
+
+    // ===== TRANSFORMS =====
+    // Scale
+    if (cls.startsWith('scale-[')) {
+      const value = extractArbitraryValue(cls);
+      if (value) design.transforms!.scale = value;
+    } else if (cls.match(/^scale-\d+$/)) {
+      const match = cls.match(/^scale-(\d+)$/);
+      if (match) design.transforms!.scale = match[1];
+    }
+
+    // Rotate (store raw number; ensureAngleUnit adds deg on output)
+    if (cls.startsWith('rotate-[') || cls.startsWith('-rotate-[')) {
+      const value = extractArbitraryValue(cls);
+      if (value) {
+        const sign = cls.startsWith('-') ? '-' : '';
+        design.transforms!.rotate = stripAngleUnit(`${sign}${value}`);
+      }
+    } else if (cls.match(/^-?rotate-\d+$/)) {
+      const match = cls.match(/^(-?)rotate-(\d+)$/);
+      if (match) design.transforms!.rotate = `${match[1]}${match[2]}`;
+    }
+
+    // Translate X/Y (store raw number; ensureLengthUnit adds px on output)
+    for (const axis of ['x', 'y'] as const) {
+      const prop = axis === 'x' ? 'translateX' : 'translateY';
+      const prefix = `translate-${axis}`;
+      if (cls.startsWith(`${prefix}-[`) || cls.startsWith(`-${prefix}-[`)) {
+        const value = extractArbitraryValue(cls);
+        if (value) {
+          const sign = cls.startsWith('-') ? '-' : '';
+          const stripped = value.endsWith('px') ? value.slice(0, -2) : value;
+          design.transforms![prop] = `${sign}${stripped}`;
+        }
+      } else if (cls === `${prefix}-full`) {
+        design.transforms![prop] = 'full';
+      } else if (cls === `-${prefix}-full`) {
+        design.transforms![prop] = '-full';
+      }
+    }
+
+    // Skew X/Y (store raw number; ensureAngleUnit adds deg on output)
+    for (const axis of ['x', 'y'] as const) {
+      const prop = axis === 'x' ? 'skewX' : 'skewY';
+      const prefix = `skew-${axis}`;
+      if (cls.startsWith(`${prefix}-[`) || cls.startsWith(`-${prefix}-[`)) {
+        const value = extractArbitraryValue(cls);
+        if (value) {
+          const sign = cls.startsWith('-') ? '-' : '';
+          design.transforms![prop] = stripAngleUnit(`${sign}${value}`);
+        }
+      } else if (cls.match(new RegExp(`^-?${prefix}-\\d+$`))) {
+        const match = cls.match(new RegExp(`^(-?)${prefix}-(\\d+)$`));
+        if (match) design.transforms![prop] = `${match[1]}${match[2]}`;
+      }
+    }
+
+    // Transform Origin
+    if (cls.startsWith('origin-')) {
+      const value = cls.replace('origin-', '');
+      if (['center', 'top', 'top-right', 'right', 'bottom-right', 'bottom', 'bottom-left', 'left', 'top-left'].includes(value)) {
+        design.transforms!.transformOrigin = value;
+      }
+    }
+
+    // ===== TRANSITIONS =====
+    // Transition Property
+    const transitionMap: Record<string, string> = {
+      'transition': 'default', 'transition-all': 'all', 'transition-colors': 'colors',
+      'transition-opacity': 'opacity', 'transition-shadow': 'shadow',
+      'transition-transform': 'transform', 'transition-none': 'none',
+    };
+    if (transitionMap[cls]) design.transitions!.transitionProperty = transitionMap[cls];
+
+    // Easing
+    const easingMap: Record<string, string> = {
+      'ease-linear': 'linear', 'ease-in': 'in', 'ease-out': 'out', 'ease-in-out': 'in-out',
+    };
+    if (easingMap[cls]) design.transitions!.easing = easingMap[cls];
+
+    // Duration & Delay (store raw number; ensureLengthUnit-style adds ms on output)
+    for (const [prefix, prop] of [['duration', 'duration'], ['delay', 'delay']] as const) {
+      if (cls.startsWith(`${prefix}-[`)) {
+        const value = extractArbitraryValue(cls);
+        if (value) {
+          if (value.endsWith('ms')) {
+            design.transitions![prop] = value.slice(0, -2);
+          } else if (value.endsWith('s')) {
+            design.transitions![prop] = String(parseFloat(value) * 1000);
+          } else {
+            design.transitions![prop] = value;
+          }
+        }
+      } else if (cls.match(new RegExp(`^${prefix}-\\d+$`))) {
+        const match = cls.match(new RegExp(`^${prefix}-(\\d+)$`));
+        if (match) design.transitions![prop] = match[1];
+      }
     }
   });
 
@@ -1791,6 +2278,10 @@ function isImageValue(value: string): boolean {
 function shouldIncludeClassForProperty(className: string, property: string, pattern: RegExp): boolean {
   // Strip breakpoint and state prefixes for helper class detection
   const baseClass = className.replace(/^(max-lg:|max-md:|lg:|md:)?(hover:|focus:|active:|disabled:|visited:|current:)?/, '');
+
+  if (baseClass.startsWith('text-shadow')) {
+    return property === 'textShadow';
+  }
 
   // Special handling for text color property
   // Include gradient-related classes (bg-[gradient], text-transparent) but NOT bg-clip-text
@@ -1992,6 +2483,16 @@ export function getInheritedValue(
     }
   }
 
+  // Per-side spacing inputs fall back through axis then full shorthands (e.g.
+  // paddingTop reads py-* then p-* when no pt-* class exists), so the spacing
+  // UI reflects px-/py-/p- and mx-/my-/m- classes.
+  if (lastValue === null) {
+    for (const fallback of SPACING_SIDE_FALLBACKS[property] ?? []) {
+      const inherited = getInheritedValue(classes, fallback, currentBreakpoint, currentUIState);
+      if (inherited.value !== null) return inherited;
+    }
+  }
+
   return { value: lastValue, source: lastSource };
 }
 
@@ -2073,6 +2574,12 @@ export function setBreakpointClass(
     classesToAdd.forEach(cls => {
       newClasses.push(fullPrefix + cls);
     });
+  }
+
+  // Setting a spacing side/axis can make a broader shorthand redundant
+  // (e.g. setting both pl-* and pr-* removes px-*), so clean those up.
+  if (SPACING_PROPERTY_NAMES.has(property)) {
+    return removeRedundantSpacingShorthands(newClasses);
   }
 
   return newClasses;

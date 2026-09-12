@@ -1,10 +1,11 @@
 import Image from '@tiptap/extension-image';
 import { mergeAttributes } from '@tiptap/core';
+import type { LinkSettings } from '@/types';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
     richTextImage: {
-      setRichTextImage: (attrs: { src: string; alt?: string; assetId?: string }) => ReturnType;
+      setRichTextImage: (attrs: { src: string; alt?: string; assetId?: string; link?: LinkSettings | null }) => ReturnType;
     };
   }
 }
@@ -13,6 +14,7 @@ declare module '@tiptap/core' {
  * Block-level image node for rich-text content.
  * Stores the asset ID alongside src/alt so images can be resolved
  * from the asset system at render time.
+ * Link data is stored in the `link` attribute (full LinkSettings JSON).
  */
 export const RichTextImage = Image.extend({
   name: 'richTextImage',
@@ -30,6 +32,11 @@ export const RichTextImage = Image.extend({
           if (!attributes.assetId) return {};
           return { 'data-asset-id': attributes.assetId };
         },
+      },
+      link: {
+        default: null,
+        parseHTML: () => null,
+        renderHTML: () => ({}),
       },
     };
   },
@@ -53,6 +60,7 @@ export const RichTextImage = Image.extend({
                 src: attrs.src,
                 alt: attrs.alt || null,
                 assetId: attrs.assetId || null,
+                link: attrs.link || null,
               },
             });
           },

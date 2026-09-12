@@ -5,11 +5,75 @@ import { formatFieldValue, resolveFieldFromSources } from '@/lib/cms-variables-u
 import { generateLinkHref, type LinkResolutionContext } from '@/lib/link-utils';
 import { contentHasBlockElements, hasBlockElementsWithResolver } from '@/lib/tiptap-utils';
 import { applyComponentOverrides, resolveComponents } from '@/lib/resolve-components';
+import type { GlobalFieldMeta } from '@/lib/collection-field-utils';
+import { getDefaultFormatId, isFormatValidForFieldType } from '@/lib/variable-format-utils';
+import { getLinkSettingsFromMark } from '@/lib/tiptap-extensions/rich-text-link';
+import HtmlEmbedRenderer from '@/components/HtmlEmbedRenderer';
 
 /**
  * Context for resolving rich text links - re-exports LinkResolutionContext for backwards compatibility
  */
 export type RichTextLinkContext = LinkResolutionContext;
+
+/**
+ * Replace stale global-variable snapshots in a Tiptap document with the current
+ * metadata from the globals list. Pills still store the stable global id, but
+ * type/format are render-time concerns: if a global changes from number to date,
+ * every layer using that id should render as a date immediately, even if the
+ * layer was never opened and re-saved in the sidebar editor.
+ */
+function refreshGlobalVariableNodes<T>(node: T, globalsMeta?: Record<string, GlobalFieldMeta>): T {
+  if (!globalsMeta || !node || typeof node !== 'object') return node;
+
+  const tiptapNode = node as any;
+  let nextNode = tiptapNode;
+
+  if (
+    tiptapNode.type === 'dynamicVariable' &&
+    tiptapNode.attrs?.variable?.type === 'field' &&
+    tiptapNode.attrs.variable.data?.source === 'global' &&
+    tiptapNode.attrs.variable.data?.field_id
+  ) {
+    const variable = tiptapNode.attrs.variable;
+    const meta = globalsMeta[variable.data.field_id];
+    if (meta) {
+      const currentFormat = variable.data.format;
+      const nextFormat = isFormatValidForFieldType(currentFormat, meta.type)
+        ? currentFormat
+        : getDefaultFormatId(meta.type);
+      const nextVariable = {
+        ...variable,
+        data: {
+          ...variable.data,
+          field_type: meta.type,
+          format: nextFormat,
+        },
+      };
+      nextNode = {
+        ...tiptapNode,
+        attrs: {
+          ...tiptapNode.attrs,
+          label: meta.name,
+          variable: nextVariable,
+        },
+      };
+    }
+  }
+
+  if (Array.isArray(nextNode.content)) {
+    let changed = nextNode !== tiptapNode;
+    const content = nextNode.content.map((child: any) => {
+      const refreshed = refreshGlobalVariableNodes(child, globalsMeta);
+      if (refreshed !== child) changed = true;
+      return refreshed;
+    });
+    if (changed) {
+      return { ...nextNode, content };
+    }
+  }
+
+  return nextNode as T;
+}
 
 /**
  * Get a human-readable label for a text style
@@ -153,14 +217,14 @@ export const DEFAULT_TEXT_STYLES: Record<string, TextStyle> = {
     },
   },
   bulletList: {
-    label: 'Bullet List',
+    label: 'Bullet list',
     classes: 'ml-[8px] pl-[16px] list-disc',
     design: {
       spacing: { marginLeft: '8px', paddingLeft: '16px' },
     },
   },
   orderedList: {
-    label: 'Ordered List',
+    label: 'Ordered list',
     classes: 'ml-[8px] pl-[20px] list-decimal',
     design: {
       spacing: { marginLeft: '8px', paddingLeft: '20px' },
@@ -192,6 +256,44 @@ export const DEFAULT_TEXT_STYLES: Record<string, TextStyle> = {
     classes: 'border-t-[1px] border-[#aeaeae]',
     design: {
       borders: { borderTopWidth: '1px', borderColor: '#aeaeae' },
+    },
+  },
+  // Table elements
+  table: {
+    label: 'Table',
+    classes: 'w-full border-separate border-spacing-0 mt-[20px] mb-[20px] border-solid border-[1px] border-[#000000]/10 rounded-[10px] overflow-hidden',
+    design: {
+      sizing: { width: '100%' },
+      spacing: { marginTop: '20', marginBottom: '20', isActive: true },
+      borders: { isActive: true, borderColor: '#000000/10', borderStyle: 'solid', borderWidth: '1', borderRadius: '10' },
+    },
+  },
+  tableHeader: {
+    label: 'Table header cell',
+    classes: 'text-left font-[500] pt-[12px] pr-[12px] pb-[12px] pl-[12px] bg-[#000000]/5',
+    design: {
+      borders: { isActive: true, borderWidthMode: 'all' },
+      spacing: { paddingLeft: '12', paddingRight: '12', paddingTop: '12', paddingBottom: '12', isActive: true },
+      typography: { textAlign: 'left', fontWeight: '500', isActive: true },
+      backgrounds: { isActive: true, backgroundColor: '#000000/5' },
+    },
+  },
+  tableCell: {
+    label: 'Table cell',
+    classes: 'pt-[12px] pr-[12px] pb-[12px] pl-[12px]',
+    design: {
+      borders: { isActive: true, borderWidthMode: 'individual', borderRadiusMode: 'individual' },
+      spacing: { paddingLeft: '12', paddingRight: '12', paddingTop: '12', paddingBottom: '12', isActive: true },
+      typography: { textAlign: 'left', verticalAlign: 'top', isActive: true },
+      backgrounds: { isActive: true },
+    },
+  },
+  tableRow: {
+    label: 'Table row',
+    classes: '',
+    design: {
+      borders: { isActive: true },
+      backgrounds: { isActive: true },
     },
   },
 };
@@ -243,18 +345,52 @@ export function getTiptapTextContent(text: string): {
 }
 
 /**
+ * Resolve the link href for a richTextImage node.
+ * Reads from the `link` attribute (full LinkSettings) first, falling back to legacy `href`.
+ * In edit mode, uses '#' placeholder to avoid expensive link resolution.
+ */
+function resolveImageLinkHref(
+  attrs: Record<string, unknown> | undefined,
+  isEditMode: boolean,
+  linkContext?: RichTextLinkContext,
+  collectionItemData?: Record<string, string>,
+  pageCollectionItemData?: Record<string, string>,
+): string | null {
+  if (!attrs) return null;
+
+  const storedLink = attrs.link as LinkSettings | null;
+  if (!storedLink?.type) return null;
+
+  if (isEditMode) return '#';
+
+  const fullContext: LinkResolutionContext = {
+    ...linkContext,
+    collectionItemData,
+    pageCollectionItemData,
+  };
+  return generateLinkHref(storedLink, fullContext) || null;
+}
+
+/**
  * Flatten multi-paragraph Tiptap content into a single paragraph with hardBreak nodes.
  * Used for heading/text elements that should not contain nested block elements.
- * Converts: [paragraph("a"), paragraph("b")] → [paragraph("a", hardBreak, "b")]
+ * Treats `heading` blocks like paragraphs so their inline content is preserved without
+ * producing a nested <h1>-<h6> inside the simple text layer's own heading tag.
+ * Converts: [paragraph("a"), heading("b")] → [paragraph("a", hardBreak, "b")]
  */
 export function flattenTiptapParagraphs(content: any): any {
   if (!content || typeof content !== 'object' || content.type !== 'doc') return content;
   const blocks = content.content;
-  if (!Array.isArray(blocks) || blocks.length <= 1) return content;
+  if (!Array.isArray(blocks) || blocks.length === 0) return content;
+
+  const FLATTENABLE = new Set(['paragraph', 'heading']);
+  const allFlattenable = blocks.every((b: any) => FLATTENABLE.has(b?.type));
+  if (!allFlattenable) return content;
+
+  if (blocks.length === 1 && blocks[0].type === 'paragraph') return content;
 
   const merged: any[] = [];
   blocks.forEach((block: any, i: number) => {
-    if (block.type !== 'paragraph') return;
     if (i > 0 && merged.length > 0) {
       merged.push({ type: 'hardBreak' });
     }
@@ -278,17 +414,16 @@ function getVariableNodeData(
   collectionItemData?: Record<string, string>,
   pageCollectionItemData?: Record<string, string>,
   layerDataMap?: Record<string, Record<string, string>>
-): { fieldType: string | null; rawValue: unknown } {
+): { fieldType: string | null; rawValue: unknown; format?: string } {
   if (node.attrs?.variable?.type === 'field' && node.attrs.variable.data?.field_id) {
-    const { field_id, field_type, relationships = [], source, collection_layer_id } = node.attrs.variable.data;
+    const { field_id, field_type, relationships = [], source, collection_layer_id, format } = node.attrs.variable.data;
 
-    // Build the full path for relationship resolution
     const fieldPath = relationships.length > 0
       ? [field_id, ...relationships].join('.')
       : field_id;
 
     const rawValue = resolveFieldFromSources(fieldPath, source, collectionItemData, pageCollectionItemData, collection_layer_id, layerDataMap);
-    return { fieldType: field_type || null, rawValue };
+    return { fieldType: field_type || null, rawValue, format };
   }
 
   return { fieldType: null, rawValue: undefined };
@@ -307,8 +442,8 @@ function resolveVariableNode(
   pageCollectionItemData?: Record<string, string>,
   timezone: string = 'UTC'
 ): string {
-  const { fieldType, rawValue } = getVariableNodeData(node, collectionItemData, pageCollectionItemData);
-  return formatFieldValue(rawValue, fieldType, timezone);
+  const { fieldType, rawValue, format } = getVariableNodeData(node, collectionItemData, pageCollectionItemData);
+  return formatFieldValue(rawValue, fieldType, timezone, format);
 }
 
 /**
@@ -403,8 +538,9 @@ function renderTextNode(
                 collectionItemData,
                 pageCollectionItemData,
               };
-              // Use shared link generation utility
-              return generateLinkHref(mark.attrs as LinkSettings, fullContext) || '#';
+              // Normalise attrs to canonical LinkSettings (tolerates legacy
+              // { href, linkType } shape) before resolving the href.
+              return generateLinkHref(getLinkSettingsFromMark(mark.attrs || {}), fullContext) || '#';
             })();
 
           const linkProps: Record<string, any> = {
@@ -511,17 +647,15 @@ function renderInlineContent(
     }
 
     if (node.type === 'dynamicVariable') {
-      const { fieldType, rawValue } = getVariableNodeData(node, collectionItemData, pageCollectionItemData, layerDataMap);
+      const { fieldType, rawValue, format } = getVariableNodeData(node, collectionItemData, pageCollectionItemData, layerDataMap);
 
       // Handle rich_text fields - render nested Tiptap content
       if (fieldType === 'rich_text' && rawValue) {
-        // Parse JSON string if needed (published pages store as string)
         let richTextValue: unknown = rawValue;
         if (typeof rawValue === 'string') {
           try {
             richTextValue = JSON.parse(rawValue);
           } catch {
-            // If parsing fails, fall through to text rendering
             richTextValue = null;
           }
         }
@@ -544,8 +678,8 @@ function renderInlineContent(
         }
       }
 
-      // For other field types, render as text
-      const value = formatFieldValue(rawValue, fieldType, timezone);
+      // For other field types, render as text with optional format
+      const value = formatFieldValue(rawValue, fieldType, timezone, format);
       const textNode = {
         type: 'text',
         text: value,
@@ -560,8 +694,17 @@ function renderInlineContent(
       return rendered ? [rendered] : [];
     }
 
-    // Handle richTextImage nodes that may appear inline from CMS rich_text expansion
-    if (node.type === 'richTextImage') {
+    // Handle HTML embed nodes that may appear inline from CMS rich_text expansion
+    if (node.type === 'richTextHtmlEmbed') {
+      const htmlCode = node.attrs?.code || '';
+      if (!htmlCode) return [];
+
+      return [React.createElement(HtmlEmbedRenderer, { key, code: htmlCode })];
+    }
+
+    // Handle richTextImage nodes that may appear inline from CMS rich_text expansion.
+    // Legacy migrated content may use `image` as the node type — accept both.
+    if (node.type === 'richTextImage' || node.type === 'image') {
       const imgProps: Record<string, any> = {
         key,
         src: node.attrs?.src || '',
@@ -571,7 +714,20 @@ function renderInlineContent(
       if (node.attrs?.assetId) {
         imgProps['data-asset-id'] = node.attrs.assetId;
       }
-      return [React.createElement('img', imgProps)];
+      const imgEl = React.createElement('img', imgProps);
+
+      const imgLinkHref = resolveImageLinkHref(node.attrs, isEditMode, linkContext, collectionItemData, pageCollectionItemData);
+      if (imgLinkHref) {
+        const imgTarget = node.attrs?.link?.target || undefined;
+        return [React.createElement('a', {
+          key,
+          href: imgLinkHref,
+          target: imgTarget,
+          rel: imgTarget === '_blank' ? 'noopener noreferrer' : undefined,
+        }, imgEl)];
+      }
+
+      return [imgEl];
     }
 
     if (node.type === 'hardBreak') {
@@ -631,7 +787,29 @@ function renderRichTextComponentBlock(
   }
 
   const component = components?.find(c => c.id === componentId);
-  if (!component || !component.layers?.length) {
+
+  // Build updated ancestor set including the current component
+  const updatedAncestors = new Set(ancestorComponentIds);
+  updatedAncestors.add(componentId);
+
+  // Published/SSR path: layers are pre-resolved server-side by
+  // resolveRichTextCollections (nested components and collections at any depth),
+  // so the full `components` library is not needed on the client — only the
+  // resolved layers. This lets published pages serialize an empty `components`
+  // array, keeping the RSC payload small without curating which definitions survive.
+  if (block.attrs._resolvedLayers) {
+    // Component metadata is unused when rendering pre-resolved layers; fall back
+    // to a lightweight stub so an empty `components` array still renders.
+    const resolvedComponent = component ?? ({ id: componentId, name: '' } as Component);
+    if (!renderComponentBlock) {
+      return React.createElement('span', { key, 'data-component-id': componentId }, `[${resolvedComponent.name}]`);
+    }
+    return renderComponentBlock(resolvedComponent, block.attrs._resolvedLayers, overrides, key, updatedAncestors);
+  }
+
+  // Fallback (edit mode): resolve from the component definition, which requires
+  // the full component metadata and library to be present.
+  if (!component) {
     return React.createElement('span', { key, className: 'text-xs text-muted-foreground' }, '[missing component]');
   }
 
@@ -639,13 +817,8 @@ function renderRichTextComponentBlock(
     return React.createElement('span', { key, 'data-component-id': componentId }, `[${component.name}]`);
   }
 
-  // Build updated ancestor set including the current component
-  const updatedAncestors = new Set(ancestorComponentIds);
-  updatedAncestors.add(componentId);
-
-  // Use pre-resolved layers (from server-side resolveRichTextCollections) when available
-  if (block.attrs._resolvedLayers) {
-    return renderComponentBlock(component, block.attrs._resolvedLayers, overrides, key, updatedAncestors);
+  if (!component.layers?.length) {
+    return React.createElement('span', { key, className: 'text-xs text-muted-foreground' }, '[missing component]');
   }
 
   const withOverrides = applyComponentOverrides(
@@ -775,7 +948,7 @@ function renderBlock(
     );
   }
 
-  if (block.type === 'richTextImage') {
+  if (block.type === 'richTextImage' || block.type === 'image') {
     const imgProps: Record<string, any> = {
       key,
       src: block.attrs?.src || '',
@@ -788,7 +961,20 @@ function renderBlock(
     if (block.attrs?.assetId) {
       imgProps['data-asset-id'] = block.attrs.assetId;
     }
-    return React.createElement('img', imgProps);
+    const imgElement = React.createElement('img', imgProps);
+
+    const imgLinkHref = resolveImageLinkHref(block.attrs, isEditMode, linkContext, collectionItemData, pageCollectionItemData);
+    if (imgLinkHref) {
+      const imgTarget = block.attrs?.link?.target || undefined;
+      return React.createElement('a', {
+        key,
+        href: imgLinkHref,
+        target: imgTarget,
+        rel: imgTarget === '_blank' ? 'noopener noreferrer' : undefined,
+      }, imgElement);
+    }
+
+    return imgElement;
   }
 
   if (block.type === 'horizontalRule') {
@@ -807,7 +993,102 @@ function renderBlock(
     return renderRichTextComponentBlock(block, key, components, renderComponentBlock, ancestorComponentIds);
   }
 
+  if (block.type === 'table') {
+    const rows = (block.content || []).map((row: any, rowIdx: number) =>
+      renderTableNode(row, `${key}-row-${rowIdx}`, collectionItemData, pageCollectionItemData, textStyles, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds, rowIdx)
+    );
+
+    const tbodyProps: Record<string, any> = { key: `${key}-tbody` };
+    const tableClass = getTextStyleClasses(textStyles, 'table');
+    const tableProps: Record<string, any> = { key: `${key}-table` };
+    if (tableClass) tableProps.className = tableClass;
+    if (isEditMode) tableProps['data-style'] = 'table';
+
+    return React.createElement(
+      'div',
+      { key, className: 'overflow-x-auto max-w-full' },
+      React.createElement('table', tableProps,
+        React.createElement('tbody', tbodyProps, rows)
+      )
+    );
+  }
+
+  // Handle HTML embed blocks
+  if (block.type === 'richTextHtmlEmbed') {
+    const htmlCode = block.attrs?.code || '';
+    if (!htmlCode) return null;
+
+    return React.createElement(HtmlEmbedRenderer, { key, code: htmlCode });
+  }
+
   return null;
+}
+
+/**
+ * Recursively render a Tiptap table node (tableRow, tableCell, tableHeader)
+ */
+function renderTableNode(
+  node: any,
+  key: string,
+  collectionItemData?: Record<string, string>,
+  pageCollectionItemData?: Record<string, string>,
+  textStyles?: Record<string, TextStyle>,
+  isEditMode = false,
+  linkContext?: RichTextLinkContext,
+  timezone: string = 'UTC',
+  layerDataMap?: Record<string, Record<string, string>>,
+  components?: Component[],
+  renderComponentBlock?: RenderComponentBlockFn,
+  ancestorComponentIds?: Set<string>,
+  nodeIdx = 0,
+  parentRowIdx = 0,
+): React.ReactNode {
+  if (!node) return null;
+
+  const rowIdx = node.type === 'tableRow' ? nodeIdx : parentRowIdx;
+
+  const children = (node.content || []).map((child: any, idx: number) => {
+    if (child.type === 'tableRow' || child.type === 'tableCell' || child.type === 'tableHeader') {
+      return renderTableNode(child, `${key}-${idx}`, collectionItemData, pageCollectionItemData, textStyles, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds, idx, rowIdx);
+    }
+    return renderBlock(child, idx, collectionItemData, pageCollectionItemData, textStyles, false, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds);
+  });
+
+  const tagMap: Record<string, string> = {
+    tableRow: 'tr',
+    tableCell: 'td',
+    tableHeader: 'th',
+  };
+
+  const tag = tagMap[node.type] || 'div';
+  const styleKeyMap: Record<string, string> = {
+    tableRow: 'tableRow',
+    tableCell: 'tableCell',
+    tableHeader: 'tableHeader',
+  };
+  const styleKey = styleKeyMap[node.type];
+  let className = styleKey ? getTextStyleClasses(textStyles, styleKey) : '';
+
+  if (node.type === 'tableCell' || node.type === 'tableHeader') {
+    const borders: string[] = [];
+    if (parentRowIdx > 0) borders.push('border-t-[1px]');
+    if (nodeIdx > 0) borders.push('border-l-[1px]');
+    if (borders.length > 0) {
+      const borderClasses = `${borders.join(' ')} border-solid border-[#000000]/10`;
+      className = className ? `${className} ${borderClasses}` : borderClasses;
+    }
+  }
+
+  const props: Record<string, any> = { key };
+  if (className) props.className = className;
+  if (isEditMode && styleKey) props['data-style'] = styleKey;
+
+  if ((node.type === 'tableCell' || node.type === 'tableHeader') && node.attrs) {
+    if (node.attrs.colspan && node.attrs.colspan > 1) props.colSpan = node.attrs.colspan;
+    if (node.attrs.rowspan && node.attrs.rowspan > 1) props.rowSpan = node.attrs.rowspan;
+  }
+
+  return React.createElement(tag, props, children);
 }
 
 /**
@@ -913,8 +1194,9 @@ export function renderRichText(
   renderComponentBlock?: RenderComponentBlockFn,
   ancestorComponentIds?: Set<string>,
   isSimpleTextElement = false,
+  globalsMeta?: Record<string, GlobalFieldMeta>,
 ): React.ReactNode {
-  const content = variable.data.content;
+  const content = refreshGlobalVariableNodes(variable.data.content, globalsMeta);
 
   if (!content || typeof content !== 'object' || !('type' in content)) {
     return null;
@@ -951,10 +1233,19 @@ export function renderRichText(
       return null;
     }
     const inlineContent = renderInlineContent(paragraph.content, collectionItemData, pageCollectionItemData, textStyles, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds, useSpanForParagraphs);
-    if (isEditMode && !isSimpleTextElement) {
+    if (!isSimpleTextElement) {
+      // Wrap so inline nodes (text + <strong>, etc.) form a single flow unit.
+      // Without this, a parent with `flex flex-col` turns each text node /
+      // inline element into separate flex items that stack vertically.
+      const tag = useSpanForParagraphs ? 'span' : 'p';
       const paragraphClass = textStyles?.paragraph?.classes ?? DEFAULT_TEXT_STYLES.paragraph?.classes ?? '';
       const children = Array.isArray(inlineContent) ? inlineContent : [inlineContent];
-      return React.createElement('span', { 'data-style': 'paragraph', 'data-block-index': 0, className: paragraphClass }, ...children);
+      const props: Record<string, any> = { className: paragraphClass || undefined };
+      if (isEditMode) {
+        props['data-style'] = 'paragraph';
+        props['data-block-index'] = 0;
+      }
+      return React.createElement(tag, props, ...children);
     }
     return inlineContent;
   }
@@ -963,7 +1254,10 @@ export function renderRichText(
   return doc.content.map((block: any, idx: number) => {
     const element = renderBlock(block, idx, collectionItemData, pageCollectionItemData, textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds);
     const isVisibleBlock = block.type !== 'paragraph' || block.content?.length;
-    if (element && isVisibleBlock && isEditMode) {
+    // Embedded component blocks render as a React.Fragment, which only accepts
+    // `key`/`children` — cloning to inject `data-block-index` would throw.
+    const isFragment = React.isValidElement(element) && (element as React.ReactElement).type === React.Fragment;
+    if (element && isVisibleBlock && isEditMode && !isFragment) {
       return React.cloneElement(element as React.ReactElement<any>, {
         'data-block-index': visibleBlockIdx++,
       });
@@ -1038,7 +1332,7 @@ export function tiptapContentToString(content: any): string {
     } else if (node.type === 'dynamicVariable') {
       // Convert variable node to inline variable tag
       if (node.attrs?.variable) {
-        result += `<webwow-inline-variable>${JSON.stringify(node.attrs.variable)}</webwow-inline-variable>`;
+        result += `<ycode-inline-variable>${JSON.stringify(node.attrs.variable)}</ycode-inline-variable>`;
       }
     } else if (node.content && Array.isArray(node.content)) {
       node.content.forEach(processNode);
@@ -1058,7 +1352,7 @@ export function tiptapContentToString(content: any): string {
  */
 export function stringToTiptapContent(text: string): any {
   const content: any[] = [];
-  const regex = /<webwow-inline-variable>([\s\S]*?)<\/webwow-inline-variable>/g;
+  const regex = /<ycode-inline-variable>([\s\S]*?)<\/ycode-inline-variable>/g;
   let lastIndex = 0;
   let match;
 

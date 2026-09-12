@@ -10,7 +10,7 @@ import { getAllLocales } from '@/lib/repositories/localeRepository';
 export function registerSiteResources(server: McpServer) {
   server.resource(
     'site-pages',
-    'webwow://site/pages',
+    'ycode://site/pages',
     {
       description: 'Current site structure — all pages with IDs, names, slugs, and folder hierarchy',
       mimeType: 'application/json',
@@ -23,7 +23,7 @@ export function registerSiteResources(server: McpServer) {
 
       return {
         contents: [{
-          uri: 'webwow://site/pages',
+          uri: 'ycode://site/pages',
           mimeType: 'application/json',
           text: JSON.stringify({
             pages: pages.map((p) => ({
@@ -39,7 +39,7 @@ export function registerSiteResources(server: McpServer) {
               name: f.name,
               parent_id: f.page_folder_id,
             })),
-          }, null, 2),
+          }),
         }],
       };
     },
@@ -47,7 +47,7 @@ export function registerSiteResources(server: McpServer) {
 
   server.resource(
     'site-collections',
-    'webwow://site/collections',
+    'ycode://site/collections',
     {
       description: 'Current CMS schema — all collections with their field definitions',
       mimeType: 'application/json',
@@ -75,9 +75,9 @@ export function registerSiteResources(server: McpServer) {
 
       return {
         contents: [{
-          uri: 'webwow://site/collections',
+          uri: 'ycode://site/collections',
           mimeType: 'application/json',
-          text: JSON.stringify(schema, null, 2),
+          text: JSON.stringify(schema),
         }],
       };
     },
@@ -85,7 +85,7 @@ export function registerSiteResources(server: McpServer) {
 
   server.resource(
     'site-design-tokens',
-    'webwow://site/design-tokens',
+    'ycode://site/design-tokens',
     {
       description: 'Current design tokens — color variables, fonts, and locales configured for the site',
       mimeType: 'application/json',
@@ -99,7 +99,7 @@ export function registerSiteResources(server: McpServer) {
 
       return {
         contents: [{
-          uri: 'webwow://site/design-tokens',
+          uri: 'ycode://site/design-tokens',
           mimeType: 'application/json',
           text: JSON.stringify({
             color_variables: colorVariables.map((v) => ({
@@ -121,7 +121,7 @@ export function registerSiteResources(server: McpServer) {
               label: l.label,
               is_default: l.is_default,
             })),
-          }, null, 2),
+          }),
         }],
       };
     },

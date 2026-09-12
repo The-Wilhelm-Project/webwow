@@ -14,45 +14,81 @@
  * Usage: npx tsx database/scripts/backfill-content-hashes.ts
  */
 
-import knex, { Knex } from 'knex';
-import knexfileConfig from '../../knexfile';
+import fs from 'fs';
+import path from 'path';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import {
   generatePageMetadataHash,
   generatePageLayersHash,
   generateComponentContentHash,
   generateLayerStyleContentHash,
   generateAssetContentHash,
+  generateCollectionItemContentHash,
 } from '../../lib/hash-utils';
-import { generateCollectionItemContentHash } from '../../lib/hash-utils';
 
 const PAGE_SIZE = 1000;
 
-/** Create Knex client from knexfile config */
-async function getDbClient(): Promise<Knex> {
-  const environment = process.env.NODE_ENV || 'development';
-  const config = knexfileConfig[environment];
-  if (!config) {
-    throw new Error(`No knex configuration found for environment: ${environment}`);
+/** Create Supabase client from .credentials.json or env vars (bypasses server-only modules) */
+async function getSupabaseClient(): Promise<SupabaseClient> {
+  const credentialsPath = path.join(process.cwd(), '.credentials.json');
+
+  if (!fs.existsSync(credentialsPath)) {
+    throw new Error(
+      'Supabase credentials not found. Please configure Supabase in the builder first.'
+    );
   }
-  return knex(config);
+
+  const credentialsFile = fs.readFileSync(credentialsPath, 'utf-8');
+  const credentials = JSON.parse(credentialsFile);
+  const config = credentials.supabase_config;
+
+  if (!config?.connectionUrl || !config?.serviceRoleKey) {
+    throw new Error('Invalid Supabase configuration in .credentials.json');
+  }
+
+  let projectUrl: string;
+
+  if (config.supabaseUrl || process.env.SUPABASE_URL) {
+    projectUrl = (config.supabaseUrl || process.env.SUPABASE_URL).replace(/\/+$/, '');
+  } else {
+    const match = config.connectionUrl.match(/postgres\.([^:]+)/);
+    if (!match) {
+      throw new Error(
+        'Could not derive Supabase API URL from connection string.\n' +
+        'For self-hosted instances, set SUPABASE_URL in your environment or .env file.'
+      );
+    }
+    projectUrl = `https://${match[1]}.supabase.co`;
+  }
+
+  return createClient(projectUrl, config.serviceRoleKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
 }
 
 /**
  * Fetch all rows matching a query using pagination.
+ * Supabase caps results at 1000 per request.
  */
 async function fetchAllPaginated(
-  client: Knex,
+  client: SupabaseClient,
   table: string,
-  applyFilters: (query: Knex.QueryBuilder) => Knex.QueryBuilder,
+  applyFilters: (query: any) => any,
 ): Promise<any[]> {
   const allRows: any[] = [];
   let offset = 0;
 
   while (true) {
-    const baseQuery = client(table).select('*');
-    const data = await applyFilters(baseQuery)
-      .limit(PAGE_SIZE)
-      .offset(offset);
+    const baseQuery = client.from(table).select('*');
+    const { data, error } = await applyFilters(baseQuery)
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (error) {
+      throw new Error(`Failed to fetch ${table}: ${error.message}`);
+    }
 
     if (!data || data.length === 0) break;
 
@@ -65,11 +101,11 @@ async function fetchAllPaginated(
   return allRows;
 }
 
-async function backfillPageHashes(client: Knex) {
+async function backfillPageHashes(client: SupabaseClient) {
   console.log('Backfilling page content hashes...');
 
   const pages = await fetchAllPaginated(client, 'pages', (q) =>
-    q.whereNull('deleted_at').whereNull('content_hash')
+    q.is('deleted_at', null).is('content_hash', null)
   );
 
   if (pages.length === 0) {
@@ -90,8 +126,16 @@ async function backfillPageHashes(client: Knex) {
         error_page: page.error_page || null,
       });
 
-      await client('pages').where('id', page.id).update({ content_hash: hash });
-      updated++;
+      const { error: updateError } = await client
+        .from('pages')
+        .update({ content_hash: hash })
+        .eq('id', page.id);
+
+      if (updateError) {
+        console.error(`  Error updating page ${page.id}:`, updateError.message);
+      } else {
+        updated++;
+      }
     } catch (error) {
       console.error(`  Error processing page ${page.id}:`, error);
     }
@@ -100,11 +144,11 @@ async function backfillPageHashes(client: Knex) {
   console.log(`  Updated ${updated} of ${pages.length} pages`);
 }
 
-async function backfillPageLayersHashes(client: Knex) {
+async function backfillPageLayersHashes(client: SupabaseClient) {
   console.log('Backfilling page_layers content hashes...');
 
   const pageLayersRecords = await fetchAllPaginated(client, 'page_layers', (q) =>
-    q.whereNull('deleted_at').whereNull('content_hash')
+    q.is('deleted_at', null).is('content_hash', null)
   );
 
   if (pageLayersRecords.length === 0) {
@@ -121,8 +165,16 @@ async function backfillPageLayersHashes(client: Knex) {
         generated_css: record.generated_css || null,
       });
 
-      await client('page_layers').where('id', record.id).update({ content_hash: hash });
-      updated++;
+      const { error: updateError } = await client
+        .from('page_layers')
+        .update({ content_hash: hash })
+        .eq('id', record.id);
+
+      if (updateError) {
+        console.error(`  Error updating page_layers ${record.id}:`, updateError.message);
+      } else {
+        updated++;
+      }
     } catch (error) {
       console.error(`  Error processing page_layers ${record.id}:`, error);
     }
@@ -131,11 +183,11 @@ async function backfillPageLayersHashes(client: Knex) {
   console.log(`  Updated ${updated} of ${pageLayersRecords.length} page_layers records`);
 }
 
-async function backfillComponentHashes(client: Knex) {
+async function backfillComponentHashes(client: SupabaseClient) {
   console.log('Backfilling component content hashes...');
 
   const components = await fetchAllPaginated(client, 'components', (q) =>
-    q.whereNull('content_hash')
+    q.is('content_hash', null)
   );
 
   if (components.length === 0) {
@@ -152,8 +204,16 @@ async function backfillComponentHashes(client: Knex) {
         layers: component.layers || [],
       });
 
-      await client('components').where('id', component.id).update({ content_hash: hash });
-      updated++;
+      const { error: updateError } = await client
+        .from('components')
+        .update({ content_hash: hash })
+        .eq('id', component.id);
+
+      if (updateError) {
+        console.error(`  Error updating component ${component.id}:`, updateError.message);
+      } else {
+        updated++;
+      }
     } catch (error) {
       console.error(`  Error processing component ${component.id}:`, error);
     }
@@ -162,11 +222,11 @@ async function backfillComponentHashes(client: Knex) {
   console.log(`  Updated ${updated} of ${components.length} components`);
 }
 
-async function backfillLayerStyleHashes(client: Knex) {
+async function backfillLayerStyleHashes(client: SupabaseClient) {
   console.log('Backfilling layer_styles content hashes...');
 
   const styles = await fetchAllPaginated(client, 'layer_styles', (q) =>
-    q.whereNull('content_hash')
+    q.is('content_hash', null)
   );
 
   if (styles.length === 0) {
@@ -184,8 +244,16 @@ async function backfillLayerStyleHashes(client: Knex) {
         design: style.design || {},
       });
 
-      await client('layer_styles').where('id', style.id).update({ content_hash: hash });
-      updated++;
+      const { error: updateError } = await client
+        .from('layer_styles')
+        .update({ content_hash: hash })
+        .eq('id', style.id);
+
+      if (updateError) {
+        console.error(`  Error updating layer_style ${style.id}:`, updateError.message);
+      } else {
+        updated++;
+      }
     } catch (error) {
       console.error(`  Error processing layer_style ${style.id}:`, error);
     }
@@ -194,11 +262,11 @@ async function backfillLayerStyleHashes(client: Knex) {
   console.log(`  Updated ${updated} of ${styles.length} layer_styles`);
 }
 
-async function backfillAssetHashes(client: Knex) {
+async function backfillAssetHashes(client: SupabaseClient) {
   console.log('Backfilling asset content hashes...');
 
   const assets = await fetchAllPaginated(client, 'assets', (q) =>
-    q.whereNull('content_hash').whereNull('deleted_at')
+    q.is('content_hash', null).is('deleted_at', null)
   );
 
   if (assets.length === 0) {
@@ -223,8 +291,17 @@ async function backfillAssetHashes(client: Knex) {
         source: asset.source,
       });
 
-      await client('assets').where('id', asset.id).where('is_published', asset.is_published).update({ content_hash: hash });
-      updated++;
+      const { error: updateError } = await client
+        .from('assets')
+        .update({ content_hash: hash })
+        .eq('id', asset.id)
+        .eq('is_published', asset.is_published);
+
+      if (updateError) {
+        console.error(`  Error updating asset ${asset.id}:`, updateError.message);
+      } else {
+        updated++;
+      }
     } catch (error) {
       console.error(`  Error processing asset ${asset.id}:`, error);
     }
@@ -233,11 +310,11 @@ async function backfillAssetHashes(client: Knex) {
   console.log(`  Updated ${updated} of ${assets.length} assets`);
 }
 
-async function backfillCollectionItemHashes(client: Knex) {
+async function backfillCollectionItemHashes(client: SupabaseClient) {
   console.log('Backfilling collection_items content hashes...');
 
   const items = await fetchAllPaginated(client, 'collection_items', (q) =>
-    q.whereNull('deleted_at').whereNull('content_hash')
+    q.is('deleted_at', null).is('content_hash', null)
   );
 
   if (items.length === 0) {
@@ -248,10 +325,20 @@ async function backfillCollectionItemHashes(client: Knex) {
   // Batch-fetch all values for these items
   const itemIds = items.map((item: any) => item.id);
 
-  const allValues = await client('collection_item_values')
-    .select('item_id', 'field_id', 'value', 'is_published')
-    .whereIn('item_id', itemIds)
-    .whereNull('deleted_at');
+  // Fetch values in chunks (Supabase .in() has limits)
+  const CHUNK_SIZE = 200;
+  const allValues: any[] = [];
+  for (let i = 0; i < itemIds.length; i += CHUNK_SIZE) {
+    const chunk = itemIds.slice(i, i + CHUNK_SIZE);
+    const { data, error } = await client
+      .from('collection_item_values')
+      .select('item_id, field_id, value, is_published')
+      .in('item_id', chunk)
+      .is('deleted_at', null);
+
+    if (error) throw new Error(`Failed to fetch item values: ${error.message}`);
+    if (data) allValues.push(...data);
+  }
 
   // Group values by (item_id, is_published)
   const valuesMap = new Map<string, Array<{ field_id: string; value: string | null }>>();
@@ -268,8 +355,17 @@ async function backfillCollectionItemHashes(client: Knex) {
       const values = valuesMap.get(key) || [];
       const hash = generateCollectionItemContentHash(values);
 
-      await client('collection_items').where('id', item.id).where('is_published', item.is_published).update({ content_hash: hash });
-      updated++;
+      const { error: updateError } = await client
+        .from('collection_items')
+        .update({ content_hash: hash })
+        .eq('id', item.id)
+        .eq('is_published', item.is_published);
+
+      if (updateError) {
+        console.error(`  Error updating collection_item ${item.id}:`, updateError.message);
+      } else {
+        updated++;
+      }
     } catch (error) {
       console.error(`  Error processing collection_item ${item.id}:`, error);
     }
@@ -282,7 +378,7 @@ async function main() {
   console.log('Starting content hash backfill...\n');
 
   try {
-    const client = await getDbClient();
+    const client = await getSupabaseClient();
 
     await backfillPageHashes(client);
     await backfillPageLayersHashes(client);

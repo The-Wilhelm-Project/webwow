@@ -5,7 +5,19 @@
  */
 
 import { create } from 'zustand';
+import { getEditorImageUrl } from '@/lib/asset-utils';
 import type { Asset, AssetFolder } from '@/types';
+
+/**
+ * Rewrite bitmap image `public_url`s to the proxy URL with a `?width=` cap
+ * so the canvas iframe doesn't decode multi-hundred-megabyte bitmaps. SVGs,
+ * videos, documents, and any asset without a storage_path pass through.
+ */
+function normalizeAssetForEditor(asset: Asset): Asset {
+  const rewritten = getEditorImageUrl(asset);
+  if (rewritten === asset.public_url) return asset;
+  return { ...asset, public_url: rewritten };
+}
 
 interface AssetsState {
   assets: Asset[];
@@ -70,14 +82,14 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
    * Set assets directly (used during initial load)
    */
   setAssets: (assets: Asset[]) => {
-    // Create lookup map
+    const normalized = assets.map(normalizeAssetForEditor);
     const assetsById: Record<string, Asset> = {};
-    assets.forEach((asset) => {
+    normalized.forEach((asset) => {
       assetsById[asset.id] = asset;
     });
 
     set({
-      assets,
+      assets: normalized,
       assetsById,
       isLoaded: true,
     });
@@ -103,7 +115,7 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
 
     try {
       // Only load folders initially - assets are loaded on-demand
-      const foldersResponse = await fetch('/webwow/api/asset-folders');
+      const foldersResponse = await fetch('/ycode/api/asset-folders');
       
       if (!foldersResponse.ok) {
         throw new Error('Failed to fetch folders');
@@ -148,7 +160,7 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
     queryParams.set('page', page.toString());
     queryParams.set('limit', limit.toString());
     
-    const response = await fetch(`/webwow/api/assets?${queryParams.toString()}`);
+    const response = await fetch(`/ycode/api/assets?${queryParams.toString()}`);
     
     if (!response.ok) {
       throw new Error('Failed to fetch assets');
@@ -156,20 +168,22 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
     
     const result = await response.json();
     
+    const normalizedAssets: Asset[] = (result.data || []).map(normalizeAssetForEditor);
+
     // Add fetched assets to the global cache
-    if (result.data && result.data.length > 0) {
+    if (normalizedAssets.length > 0) {
       const state = get();
       const newAssetsById = { ...state.assetsById };
-      
-      result.data.forEach((asset: Asset) => {
+
+      normalizedAssets.forEach((asset: Asset) => {
         newAssetsById[asset.id] = asset;
       });
-      
+
       set({ assetsById: newAssetsById });
     }
-    
+
     return {
-      assets: result.data || [],
+      assets: normalizedAssets,
       total: result.total || 0,
       page: result.page || page,
       limit: result.limit || limit,
@@ -184,7 +198,7 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
     set((state) => {
       const newAssetsById = { ...state.assetsById };
       assets.forEach((asset) => {
-        newAssetsById[asset.id] = asset;
+        newAssetsById[asset.id] = normalizeAssetForEditor(asset);
       });
       return { assetsById: newAssetsById };
     });
@@ -202,7 +216,8 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
       return cached;
     }
 
-    // If not in cache and store is loaded, it doesn't exist
+    // If store is loaded, asset isn't known — skip background fetch.
+    // Assets are preloaded via items API (includeAssets=true).
     if (state.isLoaded) {
       return null;
     }
@@ -217,14 +232,17 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
       return null;
     }
 
-    // Mark as pending and fetch from API in background
+    // Mark as pending and fetch from API in background.
+    // ID stays in the set even after completion to prevent re-fetching
+    // assets that don't exist (negative cache).
     pendingFetches.add(id);
     
-    fetch(`/webwow/api/assets/${id}`)
+    fetch(`/ycode/api/assets/${id}`)
       .then(res => res.ok ? res.json() : null)
       .then(result => {
         if (result?.data) {
-          const asset = result.data;
+          const asset = normalizeAssetForEditor(result.data);
+          pendingFetches.delete(id);
           set((state) => ({
             assetsById: {
               ...state.assetsById,
@@ -235,9 +253,6 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
       })
       .catch(err => {
         console.error('Failed to fetch asset:', err);
-      })
-      .finally(() => {
-        pendingFetches.delete(id);
       });
 
     return null;
@@ -247,11 +262,12 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
    * Add new asset to store (after upload)
    */
   addAsset: (asset: Asset) => {
+    const normalized = normalizeAssetForEditor(asset);
     set((state) => ({
-      assets: [asset, ...state.assets],
+      assets: [normalized, ...state.assets],
       assetsById: {
         ...state.assetsById,
-        [asset.id]: asset,
+        [normalized.id]: normalized,
       },
     }));
   },
@@ -261,9 +277,10 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
    */
   updateAsset: (assetId: string, updates: Partial<Asset>) => {
     set((state) => {
-      const updatedAsset = { ...state.assetsById[assetId], ...updates };
+      const merged = { ...state.assetsById[assetId], ...updates } as Asset;
+      const updatedAsset = normalizeAssetForEditor(merged);
       return {
-        assets: state.assets.map(a => 
+        assets: state.assets.map(a =>
           a.id === assetId ? updatedAsset : a
         ),
         assetsById: {
@@ -292,9 +309,14 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
    * Add folder to store
    */
   addFolder: (folder: AssetFolder) => {
-    set((state) => ({
-      folders: [...state.folders, folder],
-    }));
+    set((state) => {
+      // Idempotent: skip if a folder with this id already exists so the list can
+      // never hold a duplicate id (which crashes keyed tree/list renders). Guards
+      // against double-invokes (React StrictMode, rapid retries) and any future
+      // realtime create path that could deliver the same folder more than once.
+      if (state.folders.some((existing) => existing.id === folder.id)) return state;
+      return { folders: [...state.folders, folder] };
+    });
   },
 
   /**
@@ -332,7 +354,7 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
     const allFolderIdsToDelete = [folderId, ...descendantIds];
 
     // Call API to delete folder (backend handles cascading deletion)
-    const response = await fetch(`/webwow/api/asset-folders/${folderId}`, {
+    const response = await fetch(`/ycode/api/asset-folders/${folderId}`, {
       method: 'DELETE',
     });
 
@@ -395,7 +417,7 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
           originalFolder.order !== folder.order ||
           originalFolder.depth !== folder.depth
         ) {
-          const response = await fetch(`/webwow/api/asset-folders/${folder.id}`, {
+          const response = await fetch(`/ycode/api/asset-folders/${folder.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

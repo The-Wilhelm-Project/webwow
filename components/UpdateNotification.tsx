@@ -30,7 +30,7 @@ export default function UpdateNotification() {
 
   const checkForUpdates = async () => {
     try {
-      const response = await fetch('/webwow/api/updates/check');
+      const response = await fetch('/ycode/api/updates/check');
       if (response.ok) {
         const data = await response.json();
         setUpdateInfo(data);
@@ -45,7 +45,7 @@ export default function UpdateNotification() {
   const handleDismiss = () => {
     setDismissed(true);
     // Store dismissal in localStorage (will reappear after 7 days or page refresh)
-    localStorage.setItem('webwow-update-dismissed', Date.now().toString());
+    localStorage.setItem('ycode-update-dismissed', Date.now().toString());
   };
 
   // Don't show if loading, no update available, or dismissed
@@ -69,7 +69,7 @@ export default function UpdateNotification() {
             </svg>
             <div>
               <p className="font-semibold">
-                🎉 New Webwow update available!
+                🎉 New Ycode update available!
               </p>
               <p className="text-sm text-blue-100">
                 Version {updateInfo.latestVersion} is now available (you have {updateInfo.currentVersion})

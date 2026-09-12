@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.30.15-webwow.1] - 2026-09-12 — Upstream-Sync auf ycode 1.30.15
+
+Erster Release der neuen Fork-Strategie. Die Versionsnummer folgt ab jetzt dem Upstream-Schema
+`<ycode-Version>-webwow.<n>`. Die Einträge unterhalb dieses Abschnitts sind der unveränderte
+Upstream-Changelog von ycode.
+
+### Strategiewechsel: Kompatibilitätsschicht statt Rewrite
+
+- Der alte Fork (0.9.x) hatte ~106 Upstream-Dateien (Repositories, Services, Routen) von Supabase auf
+  knex umgeschrieben; jedes Upstream-Update war damit ein manuelles Re-Port.
+- Jetzt bleiben **alle Upstream-Dateien byte-identisch**. Nur die Supabase-Nahtstellen
+  (`lib/supabase-server.ts`, `lib/supabase-auth.ts`, `lib/supabase-route-client.ts`,
+  `lib/supabase-browser.ts`, `lib/credentials.ts`, `knexfile.ts`, `proxy.ts`) werden durch eine
+  Kompatibilitätsschicht unter `lib/webwow/**` ersetzt: PostgREST-ähnlicher Query-Builder auf knex,
+  Storage auf der lokalen Platte, Auth auf einer eigenen `auth.users`-Tabelle, Realtime als No-op.
+- Der Builder-Pfad bleibt intern `/ycode` (kein Verzeichnis-Rename mehr). Dadurch ist
+  `git merge upstream/main` künftig nahezu konfliktfrei. Ablauf: `docs/UPSTREAM-SYNC.md`,
+  Überblick: `docs/ARCHITECTURE.md`, Helfer: `npm run sync:upstream`.
+- Damit kommen alle ycode-Features bis 1.30.15 mit (u. a. AI-Agent mit eigenem API-Key,
+  Airtable-/Webflow-App-Integrationen, statischer Export, MCP-Server, globale Variablen,
+  Versionen, Layouts).
+
+### Verhaltensänderungen für bestehende Installationen
+
+- **Builder-URL:** `/webwow/...` leitet permanent (308) auf `/ycode/...` um. Lesezeichen und
+  Links aktualisieren; alte URLs funktionieren weiter.
+- **Login:** statt nur Passwort jetzt **E-Mail + Passwort**. Das Owner-Konto wird beim ersten Start
+  aus `ADMIN_EMAIL` (Default `admin@webwow.local`) und `ADMIN_PASSWORD` angelegt; das Env-Passwort
+  wird für dieses Konto immer akzeptiert (Recovery). Weitere Benutzer mit Rollen
+  (owner/admin/designer/editor) sind möglich, E-Mail-Einladungen (noch) nicht.
+  Der Session-Cookie heißt jetzt `webwow_session` (vorher `webwow_admin_auth`) — nach dem Update
+  einmal neu anmelden.
+- **Uploads:** Ablage jetzt `UPLOAD_DIR/<bucket>/<pfad>` (Bucket `assets`); das alte Layout
+  `UPLOAD_DIR/<pfad>` wird als Fallback weiterhin gelesen, ein Umkopieren ist nicht nötig.
+  Öffentliche Asset-URLs lauten `/storage/v1/object/public/assets/<pfad>`.
+- **Whitelabel:** die Einstellung `ycode_badge` wird jetzt respektiert (Default: aus, per Migration
+  `99999999999999_webwow_defaults` gesetzt); ebenso `site_name`/`site_description`, sofern noch auf
+  Upstream-Defaults.
+- **Datenbank:** vorhandene Daten werden per Migration aufgerüstet — Reihenfolge
+  `00000000000000_webwow_bootstrap` (legt Schemata `auth`/`storage`, Rollen und `auth.users` an) →
+  alle Upstream-Migrationen bis 1.30.15 → `99999999999999_webwow_defaults`. Der Docker-Container
+  führt `knex migrate:latest` bei jedem Start automatisch aus. **Vor dem Update ein `pg_dump`
+  ziehen.**
+- **Realtime/Presence:** im Single-Server-Modus deaktiviert (No-op-Channel); keine Live-Cursor.
+- **Konfiguration:** neue Variablen `ADMIN_EMAIL`, `DATABASE_SSL`; `SUPABASE_*` werden ignoriert.
+  `.env.example` ist die Referenz.
+- **Docker:** Postgres-Port nur noch auf `127.0.0.1` gebunden; Healthcheck für den App-Container;
+  `storage/` (Google-Fonts-Liste, Beispiel-Collections) und `next.config.ts` werden jetzt ins Image
+  kopiert; `HUSKY=0` beim `npm ci`; Migrationen mit Retry beim Start.
+- **Build/Tooling:** Next 16 (Turbopack), `output: 'standalone'`, Body-Limit 100 MB für den
+  Webflow-ZIP-Import; `tools/`, `import/`, `uploads/`, `docs/` sind von tsc/eslint ausgenommen;
+  `npm run migrate:*` lädt `.env` automatisch.
+
 ## [0.2.0] - 2026-03-03
 
 ### Added

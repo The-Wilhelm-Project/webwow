@@ -7,6 +7,7 @@
 
 import React from 'react';
 import { useCollaborationPresenceStore, getResourceLockKey } from '@/stores/useCollaborationPresenceStore';
+import { useAuthStore } from '@/stores/useAuthStore';
 import { CollaboratorBadge } from './CollaboratorBadge';
 import { cn } from '@/lib/utils';
 
@@ -29,7 +30,7 @@ export function ResourceLockOverlay({
   showOverlay = true,
   tooltipPrefix = 'Editing by',
 }: ResourceLockOverlayProps) {
-  const currentUserId = 'admin';
+  const currentUserId = useAuthStore((state) => state.user?.id);
   
   // Get lock info
   const lockKey = getResourceLockKey(resourceType, resourceId);

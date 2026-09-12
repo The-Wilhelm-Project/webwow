@@ -8,11 +8,11 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Webwow, please report it responsibly.
+If you discover a security vulnerability in Ycode, please report it responsibly.
 
 **Do not open a public issue.** Instead, email us at:
 
-**info@webwow.com**
+**info@ycode.com**
 
 Please include:
 
@@ -39,4 +39,4 @@ We will credit reporters in the release notes (unless you prefer to remain anony
 
 ## Scope
 
-This policy applies to the Webwow application code in this repository. For issues related to third-party services (Supabase, Vercel), please report to those providers directly.
+This policy applies to the Ycode application code in this repository. For issues related to third-party services (Supabase, Vercel), please report to those providers directly.

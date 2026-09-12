@@ -3,7 +3,7 @@ import type { Knex } from 'knex';
 /**
  * Migration: Create Pages Table
  *
- * Creates the pages table
+ * Creates the pages table with RLS and policies
  */
 
 export async function up(knex: Knex): Promise<void> {
@@ -56,9 +56,47 @@ export async function up(knex: Knex): Promise<void> {
     WHERE deleted_at IS NULL
   `);
 
+  // Enable Row Level Security
+  await knex.schema.raw('ALTER TABLE pages ENABLE ROW LEVEL SECURITY');
+
+  // Create RLS policies
+  // Single SELECT policy: public can view published OR authenticated can view all
+  await knex.schema.raw(`
+    CREATE POLICY "Pages are viewable"
+      ON pages FOR SELECT
+      USING (
+        (is_published = true AND deleted_at IS NULL)
+        OR (SELECT auth.uid()) IS NOT NULL
+      )
+  `);
+
+  // Authenticated users can INSERT/UPDATE/DELETE
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can modify pages"
+      ON pages FOR INSERT
+      WITH CHECK ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can update pages"
+      ON pages FOR UPDATE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can delete pages"
+      ON pages FOR DELETE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
 }
 
 export async function down(knex: Knex): Promise<void> {
+  // Drop policies first
+  await knex.schema.raw('DROP POLICY IF EXISTS "Pages are viewable" ON pages');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can modify pages" ON pages');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can update pages" ON pages');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can delete pages" ON pages');
+
   // Drop table
   await knex.schema.dropTableIfExists('pages');
 }

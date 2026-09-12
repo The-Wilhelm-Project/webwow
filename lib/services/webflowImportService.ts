@@ -1,3 +1,33 @@
+/**
+ * Webflow ZIP export importer
+ *
+ * WEBWOW-ONLY FEATURE — this module does not exist upstream (ycode). Keep it
+ * free of fork copies of upstream helpers; it must only consume upstream's
+ * current public API so `git merge upstream/main` stays conflict-free.
+ *
+ * Converts a Webflow "site export" ZIP (HTML/CSS/assets) plus optional CMS CSV
+ * exports into a Ycode project dump (`ProjectExportData`) and either imports it
+ * through upstream's `importProject()` or hands it back for download as a
+ * `.ycode` file (routes: `app/(builder)/ycode/api/webflow/**`).
+ *
+ * Upstream integration points:
+ * - `lib/services/projectService`: `importProject(manifest, data, files)` —
+ *   asset binaries are passed as `ExportFile[]`; upstream's `restoreAssetFiles`
+ *   uploads them to storage and rewrites `assets.storage_path`/`public_url`.
+ *   `manifest.lastMigration` is set like upstream's `exportProject()` does so
+ *   no migrations are replayed on import.
+ * - `lib/asset-utils#getAssetProxyUrl`: `/a/<hash>/<slug>.<ext>` URLs used when
+ *   rewriting `url()` references in imported CSS / inline styles.
+ * - `lib/csv-utils#parseCSVText`, `lib/text-format-utils#stringToTiptapContent`,
+ *   `lib/sitemap-utils#getDefaultSitemapSettings`, `lib/asset-constants`.
+ * - Inline CMS bindings use upstream's canonical `<ycode-inline-variable>` tag,
+ *   layers reference styles via `styleIds`, and the imported settings rows use
+ *   upstream's `ycode_version` / `ycode_badge` keys.
+ *
+ * NOTE: `importProject()` truncates all content tables — a Webflow import
+ * replaces the current project (same semantics as importing a `.ycode` file).
+ */
+
 import { randomUUID } from 'crypto';
 import path from 'path';
 import JSZip from 'jszip';
@@ -7,21 +37,17 @@ import { STORAGE_FOLDERS } from '@/lib/asset-constants';
 import { parseCSVText } from '@/lib/csv-utils';
 import { getAssetProxyUrl } from '@/lib/asset-utils';
 import { getKnexClient } from '@/lib/knex-client';
-import { createAsset } from '@/lib/repositories/assetRepository';
-import { uploadFile as uploadToStorage, getPublicUrl } from '@/lib/local-storage';
 import { getDefaultSitemapSettings } from '@/lib/sitemap-utils';
 import { stringToTiptapContent } from '@/lib/text-format-utils';
 import {
+  getLatestMigrationName,
   importProject,
+  type ExportFile,
   type ProjectExportData,
   type ProjectManifest,
 } from '@/lib/services/projectService';
-import type {
-  CollectionFieldType,
-  Layer,
-  WebflowImportPayload,
-  WebflowImportResult,
-} from '@/types';
+import type { CollectionFieldType, Layer } from '@/types';
+import type { WebflowImportPayload, WebflowImportResult } from '@/types/webwow';
 
 interface ParsedWebflowCsv {
   name: string;
@@ -52,7 +78,19 @@ interface NormalizedField {
 interface ImportedAsset {
   id: string;
   storagePath: string;
-  publicUrl: string | null;
+  /** Upstream asset proxy URL (`/a/<hash>/<slug>.<ext>`), used for CSS `url()` rewriting. */
+  proxyUrl: string | null;
+}
+
+/**
+ * Collects asset binaries (as upstream `ExportFile`s) and the matching `assets`
+ * rows while the ZIP is processed. Nothing is written to storage or the
+ * database here — upstream's `importProject()`/`restoreAssetFiles()` does that,
+ * which keeps the pure `convert` path free of side effects.
+ */
+interface AssetCollector {
+  files: ExportFile[];
+  rows: Record<string, unknown>[];
 }
 
 interface ProcessWebflowImportResponse {
@@ -314,42 +352,55 @@ function inferRelationType(
   };
 }
 
-async function uploadAssetBuffer(
+function registerAsset(
+  collector: AssetCollector,
   filename: string,
   buffer: Buffer,
   mimeType: string
-): Promise<ImportedAsset> {
+): ImportedAsset {
   const extension = path.extname(filename).toLowerCase() || '.bin';
-  const storagePath = `${STORAGE_FOLDERS.WEBSITE}/${Date.now()}-${randomUUID()}${extension}`;
+  const id = randomUUID();
+  // Placeholder path with the right extension: `restoreAssetFiles` uploads the
+  // file under a fresh `generateStoragePath()` and rewrites storage_path /
+  // public_url on the row by matching this value.
+  const storagePath = `${STORAGE_FOLDERS.WEBSITE}/${Date.now()}-${id}${extension}`;
+  const displayName = filename.replace(/\.[^/.]+$/, '') || filename;
 
-  await uploadToStorage(storagePath, buffer);
-
-  const asset = await createAsset({
-    filename: filename.replace(/\.[^/.]+$/, '') || filename,
+  collector.rows.push({
+    id,
     source: 'webflow-import',
+    filename: displayName,
     storage_path: storagePath,
-    public_url: getPublicUrl(storagePath),
+    public_url: null,
     file_size: buffer.byteLength,
     mime_type: mimeType,
+    is_published: false,
+  });
+  collector.files.push({
+    storagePath,
+    base64: buffer.toString('base64'),
+    mimeType,
   });
 
-  const proxyUrl = getAssetProxyUrl(asset) || getPublicUrl(storagePath);
-  if (proxyUrl !== asset.public_url) {
-    const db = await getKnexClient();
-    await db('assets')
-      .where('id', asset.id)
-      .where('is_published', false)
-      .update({
-        public_url: proxyUrl,
-        updated_at: new Date().toISOString(),
-      });
-  }
-
   return {
-    id: asset.id,
+    id,
     storagePath,
-    publicUrl: proxyUrl,
+    proxyUrl: getAssetProxyUrl({ id, filename: displayName, mime_type: mimeType, storage_path: storagePath }),
   };
+}
+
+/**
+ * Latest applied migration, like upstream's `exportProject()` records it. The
+ * dump is generated against the current schema, so `importProject()` must not
+ * replay any migration `up()`s over the imported data.
+ */
+async function resolveLatestMigrationName(): Promise<string | undefined> {
+  try {
+    const knex = await getKnexClient();
+    return (await getLatestMigrationName(knex)) || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function downloadRemoteAsset(url: string): Promise<{ buffer: Buffer; filename: string; mimeType: string } | null> {
@@ -498,7 +549,7 @@ function applyLayerStylesToTree(
 
     const updated: Layer = {
       ...layer,
-      ...(matchedStyleId ? { styleId: matchedStyleId } : {}),
+      ...(matchedStyleId ? { styleIds: [matchedStyleId] } : {}),
     };
 
     if (layer.children?.length) {
@@ -619,7 +670,7 @@ function createFieldInlineVariableTag(
     (variable.data as Record<string, unknown>).collection_layer_id = collectionLayerId;
   }
 
-  return `<webwow-inline-variable>${JSON.stringify(variable)}</webwow-inline-variable>`;
+  return `<ycode-inline-variable>${JSON.stringify(variable)}</ycode-inline-variable>`;
 }
 
 function inferCollectionForPageSlug(
@@ -1198,7 +1249,7 @@ function mapElementToLayer(
       attributes: {
         ...styleAttr,
         controls: element.getAttribute('controls') !== null,
-        autoPlay: element.getAttribute('autoplay') !== null,
+        autoplay: element.getAttribute('autoplay') !== null,
         loop: element.getAttribute('loop') !== null,
         muted: element.getAttribute('muted') !== null,
       },
@@ -1292,12 +1343,15 @@ function buildPagesFromHtml(
         id: pageId,
         name: pageName,
         slug,
+        page_folder_id: null,
         order: index,
         depth: 0,
         is_index: slug === '',
         is_dynamic: false,
+        error_page: null,
         settings: {},
         is_published: false,
+        is_publishable: true,
       },
       pageLayers: {
         id: randomUUID(),
@@ -1359,7 +1413,27 @@ async function processWebflowImportInternal(
 
     const htmlFiles: Array<{ filePath: string; content: string }> = [];
     const cssFiles: Array<{ filePath: string; content: string }> = [];
-    const zipAssets: Array<{ filePath: string; buffer: Buffer; mimeType: string }> = [];
+    const assets: AssetCollector = { files: [], rows: [] };
+    const assetIdBySource = new Map<string, string>();
+    // ZIP path / remote URL -> upstream asset proxy URL (for CSS url() rewriting)
+    const assetPublicUrlBySource = new Map<string, string>();
+    const remoteAssetCache = new Map<string, string>();
+
+    const rememberAsset = (source: string, asset: ImportedAsset, includeBaseName: boolean) => {
+      const normalizedSource = normalizeSlashes(source);
+      assetIdBySource.set(normalizedSource, asset.id);
+      if (asset.proxyUrl) {
+        assetPublicUrlBySource.set(normalizedSource, asset.proxyUrl);
+      }
+      if (!includeBaseName) return;
+      const baseName = path.basename(normalizedSource);
+      if (!assetIdBySource.has(baseName)) {
+        assetIdBySource.set(baseName, asset.id);
+      }
+      if (asset.proxyUrl && !assetPublicUrlBySource.has(baseName)) {
+        assetPublicUrlBySource.set(baseName, asset.proxyUrl);
+      }
+    };
 
     for (const [filePath, zipObject] of Object.entries(zip.files)) {
       if (zipObject.dir) continue;
@@ -1386,52 +1460,18 @@ async function processWebflowImportInternal(
         continue;
       }
 
-      const buffer = await zipObject.async('nodebuffer');
-      zipAssets.push({
-        filePath: normalizedPath,
-        buffer,
-        mimeType: inferMimeType(normalizedPath),
-      });
+      try {
+        const buffer = await zipObject.async('nodebuffer');
+        const registered = registerAsset(assets, path.basename(normalizedPath), buffer, inferMimeType(normalizedPath));
+        rememberAsset(normalizedPath, registered, true);
+      } catch (error) {
+        warnings.push(`Asset "${normalizedPath}" could not be imported: ${error instanceof Error ? error.message : 'unknown error'}`);
+      }
     }
 
     htmlFiles.sort((a, b) => a.filePath.localeCompare(b.filePath));
 
-    const importedAssets: Array<Record<string, unknown>> = [];
-    const assetIdBySource = new Map<string, string>();
-    const assetPublicUrlBySource = new Map<string, string>();
-    const remoteAssetCache = new Map<string, string>();
-
-    for (const asset of zipAssets) {
-      try {
-        const uploaded = await uploadAssetBuffer(path.basename(asset.filePath), asset.buffer, asset.mimeType);
-        importedAssets.push({
-          id: uploaded.id,
-          source: 'webflow-import',
-          filename: path.basename(asset.filePath, path.extname(asset.filePath)),
-          storage_path: uploaded.storagePath,
-          public_url: uploaded.publicUrl,
-          file_size: asset.buffer.byteLength,
-          mime_type: asset.mimeType,
-          is_published: false,
-        });
-        const normalizedSource = normalizeSlashes(asset.filePath);
-        assetIdBySource.set(normalizedSource, uploaded.id);
-        if (uploaded.publicUrl) {
-          assetPublicUrlBySource.set(normalizedSource, uploaded.publicUrl);
-        }
-        const baseName = path.basename(asset.filePath);
-        if (!assetIdBySource.has(baseName)) {
-          assetIdBySource.set(baseName, uploaded.id);
-        }
-        if (uploaded.publicUrl && !assetPublicUrlBySource.has(baseName)) {
-          assetPublicUrlBySource.set(baseName, uploaded.publicUrl);
-        }
-      } catch (error) {
-        warnings.push(`Asset "${asset.filePath}" could not be imported: ${error instanceof Error ? error.message : 'unknown error'}`);
-      }
-    }
-
-    const assetRows = [...importedAssets];
+    const assetRows = assets.rows;
 
     // Import asset URLs referenced in CSS (remote and local)
     for (const cssFile of cssFiles) {
@@ -1450,22 +1490,9 @@ async function processWebflowImportInternal(
             warnings.push(`Remote CSS asset "${normalized}" could not be downloaded`);
             continue;
           }
-          const uploaded = await uploadAssetBuffer(downloaded.filename, downloaded.buffer, downloaded.mimeType);
+          const uploaded = registerAsset(assets, downloaded.filename, downloaded.buffer, downloaded.mimeType);
           remoteAssetCache.set(normalized, uploaded.id);
-          assetIdBySource.set(normalized, uploaded.id);
-          if (uploaded.publicUrl) {
-            assetPublicUrlBySource.set(normalized, uploaded.publicUrl);
-          }
-          assetRows.push({
-            id: uploaded.id,
-            source: 'webflow-import',
-            filename: downloaded.filename.replace(/\.[^/.]+$/, ''),
-            storage_path: uploaded.storagePath,
-            public_url: uploaded.publicUrl || '',
-            file_size: downloaded.buffer.byteLength,
-            mime_type: downloaded.mimeType,
-            is_published: false,
-          });
+          rememberAsset(normalized, uploaded, false);
         }
       }
     }
@@ -1617,22 +1644,9 @@ async function processWebflowImportInternal(
               } else {
                 const downloaded = await downloadRemoteAsset(normalized);
                 if (downloaded) {
-                  const uploaded = await uploadAssetBuffer(downloaded.filename, downloaded.buffer, downloaded.mimeType);
+                  const uploaded = registerAsset(assets, downloaded.filename, downloaded.buffer, downloaded.mimeType);
                   remoteAssetCache.set(normalized, uploaded.id);
-                  assetIdBySource.set(normalized, uploaded.id);
-                  if (uploaded.publicUrl) {
-                    assetPublicUrlBySource.set(normalized, uploaded.publicUrl);
-                  }
-                  assetRows.push({
-                    id: uploaded.id,
-                    source: 'webflow-import',
-                    filename: downloaded.filename.replace(/\.[^/.]+$/, ''),
-                    storage_path: uploaded.storagePath,
-                    public_url: uploaded.publicUrl || '',
-                    file_size: downloaded.buffer.byteLength,
-                    mime_type: downloaded.mimeType,
-                    is_published: false,
-                  });
+                  rememberAsset(normalized, uploaded, false);
                   assetId = uploaded.id;
                 }
               }
@@ -1705,17 +1719,26 @@ async function processWebflowImportInternal(
       sanitizeCollectionName(path.basename(payload.zipFilename, path.extname(payload.zipFilename))),
       result
     );
+    manifest.lastMigration = await resolveLatestMigrationName();
 
     const data: Record<string, Record<string, unknown>[]> = {
       settings: [
         { key: 'site_name', value: 'Imported from Webflow' },
         { key: 'site_description', value: 'Imported from Webflow export' },
-        { key: 'webwow_version', value: '0.1.0' },
+        { key: 'ycode_version', value: '0.1.0' },
         { key: 'sitemap', value: getDefaultSitemapSettings() },
-        { key: 'webwow_badge', value: false },
+        { key: 'ycode_badge', value: false },
         { key: 'timezone', value: 'UTC' },
+        // draft_css/published_css are the OUTPUT slots of the Tailwind CSS generator and get
+        // overwritten on the first autosave. They only give the canvas its initial look; the
+        // imported Webflow CSS is kept permanently in the global custom head code (rendered
+        // in the canvas and on published pages, untouched by the generator).
         { key: 'draft_css', value: importedCss },
         { key: 'published_css', value: importedCss },
+        {
+          key: 'custom_code_head',
+          value: importedCss ? `<style id="webwow-webflow-import">\n${importedCss}\n</style>` : '',
+        },
       ],
       assets: assetRows,
       pages: pageRows,
@@ -1728,7 +1751,7 @@ async function processWebflowImportInternal(
     };
 
     if (shouldImport) {
-      const importResult = await importProject(manifest, data);
+      const importResult = await importProject(manifest, data, assets.files);
       if (!importResult.success) {
         errors.push(importResult.error || 'Import in projectService failed');
       }
@@ -1737,6 +1760,7 @@ async function processWebflowImportInternal(
     const exportData: ProjectExportData = {
       manifest,
       data,
+      files: assets.files,
     };
 
     return {

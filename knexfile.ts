@@ -1,5 +1,6 @@
 import type { Knex } from 'knex';
 import path from 'path';
+import { WebwowPgClient } from './lib/webwow/sites/pg-client';
 
 /**
  * Knex Configuration for Webwow
@@ -32,7 +33,8 @@ function getConnection(): Knex.PgConnectionConfig {
 }
 
 const createConfig = (): Knex.Config => ({
-  client: 'pg',
+  // Webwow: site-aware client, see docs/MULTISITE.md
+  client: WebwowPgClient,
   // Resolved lazily so importing this file (e.g. from Next.js) never throws.
   connection: async () => getConnection(),
   migrations: {

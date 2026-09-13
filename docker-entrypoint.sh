@@ -27,6 +27,14 @@ until ./node_modules/.bin/knex migrate:latest --knexfile knexfile.ts; do
 done
 echo "[webwow] Migrations complete."
 
+# Multi-site (docs/MULTISITE.md): migrate every registered site database as well.
+# No-op when the registry has no non-default rows; a failure here must not keep the app down.
+if ./node_modules/.bin/ts-node --transpile-only -r tsconfig-paths/register scripts/webwow-sites.ts migrate; then
+  echo "[webwow] Site databases migrated."
+else
+  echo "[webwow] WARNING: site database migration failed (see above); continuing." >&2
+fi
+
 echo "[webwow] Starting Webwow on port ${PORT:-3002}..."
 # next.config.ts sets output:'standalone'; `next start` logs a one-line warning about
 # that, which is expected here (we ship the full node_modules for the knex CLI).

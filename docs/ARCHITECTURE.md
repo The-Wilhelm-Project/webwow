@@ -1,11 +1,12 @@
 # Webwow-Architektur (Überblick)
 
 Webwow = unveränderter ycode-Code (1.30.x) + eine dünne Kompatibilitätsschicht, die Supabase durch
-PostgreSQL und lokale Dateien ersetzt, + Docker-Deployment + Webflow-ZIP-Importer. Wie Upstream-Updates
-eingespielt werden: [UPSTREAM-SYNC.md](UPSTREAM-SYNC.md).
+PostgreSQL und lokale Dateien ersetzt, + Docker-Deployment + Webflow-ZIP-Importer + optional mehrere
+Websites pro Installation ([MULTISITE.md](MULTISITE.md)). Wie Upstream-Updates eingespielt werden:
+[UPSTREAM-SYNC.md](UPSTREAM-SYNC.md).
 
 ```
-Browser ──► proxy.ts (Cookie-Check, Security-Header) ──► Next.js Route Handler / Server Components
+Browser ──► proxy.ts (Cookie-Check, Site-Auflösung → signierter Header, Security-Header) ──► Next.js Route Handler / Server Components
                                                               │
                         Upstream-Code (Repositories, Services, Routen) — unverändert
                                                               │
@@ -19,6 +20,7 @@ Browser ──► proxy.ts (Cookie-Check, Security-Header) ──► Next.js Rou
                          rpc, jsonb-Handling)          + /storage/v1/…-Route        webwow_session
                                   └───────────────────────────┼──────────────────────────┘
                                                         PostgreSQL (DATABASE_URL)
+                                          + je weiterer Site eine Datenbank webwow_site_<slug> (MULTISITE.md)
 ```
 
 ## Die Schicht in einem Absatz
@@ -93,6 +95,33 @@ Die knex-CLI führt TypeScript-Migrationen über ts-node aus (`tsconfig.json` �
 + `tsconfig-paths/register`, weil einige Upstream-Migrationen `@/lib/*` importieren). Im Docker-Image
 liegen deshalb `lib/`, `types/`, `tsconfig.json`, `knexfile.ts` und die devDependencies.
 
+## Multi-Site
+
+Optional ([MULTISITE.md](MULTISITE.md)): mehrere Websites in einer Installation, **eine PostgreSQL-Datenbank
+pro Site** neben der `DATABASE_URL`-Datenbank (= Default-Site), Registry `webwow_sites` nur in der
+Haupt-Datenbank, Uploads unter `UPLOAD_DIR/sites/<id>/<bucket>/…`. Der Upstream-Code bleibt byte-identisch,
+weil die Site-Zuordnung unterhalb seiner Aufrufe passiert:
+
+1. **`proxy.ts`** löst die Site auf (`lib/webwow/sites/resolve.ts`): veröffentlichte Seiten und
+   Besucher-Routen nach **Host** (Domain → `<slug>.<base>` → Default), Builder/API nach Editor-Pin →
+   Cookie `webwow_site` → Default. Ergebnis ist der signierte Request-Header `x-webwow-site: <id>.<hmac>`;
+   eingehende `x-webwow-*` Header werden verworfen.
+2. **`getCurrentSiteId()`** (`lib/webwow/sites/request-site.ts`) liest den Header synchron aus dem
+   Next-Request-Store (kein `headers()`, also keine dynamische Seite) oder den `AsyncLocalStorage`
+   (`runInSite()` für Hintergrundarbeit wie Provisionierung/Import).
+3. **`knexfile.ts`** nutzt `client: WebwowPgClient` (`lib/webwow/sites/pg-client.ts`): `acquireConnection()`
+   leiht die Verbindung aus dem Pool der aktuellen Site — damit sind `getKnexClient()`, `getDb()`, der
+   PostgREST-Shim und `runMigrations()` site-aware, ohne dass Upstream davon weiß. Registry und `auth.users`
+   gehen immer über `getMainDb()` (`lib/webwow/sites/main-db.ts`, nie site-aware).
+4. **`lib/webwow/storage.ts`** bildet logische Pfade auf `sites/<id>/…` ab; **`lib/webwow/next-cache.ts`**
+   (Alias für `next/cache`, nur Server-Bundle, nur mit `WEBWOW_MULTI_SITE=1`) scoped `unstable_cache`/
+   `revalidateTag` pro Site. Ohne das Flag sind Cache-Keys und statische Seiten byte-identisch zu vorher.
+5. **Dashboard** `app/(webwow)/webwow` (`/webwow`, eigene Root-Layout-Gruppe) und API
+   `app/(builder)/ycode/api/webwow/sites/**` (`lib/webwow/sites/service.ts`: anlegen, duplizieren mit
+   Scrub-Liste, löschen, `.ycode`-Import/-Export, Editor-Passwort); CLI `scripts/webwow-sites.ts`.
+6. **Editor-Sessions** (`?edit`, EDITOR.md) sind per Token an eine Site gepinnt; `lib/webwow/proxy-policy.ts`
+   entscheidet allow/deny/rewrite pro Route (Enumerations-Test über alle `route.ts`).
+
 ## Wo ändere ich was?
 
 | Ich will … | Datei(en) |
@@ -109,17 +138,22 @@ liegen deshalb `lib/`, `types/`, `tsconfig.json`, `knexfile.ts` und die devDepen
 | Brand-Assets (Favicon, OG-Image, Manifest) | `public/favicon*.{svg,png}`, `public/apple-touch-icon.png`, `public/og-image.*`, `public/site.webmanifest`, `app/icon.svg` |
 | Webflow-ZIP-Importer | `lib/services/webflowImportService.ts`, `lib/repositories/webflowImportRepository.ts`, `components/project/WebflowImportDialog.tsx`, Button in `app/(builder)/ycode/settings/templates/page.tsx`, Migration `20260324000001_create_webflow_imports_table.ts` |
 | Öffentliche API-Routen ohne Login | `proxy.ts` → `PUBLIC_API_PREFIXES` / `PUBLIC_API_EXACT` |
-| Redirect `/webwow` → `/ycode`, Upload-Body-Limit, standalone-Output, Turbopack-Root | `next.config.ts` (Stellen mit `// Webwow:`) |
+| Mehrere Websites: Site-Auflösung, Registry, Pools, Provisionierung | `lib/webwow/sites/**` (`resolve.ts`, `registry.ts`, `pg-client.ts`, `service.ts`), `proxy.ts` (Site-Header), [MULTISITE.md](MULTISITE.md) |
+| Sites-Dashboard `/webwow`, Sites-API | `app/(webwow)/**`, `app/(builder)/ycode/api/webwow/sites/**` (`_shared.ts`: Rollen, `siteJson`) |
+| Editor-Policy (`?edit`-Sessions), neue Upstream-Route klassifizieren | `lib/webwow/proxy-policy.ts` (+ Enumerations-Test), Scope-Tabelle `scopeFor()` in `lib/webwow/sites/resolve.ts` |
+| Site-bezogener Cache (`unstable_cache`/`revalidateTag`) | `lib/webwow/next-cache.ts`, Alias in `next.config.ts` (`// Webwow:`) |
+| Redirect alter `/webwow/<builder-pfad>`-Links → `/ycode` (ohne `/webwow`, `/webwow/edit`, `/webwow/sites`), Upload-Body-Limit, standalone-Output, Turbopack-Root | `next.config.ts` (Stellen mit `// Webwow:`) |
 | Docker-Image, Compose-Defaults, Start-Reihenfolge (Migrationen → `next start`) | `Dockerfile`, `docker-compose.yml`, `docker-entrypoint.sh`, `.dockerignore` |
 | Env-Variablen dokumentieren | `.env.example`, `README.md` (Tabelle), `docker-compose.yml` (Kommentare) |
-| npm-Skripte (`migrate:*`, `sync:upstream`, `docker:*`) | `package.json` → `scripts` (Dependencies nur zusammen mit Upstream ändern) |
+| npm-Skripte (`migrate:*`, `sync:upstream`, `webwow:sites`, `docker:*`) | `package.json` → `scripts` (Dependencies nur zusammen mit Upstream ändern) |
 | Upstream-Update einspielen | `scripts/sync-upstream.sh`, [UPSTREAM-SYNC.md](UPSTREAM-SYNC.md) |
 | Builder-Feature / CMS-Bug | **Upstream-PR bei ycode** — nicht im Fork patchen (sonst Merge-Konflikte) |
 
 ## Nicht-Ziele / bewusste Grenzen
 
-* Kein Multi-Tenant, kein Supabase-RLS-Schutz (Webwow verbindet als DB-Owner; Zugriffskontrolle
-  passiert in `proxy.ts` und den Upstream-Route-Handlern).
+* Kein Supabase-RLS-Schutz (Webwow verbindet als DB-Owner; Zugriffskontrolle passiert in `proxy.ts` und
+  den Upstream-Route-Handlern). Mehrere Websites werden nicht per Mandanten-Spalte, sondern per eigener
+  Datenbank getrennt ([MULTISITE.md](MULTISITE.md)); Benutzer und Rollen sind global.
 * Kein Realtime (Presence/Live-Cursor) — der Channel ist ein No-op; Single-Server-Modus.
 * Keine E-Mail-Einladungen, kein Passwort-Reset per Mail.
 * Kein Vercel: ISR-Cache-Tags, `vercel.json`-Crons und Function-Limits gelten nicht. Cron-Routen

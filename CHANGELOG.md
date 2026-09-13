@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.30.15-webwow.2] - 2026-09-13 — Mehrere Websites, `?edit`-Editor, Webflow-Importer v2
+
+Alle Upstream-Dateien bleiben weiterhin byte-identisch (`bash scripts/check-upstream-identity.sh`).
+
+### Mehrere Websites in einer Installation (optional, `WEBWOW_MULTI_SITE=1`) — [docs/MULTISITE.md](docs/MULTISITE.md)
+
+- **Eine PostgreSQL-Datenbank pro Site** (`webwow_site_<slug>`, `CREATEDB` nötig) neben der bisherigen
+  Installation, die zur Default-Site wird. Registry `webwow_sites` in der Haupt-Datenbank (Migration
+  `99999999999998_webwow_sites`, seedet die Default-Zeile mit dem vorhandenen `site_name`; in
+  Site-Datenbanken ein No-op). Benutzer und Rollen bleiben global.
+- **Site-Auflösung im Proxy**: veröffentlichte Seiten und Besucher-Routen (Formulare, Collection-Filter,
+  v1-API, MCP) nach Host (Domain → `<slug>.<WEBWOW_SITES_BASE_DOMAIN>` → `<slug>.localhost` → Default),
+  Builder/API nach Editor-Pin → Cookie `webwow_site` → Default. Ergebnis ist der HMAC-signierte
+  Request-Header `x-webwow-site`; eingehende `x-webwow-*` Header werden verworfen.
+- **Site-aware Datenbank-Client** (`knexfile.ts` → `WebwowPgClient`): `getKnexClient()`, `getDb()`,
+  PostgREST-Shim und Migrationen arbeiten automatisch auf der Datenbank der aktuellen Site (Pool pro Site,
+  LRU-Deckel `WEBWOW_MAX_SITE_POOLS`, Budget-Formel in `.env.example`). Registry/`auth.users` immer über
+  `getMainDb()`.
+- **Storage**: `UPLOAD_DIR/sites/<id>/<bucket>/…` für weitere Sites, Default-Site unverändert; URLs
+  `/storage/v1/object/public/<bucket>/sites/<id>/…`; Upload-Tokens tragen die Site.
+- **Cache pro Site**: `next/cache` wird im Server-Bundle durch `lib/webwow/next-cache.ts` ersetzt
+  (`unstable_cache`-Keys `site:<id>`, Tags `s-<id>-…`). Nur mit gesetztem Flag — ohne Flag bleiben
+  Cache-Schlüssel und statische Seiten byte-identisch. Mit Flag werden veröffentlichte Seiten pro Anfrage
+  gerendert; `clearAllCache()` leert das HTML aller Sites (dokumentiert).
+- **Dashboard `/webwow`** (eigene Root-Layout-Gruppe `app/(webwow)`, dunkler Builder-Look, Karten wie
+  Webflows "All sites"): New site (optional aus `.ycode`-Export), Open, View site, Duplicate (owner),
+  Export (.ycode), Settings (Name, Slug, Domains, Editor-Passwort), Delete (mit getippter Bestätigung).
+  Login-Formular wie im Builder; Editor-Sessions sehen einen Hinweis.
+- **Sites-API** `/ycode/api/webwow/sites/**` (Rollen: auflisten/öffnen jede Session, ändern/löschen/
+  importieren/exportieren owner|admin, duplizieren owner; Editor-Sessions 403). Duplizieren kopiert die
+  Datenbank per `TEMPLATE` und leert danach Zugangsdaten, Tokens, Webhooks, Formulare, Versionen und die
+  Registry in der Kopie; Kopie der Default-Site nur mit Bestätigung (kurze Unterbrechung).
+- **CLI** `npm run webwow:sites -- list | migrate | create | delete | set-editor-password`;
+  `docker-entrypoint.sh` migriert alle Site-Datenbanken nach `knex migrate:latest`.
+- **Proxy-Härtung** (auch im Single-Site-Modus): `/ycode/api/auth/(users|invite|set-role)` verlangen eine
+  Session (vorher öffentlich); `POST /ycode/api/setup/migrate` ohne Session läuft immer auf der
+  Default-Site; `x-forwarded-host` nur mit `WEBWOW_TRUSTED_PROXY=1`.
+- **Neue Variablen**: `WEBWOW_MULTI_SITE`, `WEBWOW_SITES_BASE_DOMAIN`, `WEBWOW_TRUSTED_PROXY`,
+  `DB_POOL_MAIN_MAX`, `DB_POOL_SITE_MAX`, `WEBWOW_MAX_SITE_POOLS`; Dockerfile/Compose reichen
+  `WEBWOW_MULTI_SITE` als Build-Arg und Env durch. `PAGE_AUTH_SECRET` ist im Multi-Site-Modus Pflicht.
+- **Redirect** `/webwow/*` → `/ycode/*` gilt nur noch für alte Builder-Deep-Links; `/webwow`, `/webwow/edit`
+  und `/webwow/sites/**` werden ausgeliefert.
+- **Sync-Hygiene**: `scripts/sync-lists.sh` (eine Quelle für die Divergenz-Listen),
+  `scripts/check-upstream-identity.sh` (schlägt bei ungelisteten Abweichungen fehl),
+  `docs/UPSTREAM-SYNC.md` §4e (Cache-Primitive, `headers()` in veröffentlichten Seiten, Routen
+  klassifizieren, Next-/knex-Bumps).
+
+### `?edit`-Editor pro Site — [docs/EDITOR.md](docs/EDITOR.md)
+
+- Pro Site ein Editor-Passwort (Dashboard → Settings oder CLI). `https://<domain>/?edit` führt zum
+  Editor-Login (`/webwow/edit`); die Session ist per Token an die Site gebunden (12 h) und endet, sobald das
+  Passwort geändert oder der Zugang deaktiviert wird.
+- Editor-Sessions dürfen nur CMS-Inhalte, Assets, Übersetzungen und Textinhalte von Layern ändern
+  (`lib/webwow/proxy-policy.ts`: allow/deny/rewrite pro Route, Enumerations-Test über alle `route.ts`);
+  Design, Einstellungen, Benutzer, Integrationen und die Sites-API sind gesperrt.
+
+### Webflow-Importer v2 — Vorarbeit, noch nicht aktiv — [docs/IMPORTER.md](docs/IMPORTER.md)
+
+- Neue Pipeline unter `lib/webwow/import/webflow-zip/**`, die den Export in das native ycode-Modell
+  überführen soll (CSS → Tailwind-Layer-Styles inkl. Breakpoints und Hover, HTML → Layer, CSV →
+  Collections mit Referenzen, strukturelle CMS-Bindung, Webflow-Interaktionen → ycode-Animationen
+  ohne `eval`, Menü-/Dropdown-Verhalten, Schriften, entschärftes Rest-CSS, Zip-Bomb- und
+  SSRF-Grenzen). Mit Unit-Tests gegen den Beispiel-Export abgedeckt.
+- **Noch nicht verdrahtet**: `server-materializer`, `convert-bridge`, `components`, `pages`, `index`
+  und die API-Route fehlen. Der Code ist damit unerreichbar und ändert nichts am laufenden Betrieb;
+  für Importe gilt weiterhin der bisherige Importer unter Einstellungen → Templates.
+
 ## [1.30.15-webwow.1] - 2026-09-12 — Upstream-Sync auf ycode 1.30.15
 
 Erster Release der neuen Fork-Strategie. Die Versionsnummer folgt ab jetzt dem Upstream-Schema

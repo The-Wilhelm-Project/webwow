@@ -29,8 +29,8 @@ Seit 1.30.15-webwow.1 gilt:
 | `lib/supabase-route-client.ts` | `createRouteClient()` liefert den Route-Client-Shim (`auth.getSession/getUser/signInWithPassword/updateUser/signOut/...` auf Cookies + `auth.users`). |
 | `lib/supabase-browser.ts` | Browser-Shim: `auth.*` ruft `/ycode/api/webwow/auth/*`; `channel()` liefert einen No-op-Realtime-Channel; `removeChannel()` No-op. Exporte `createBrowserClient`, `createClient`, `resetBrowserClient` bleiben. |
 | `lib/credentials.ts` | Synthetisiert eine `SupabaseConfig` aus `DATABASE_URL`, damit alle "ist konfiguriert?"-Prüfungen von Upstream bestehen. `set()`/`del()` sind No-ops (Setup-Wizard wird übersprungen). |
-| `knexfile.ts` | Verbindung direkt aus `DATABASE_URL` (Pool aus Env, SSL via `DATABASE_SSL`). Migrationsverzeichnis unverändert. |
-| `proxy.ts` | Upstream-Struktur, aber `verifyApiAuth` prüft den signierten Webwow-Cookie (HMAC) statt Supabase; `/ycode/api/webwow/auth/` ist öffentlich. Rest (Security-Header, Pagination-Rewrite, MCP-Bypass) identisch. |
+| `knexfile.ts` | Verbindung direkt aus `DATABASE_URL` (Pool aus Env, SSL via `DATABASE_SSL`); `client: WebwowPgClient` (`lib/webwow/sites/pg-client.ts`) wählt pro Request den Pool der aktuellen Site — Multi-Site, siehe [MULTISITE.md](MULTISITE.md). Migrationsverzeichnis unverändert. |
+| `proxy.ts` | Upstream-Struktur, aber `verifyApiAuth` prüft den signierten Webwow-Cookie (HMAC) statt Supabase; `/ycode/api/webwow/auth/` ist öffentlich. Multi-Site: löst die Site pro Request auf (`lib/webwow/sites/resolve.ts`) und reicht sie als signierten Header `x-webwow-site` weiter; Editor-Sessions laufen durch `lib/webwow/proxy-policy.ts`. Rest (Security-Header, Pagination-Rewrite, MCP-Bypass) identisch. |
 
 ## 2. Welche Dateien weichen von Upstream ab?
 
@@ -46,11 +46,11 @@ aufsetzen. Nie blind "ours" nehmen — sonst gehen Upstream-Fixes verloren.
 | `lib/supabase-route-client.ts` | Nahtstelle |
 | `lib/supabase-browser.ts` | Nahtstelle |
 | `lib/credentials.ts` | Nahtstelle |
-| `knexfile.ts` | `DATABASE_URL` statt Supabase-Connection-String |
-| `proxy.ts` | Cookie-Verifikation, öffentliche `/ycode/api/webwow/auth/`-Routen |
+| `knexfile.ts` | `DATABASE_URL` statt Supabase-Connection-String; `client: WebwowPgClient` (Multi-Site) |
+| `proxy.ts` | Cookie-Verifikation, öffentliche `/ycode/api/webwow/auth/`-Routen; Multi-Site: Site-Auflösung, signierter `x-webwow-site`-Header, Editor-Policy |
 | `lib/updates/check-updates.ts`, `app/(builder)/ycode/api/updates/releases/route.ts` | eine Zeile: `UPSTREAM_REPO` zeigt auf das Webwow-Repo (`WEBWOW_UPDATE_REPO`), sonst würde der Builder ycode-Releases als Update anbieten |
-| `next.config.ts` | `output: 'standalone'`, Body-Limit 100 MB, Redirect `/webwow/*` → `/ycode/*`, `turbopack.root` — alle Stellen mit `// Webwow:` markiert |
-| `package.json` | Name/Version/Repo/Keywords, `migrate:*` mit `dotenv --`, `sync:upstream`, `docker:*`. **Dependencies unverändert** übernehmen (plus `jszip`, `node-html-parser`, `dotenv-cli`) |
+| `next.config.ts` | `output: 'standalone'`, Body-Limit 100 MB, Redirect `/webwow/*` → `/ycode/*` (ausgenommen `/webwow`, `/webwow/edit`, `/webwow/sites/**` — die liefert `app/(webwow)`), `turbopack.root`, Alias `next/cache` → `lib/webwow/next-cache.ts` (nur Server-Graph, Turbopack-Bedingung `browser`/`default` und webpack `isServer`) — alle Stellen mit `// Webwow:` markiert |
+| `package.json` | Name/Version/Repo/Keywords, `migrate:*` mit `dotenv --`, `sync:upstream`, `docker:*`, `webwow:user`, `webwow:sites`; `test` = Upstream-Liste plus Glob `'lib/webwow/**/*.test.ts'` (in Anführungszeichen, damit Node und nicht die Shell expandiert). **Dependencies unverändert** übernehmen (plus `jszip`, `node-html-parser`, `dotenv-cli`) |
 | `tsconfig.json` | `baseUrl`, `exclude` (`tools`, `import`, `uploads`), ts-node `transpileOnly` + `tsconfig-paths/register` (knex-CLI) |
 | `eslint.config.mjs` | zusätzliche `ignores` (`tools/`, `import/`, `uploads/`, `docs/`) |
 | `.env.example` | Webwow-Variablen, keine `SUPABASE_*` |
@@ -60,25 +60,42 @@ aufsetzen. Nie blind "ours" nehmen — sonst gehen Upstream-Fixes verloren.
 | `app/(builder)/ycode/settings/templates/page.tsx` | zusätzlicher "Webflow ZIP importieren"-Button |
 | `public/favicon.svg`, `public/favicon-32.png`, `public/apple-touch-icon.png`, `public/og-image.png`, `public/og-image.svg`, `public/site.webmanifest`, `app/icon.svg` | Brand-Assets (Whitelabel) |
 | `.github/**` | eigene Issue-/PR-Templates, keine ycode-CODEOWNERS |
+| `instrumentation-client.ts` (nur falls angelegt) | optionaler Site-Switcher im Builder (MULTISITE.md); beim Anlegen in `DIVERGENT_FILES` eintragen |
 
 ### 2b. Webwow-eigene Dateien (Upstream kennt sie nicht → keine Konflikte)
 
-* `lib/webwow/**` — Kompatibilitätsschicht (Query-Builder, Storage, Auth-Server, Fetch-Interceptor)
-* `app/(builder)/ycode/api/webwow/**` — Auth-/Storage-Routen des Shims
+* `lib/webwow/**` — Kompatibilitätsschicht: Query-Builder, Storage, Auth-Server, Fetch-Interceptor;
+  `lib/webwow/sites/**` (Multi-Site: Site-Kontext, Registry, Site-Auflösung, site-aware knex-Client),
+  `lib/webwow/next-cache.ts` (site-bezogener `next/cache`-Wrapper), `lib/webwow/proxy-policy.ts`
+  (Editor-Policy des Proxys), `lib/webwow/import/**` (Webflow-Importer v2)
+* `app/(builder)/ycode/api/webwow/**` — Auth-/Storage-/Sites-/Editor-/Webflow-Routen des Shims
+* `app/(builder)/ycode/api/webflow/**` — Routen des Webflow-ZIP-Importers v1
+* `app/(webwow)/**` — Sites-Dashboard (`/webwow`) und Editor-Login (`/webwow/edit`)
 * `app/storage/**` — Auslieferung `/storage/v1/object/public/<bucket>/<pfad>`
+* `types/webwow.ts` — Typen des Webflow-Importers
 * `database/migrations/00000000000000_webwow_bootstrap.ts` — Schemata `auth`/`storage`, Rollen, `auth.users`, Hilfsfunktionen
+* `database/migrations/99999999999998_webwow_sites.ts` — Multi-Site-Registry `webwow_sites` (Tabelle und Default-Zeile
+  entstehen nur in der `DATABASE_URL`-Datenbank; in Site-Datenbanken ist die Migration ein No-op)
 * `database/migrations/99999999999999_webwow_defaults.ts` — Whitelabel-Defaults (idempotent)
 * `database/migrations/20260324000001_create_webflow_imports_table.ts` — Tabelle des Webflow-ZIP-Importers
+* `database/README.md` — Hinweise zur Migrationsreihenfolge (steht in `DIVERGENT_FILES`; Upstream hat die Datei nicht)
 * `lib/services/webflowImportService.ts`, `lib/repositories/webflowImportRepository.ts`,
-  `components/project/WebflowImportDialog.tsx` + zugehörige Routen unter `app/(builder)/ycode/api/webwow/**` — Webflow-ZIP-Importer
-* `docs/**`, `scripts/sync-upstream.sh`
+  `components/project/WebflowImportDialog.tsx` — Webflow-ZIP-Importer
+* `scripts/webwow-*.ts` (`webwow-user`, `webwow-sites`), `scripts/sync-upstream.sh`, `scripts/sync-lists.sh`,
+  `scripts/check-upstream-identity.sh`
+* `docs/**`, `.github/**`, `import/**` (Beispiel-Export), `tools/**`
 
-Alles andere im Repository muss nach einem Merge **identisch mit Upstream** sein. Prüfen:
+Alles andere im Repository muss nach einem Merge **identisch mit Upstream** sein. Die Listen aus 2a/2b stehen
+genau einmal in `scripts/sync-lists.sh` (`DIVERGENT_FILES`, `DIVERGENT_PREFIXES`); `sync-upstream.sh` und die
+Identitätsprüfung lesen sie von dort. Prüfen:
 
 ```bash
-git diff --stat upstream/main -- . ':!lib/webwow' ':!app/(builder)/ycode/api/webwow' ':!app/storage' ':!docs' \
-  ':!scripts/sync-upstream.sh' ':!database/migrations/00000000000000_*' ':!database/migrations/99999999999999_*'
-# Die Ausgabe darf nur die Dateien aus 2a plus die Webflow-Importer-Dateien enthalten.
+bash scripts/check-upstream-identity.sh                     # gegen den Git-Ref upstream/main
+bash scripts/check-upstream-identity.sh upstream/v1.31.0    # gegen einen anderen Ref (Tag, Branch, Commit)
+bash scripts/check-upstream-identity.sh /pfad/zum/ycode     # gegen einen lokalen Upstream-Checkout (ohne Remote)
+# Exit 0: nur gelistete Dateien weichen ab. Exit 1: ungelistete Abweichungen werden ausgegeben —
+# entweder die Datei mit Upstream abgleichen oder, wenn die Abweichung gewollt ist, in
+# scripts/sync-lists.sh eintragen UND hier in 2a/2b dokumentieren.
 ```
 
 ## 3. Sync-Ablauf Schritt für Schritt
@@ -126,7 +143,8 @@ Voraussetzungen: sauberer Arbeitsbaum, Node 20+, lokale PostgreSQL für Tests.
    npm run type-check
    npm run lint
    npm test
-   npm run build            # darf OHNE DATABASE_URL durchlaufen
+   bash scripts/check-upstream-identity.sh   # nur gelistete Dateien dürfen von Upstream abweichen
+   npm run build            # darf OHNE DATABASE_URL durchlaufen (einmal ohne, einmal mit WEBWOW_MULTI_SITE=1)
    ```
 7. **Migrationen auf einer Test-DB** — zweimal: auf einer leeren DB und auf einer Kopie einer
    Produktiv-DB (`pg_dump | psql`):
@@ -200,8 +218,46 @@ und der README-Tabelle dokumentieren. Vercel-spezifische Variablen (`VERCEL_*`) 
 * neue Dateien, die zur Laufzeit über `process.cwd()` gelesen werden (`grep -rn "process.cwd()" lib app`)
   → ins Runner-Stage des `Dockerfile` kopieren
 * neue Upstream-Routen unter `/ycode/api/...`, die vor dem Login erreichbar sein müssen →
-  `PUBLIC_API_PREFIXES` in `proxy.ts` abgleichen
+  `PUBLIC_API_PREFIXES` in `proxy.ts` abgleichen (und 4e: Scope-Tabelle + Editor-Policy)
 * `vercel.json` bleibt unverändert im Repo (harmlos, nur Referenz)
+
+### 4e. Multi-Site-Schicht (Cache-Wrapper, site-aware DB-Client, Proxy-Policy)
+
+Die Multi-Site-Schicht ([MULTISITE.md](MULTISITE.md)) hängt an Upstream-Verträgen, die ein Release still
+ändern kann:
+
+```bash
+# neue Cache-Primitive außerhalb von unstable_cache/revalidateTag (nur diese beiden scoped der Wrapper)
+git diff <merge-base> upstream/main -- app lib components | grep -E '^\+' | grep -E "'use cache'|cacheTag\(|cacheLife\(|next: \{ tags|updateTag\(|revalidatePath\("
+# neue Request-APIs in veröffentlichten Seiten (machen sie auch im Single-Site-Modus dynamisch)
+git diff <merge-base> upstream/main -- 'app/(published)' components/PageRenderer.tsx | grep -E '^\+' | grep -E 'headers\(\)|cookies\(\)|connection\(\)|draftMode\(\)'
+# neue Routen -> Editor-Policy und Scope-Tabelle
+git diff --name-only --diff-filter=A <merge-base> upstream/main -- 'app/(builder)/ycode/api' 'app/(site)/api'
+```
+
+* `'use cache'`, `cacheTag()`, `cacheLife()`, `fetch(..., { next: { tags } })`: `lib/webwow/next-cache.ts`
+  scoped nur `unstable_cache` (Key-Teil `site:<id>`, Tag-Präfix `s-<id>-`) und `revalidateTag`. Neue Primitive
+  in Upstream brauchen eine eigene Site-Scoping-Entscheidung, sonst teilen sich Sites Cache-Einträge.
+* `headers()`/`cookies()`/`connection()` in `app/(published)/**` oder `components/PageRenderer.tsx`: veröffentlichte
+  Seiten wären dann auch ohne `WEBWOW_MULTI_SITE=1` dynamisch (die Garantie "im Single-Site-Modus wird
+  `headers()` nie aufgerufen" gilt nur für den Wrapper selbst).
+* Nach jedem **Next-Bump** `lib/webwow/sites/request-site.test.ts` und `lib/webwow/next-cache.test.ts` laufen lassen:
+  sie zäunen die Internals `next/dist/server/app-render/work-unit-async-storage.external` (Store-Typen
+  `request`/`unstable-cache`/`prerender-legacy`) und `next/dist/server/async-storage/request-store` ein. Der Alias
+  in `next.config.ts` (`next/cache` → Wrapper, `next/cache.js` → Original, Client-Bundle unverändert) muss nach dem
+  Bump mit `next build` und `next build --webpack` bestätigt werden.
+* Nach jedem **knex-Bump** `lib/webwow/sites/pg-client.test.ts` laufen lassen (`knex/lib/dialects/postgres`;
+  `acquireConnection`/`releaseConnection` sind die einzigen Pool-Berührungspunkte außerhalb von `client.js`;
+  `withUserParams`-Klone teilen den Pool).
+* Neue Routen unter `app/(builder)/ycode/api/**` oder `app/(site)/api/**` in `lib/webwow/proxy-policy.ts` einordnen
+  (allow/deny/rewrite für Editor-Sessions) — `proxy-policy.test.ts` zählt alle `route.ts` auf und schlägt bei
+  unklassifizierten Routen fehl. Besucher-Routen (ohne Login erreichbar: Formulare, Collection-Filter,
+  `/ycode/api/v1/*`, MCP, OAuth) zusätzlich in die Scope-Tabelle `scopeFor()` in `lib/webwow/sites/resolve.ts`
+  aufnehmen, sonst landen sie in der Default-Datenbank statt bei der Site des Hosts.
+* Neue Tabellen mit Geheimnissen/Tokens (API-Keys, OAuth, Webhooks, SMTP): in `SCRUB_TABLES`
+  (`lib/webwow/sites/service.ts`) ergänzen, sonst kopiert "Site duplizieren" sie mit.
+* Neue Aufrufer von `getDb()`/`getKnexClient()`, die Benutzer- oder Registry-Daten lesen, müssen `getMainDb()`
+  (`lib/webwow/sites/main-db.ts`) verwenden — der Standard-Client ist site-aware.
 
 ## 5. Checkliste: Was ist ein Breaking Change für Webwow?
 
@@ -233,6 +289,15 @@ vor dem Release einen Migrationshinweis in den CHANGELOG und ggf. Code in `lib/w
       Job-Status-Updates → Polling-Fallback prüfen.
 - [ ] Änderungen am Template-/Export-Format, die den Webflow-ZIP-Importer betreffen
       (`lib/import/**`, `lib/services/templateService*`).
+- [ ] Upstream nutzt in veröffentlichten Seiten neue Cache-Primitive (`'use cache'`, `cacheTag`, `cacheLife`,
+      `fetch`-Tags) oder neue Request-APIs (`headers()`, `cookies()`, `connection()`) → Multi-Site-Scoping bzw.
+      statische Auslieferung prüfen (4e).
+- [ ] Next ändert die Work-Unit-Store-Internals oder knex ändert `Client.acquireConnection/releaseConnection`
+      → `request-site.test.ts`, `next-cache.test.ts`, `pg-client.test.ts` schlagen fehl; Site-Routing neu verifizieren.
+- [ ] Neue Upstream-API-Route ohne Einordnung in `lib/webwow/proxy-policy.ts` → Enumerationstest rot;
+      Besucher-Routen zusätzlich in `scopeFor()` (`lib/webwow/sites/resolve.ts`).
+- [ ] Upstream greift direkt auf `knex.client.pool` zu oder baut eigene knex-Instanzen aus `knexfile` für
+      Benutzer-/Registry-Daten → `WebwowPgClient` bzw. `getMainDb()` prüfen.
 
 Nicht breaking (nur mergen und testen): neue Features/Routen, die ausschließlich über die
 bereits abgedeckte Query-Builder-Oberfläche arbeiten; UI-Änderungen; neue Upstream-Migrationen

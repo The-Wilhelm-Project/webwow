@@ -21,57 +21,10 @@ UPSTREAM_REF="${UPSTREAM_REMOTE}/main"
 DO_MERGE=0
 TAKE_UPSTREAM=0
 
-# Dateien, die absichtlich von Upstream abweichen. Konflikte hier IMMER von Hand lösen:
-# Upstream-Änderung lesen und die Webwow-Anpassung neu einbauen.
-DIVERGENT_FILES=(
-  "lib/supabase-server.ts"
-  "lib/supabase-auth.ts"
-  "lib/supabase-route-client.ts"
-  "lib/supabase-browser.ts"
-  "lib/credentials.ts"
-  "knexfile.ts"
-  "proxy.ts"
-  "lib/updates/check-updates.ts"
-  "app/(builder)/ycode/api/updates/releases/route.ts"
-  "next.config.ts"
-  "package.json"
-  "package-lock.json"
-  "tsconfig.json"
-  "eslint.config.mjs"
-  ".env.example"
-  ".gitignore"
-  ".dockerignore"
-  "README.md"
-  "CHANGELOG.md"
-  "Dockerfile"
-  "docker-compose.yml"
-  "docker-entrypoint.sh"
-  "app/(builder)/ycode/settings/templates/page.tsx"
-  "app/icon.svg"
-  "public/favicon.svg"
-  "public/favicon-32.png"
-  "public/apple-touch-icon.png"
-  "public/og-image.png"
-  "public/og-image.svg"
-  "public/site.webmanifest"
-)
-
-# Pfad-Präfixe, die nur in Webwow existieren (Upstream kennt sie nicht). Konflikte hier sind
-# unwahrscheinlich; falls doch: von Hand.
-DIVERGENT_PREFIXES=(
-  "lib/webwow/"
-  "app/(builder)/ycode/api/webwow/"
-  "app/storage/"
-  "database/migrations/00000000000000_"
-  "database/migrations/99999999999999_"
-  "database/migrations/20260324000001_create_webflow_imports_table"
-  "lib/services/webflowImportService"
-  "lib/repositories/webflowImportRepository"
-  "components/project/WebflowImportDialog"
-  "docs/"
-  "scripts/sync-upstream.sh"
-  ".github/"
-)
+# Divergente Dateien / Webwow-Präfixe: gemeinsame Listen mit scripts/check-upstream-identity.sh
+# (DIVERGENT_FILES, DIVERGENT_PREFIXES, is_divergent) — siehe docs/UPSTREAM-SYNC.md §2.
+# shellcheck source=scripts/sync-lists.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sync-lists.sh"
 
 usage() {
   sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
@@ -92,12 +45,6 @@ done
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
 
-is_divergent() {
-  local f="$1" d
-  for d in "${DIVERGENT_FILES[@]}"; do [ "$f" = "$d" ] && return 0; done
-  for d in "${DIVERGENT_PREFIXES[@]}"; do case "$f" in "$d"*) return 0 ;; esac; done
-  return 1
-}
 
 # --- Repo-Root ---------------------------------------------------------------
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Kein Git-Repository." >&2; exit 1; }

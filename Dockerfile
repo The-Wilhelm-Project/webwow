@@ -24,6 +24,11 @@ RUN npm ci
 # --- Builder ---
 FROM base AS builder
 ENV NEXT_TELEMETRY_DISABLED=1
+# Multi-site mode is a BUILD-TIME + runtime flag (docs/MULTISITE.md): with "1" the published
+# pages render per request (host -> site); with "0" they stay fully static as upstream.
+# Pass the same value at runtime (docker-compose.yml). Build: --build-arg WEBWOW_MULTI_SITE=1
+ARG WEBWOW_MULTI_SITE=0
+ENV WEBWOW_MULTI_SITE=$WEBWOW_MULTI_SITE
 # IMPORTANT: no DATABASE_URL / ADMIN_* / PAGE_AUTH_SECRET here. `next build` must
 # never depend on a database or on secrets; everything is read at request time.
 COPY --from=deps /app/node_modules ./node_modules
@@ -32,12 +37,14 @@ RUN npm run build
 
 # --- Runner ---
 FROM base AS runner
+ARG WEBWOW_MULTI_SITE=0
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     NODE_NO_WARNINGS=1 \
     PORT=3002 \
     HOSTNAME="0.0.0.0" \
-    UPLOAD_DIR=/app/uploads
+    UPLOAD_DIR=/app/uploads \
+    WEBWOW_MULTI_SITE=$WEBWOW_MULTI_SITE
 
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
@@ -46,6 +53,7 @@ RUN addgroup --system --gid 1001 nodejs && \
 # next.config.ts (headers/redirects/body limits). The knex CLI needs knexfile.ts,
 # tsconfig.json (ts-node + path aliases), database/ (migrations) and lib/ + types/
 # because several upstream migrations import from `@/lib/*` and `@/types`.
+# scripts/ holds the Webwow CLIs (webwow-sites.ts migrates the site databases on start).
 # storage/ holds google-fonts.json and sample collections read via process.cwd().
 COPY --from=builder --chown=nextjs:nodejs /app/.next ./.next
 COPY --from=builder /app/public ./public
@@ -58,6 +66,7 @@ COPY --from=builder /app/knexfile.ts ./knexfile.ts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/lib ./lib
 COPY --from=builder /app/types ./types
+COPY --from=builder /app/scripts ./scripts
 COPY --from=builder --chmod=755 /app/docker-entrypoint.sh ./docker-entrypoint.sh
 
 # Uploads live on a volume mounted at UPLOAD_DIR (/app/uploads), see docker-compose.yml.

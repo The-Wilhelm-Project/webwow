@@ -23,7 +23,13 @@ services:
       retries: 10
 
   app:
-    build: .
+    build:
+      context: .
+      args:
+        # Multi-site mode (docs/MULTISITE.md) is baked into the build: "1" makes the
+        # published pages render per request so several sites can share this app.
+        # Keep the build arg and the WEBWOW_MULTI_SITE environment value below identical.
+        WEBWOW_MULTI_SITE: "0"
     restart: unless-stopped
     ports:
       - "3002:3002"
@@ -39,6 +45,15 @@ services:
       #     openssl rand -hex 32
       # Anyone who knows this string can forge a login cookie.
       PAGE_AUTH_SECRET: bitte-aendern-mit-openssl-rand-hex-32
+      # --- Multi-site (docs/MULTISITE.md) ---
+      # "1" enables several websites (one PostgreSQL database per site, dashboard at /webwow).
+      # Must match the build arg above; PAGE_AUTH_SECRET becomes mandatory and the DB role
+      # needs CREATEDB (the compose db user is a superuser, so nothing else to do).
+      WEBWOW_MULTI_SITE: "0"
+      # Host suffix for site previews (<slug>.<base>); unset = <slug>.localhost only.
+      # WEBWOW_SITES_BASE_DOMAIN: sites.example.com
+      # Set to "1" ONLY behind a reverse proxy that overwrites x-forwarded-host.
+      # WEBWOW_TRUSTED_PROXY: "0"
       # --- Storage / network ---
       UPLOAD_DIR: /app/uploads
       PORT: "3002"

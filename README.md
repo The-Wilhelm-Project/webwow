@@ -10,6 +10,8 @@ It is an open-source, self-hosted Webflow alternative with a migration assistant
 - **Docker + plain PostgreSQL only** — no Supabase, no Vercel. Uploads are stored on local disk.
 - **Local multi-user auth** — e-mail + password with roles (owner / admin / designer / editor), no external auth provider.
 - **Webflow ZIP importer** (migration assistant) in addition to ycode's built-in Webflow app integration.
+- **Multiple websites per installation** (optional) — one database per site, a sites dashboard at `/webwow`,
+  `.ycode` import/export per site and a password-protected `?edit` content editor. See "Mehrere Websites" below.
 - **Whitelabel defaults** — ycode badge off, own brand assets.
 - Everything else is unmodified ycode. Upstream code runs on a small compatibility layer
   (`lib/webwow/**`, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)), which keeps upstream updates cheap.
@@ -59,6 +61,9 @@ change at least `ADMIN_PASSWORD` and `PAGE_AUTH_SECRET`** (and the database pass
 | `DATABASE_SSL` | `true` for managed Postgres that requires TLS | empty |
 | `WEBWOW_SECURE_COOKIES` | Force the session cookie `Secure` flag (`true`/`false`); default follows `x-forwarded-proto` / request protocol, so plain http on a LAN works | auto |
 | `WEBWOW_UPDATE_REPO` | GitHub repo the in-app update check reads releases from | `The-Wilhelm-Project/webwow` |
+| `WEBWOW_MULTI_SITE` | `1` enables multiple websites per installation (build **and** runtime; see [docs/MULTISITE.md](docs/MULTISITE.md)) | `0` |
+| `WEBWOW_SITES_BASE_DOMAIN` | Optional host suffix for site previews: `<slug>.<base>` serves that site | empty (`<slug>.localhost` only) |
+| `WEBWOW_TRUSTED_PROXY` | `1` to resolve sites from `x-forwarded-host` — only behind a reverse proxy that sets it | empty |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | Optional: enables the in-app AI agent (bring your own key) | empty |
 
 All variables, including the optional ones (templates API, maps, cron secrets), are documented in
@@ -66,6 +71,31 @@ All variables, including the optional ones (templates API, maps, cron secrets), 
 
 Uploads and the database are persisted in the named volumes `uploads` and `postgres_data`, so your
 data survives updates and container rebuilds. Back up with `pg_dump` plus a copy of the `uploads` volume.
+
+## Mehrere Websites
+
+Webwow kann optional **mehrere getrennte Websites in einer Installation** betreiben: jede Site bekommt eine eigene
+PostgreSQL-Datenbank (`webwow_site_<slug>`) und ein eigenes Upload-Verzeichnis, der Builder ist gemeinsam,
+Benutzer und Rollen gelten für alle Sites. Aktivieren mit `WEBWOW_MULTI_SITE=1` (beim Build **und** zur
+Laufzeit), gesetztem `PAGE_AUTH_SECRET` und einer DB-Rolle mit `CREATEDB`; danach `npm run migrate:latest`
+(Docker: automatisch) und das Dashboard unter `http://localhost:3002/webwow` öffnen.
+
+- **Dashboard `/webwow`** — Karten wie in Webflows "All sites": Site öffnen, ansehen, duplizieren, als `.ycode`
+  exportieren, Einstellungen (Name, Slug, Domains, Editor-Passwort), löschen. "New site" kann direkt einen
+  `.ycode`-Export einspielen.
+- **Domains** — eine Site wird über ihre Domains (DNS auf diesen Server) oder `<slug>.<WEBWOW_SITES_BASE_DOMAIN>`
+  ausgeliefert; alles andere landet bei der Default-Site (der bisherigen Installation). Lokal funktioniert
+  `<slug>.localhost:3002`.
+- **`?edit`-Editor** — pro Site ein Passwort, mit dem Redakteure unter `https://<domain>/?edit` nur die
+  CMS-Inhalte bearbeiten (kein Design, keine Einstellungen): [docs/EDITOR.md](docs/EDITOR.md).
+- **Webflow-Import in eine Site** — Export-ZIP (+ CMS-CSVs) wählen, Site auswählen, importieren:
+  [docs/IMPORTER.md](docs/IMPORTER.md).
+- **CLI** — `npm run webwow:sites -- list | create <name> [slug] | migrate | delete <slug> --yes |
+  set-editor-password <slug> <passwort|->`.
+
+Ohne das Flag verhält sich Webwow exakt wie eine Einzel-Installation (statische veröffentlichte Seiten, gleiche
+Cache-Schlüssel). Details, Request-Ablauf, Storage-Layout, Verbindungsbudget und bekannte Grenzen:
+[docs/MULTISITE.md](docs/MULTISITE.md).
 
 ## Development setup
 
@@ -79,7 +109,8 @@ npm run dev             # http://localhost:3002/ycode
 ```
 
 Useful scripts: `npm run type-check`, `npm run lint`, `npm test`, `npm run migrate:status`,
-`npm run docker:build` / `npm run docker:up`, `npm run sync:upstream` (see below).
+`npm run webwow:sites -- list` (multi-site CLI), `npm run docker:build` / `npm run docker:up`,
+`npm run sync:upstream` (see below).
 
 ## Updating from upstream ycode
 
@@ -96,6 +127,7 @@ The full procedure, the list of intentionally divergent files and the post-merge
 
 ## Known limitations
 
+- **Multi-site mode renders published pages per request** (host → site); data stays cached per site. Single-site installs keep fully static pages. Publishing one site clears the HTML cache of all sites (see [docs/MULTISITE.md](docs/MULTISITE.md)).
 - **No e-mail invites.** Upstream's "invite team member by e-mail" flow returns an error; Webwow has no mail-based invite yet.
 - **No realtime collaboration / presence.** The realtime channel is a no-op in single-server mode (no live cursors or multi-user presence).
 - **Static export to S3** works but is optional (`@aws-sdk/client-s3` is an optional dependency).

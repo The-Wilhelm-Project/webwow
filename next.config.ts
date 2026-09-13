@@ -79,17 +79,24 @@ const nextConfig: NextConfig = {
       'better-sqlite3': './lib/stubs/db-driver-stub.ts',
       'tedious': './lib/stubs/db-driver-stub.ts',
       'pg-query-stream': './lib/stubs/db-driver-stub.ts',
+      // Webwow: site-scoped `next/cache` wrapper on the server only (docs/MULTISITE.md).
+      // The browser condition keeps Next's own client stub; 'next/cache.js' (with extension)
+      // is a different request string, so the wrapper's own require is not re-aliased.
+      'next/cache': { browser: 'next/cache.js', default: './lib/webwow/next-cache.ts' },
     },
   },
 
   // Webwow: the previous fork served the builder under /webwow. The builder now
   // keeps upstream's /ycode prefix (fewer merge conflicts); old bookmarks and
-  // links are redirected permanently.
+  // links are redirected permanently. `/webwow` itself, `/webwow/edit` and
+  // `/webwow/sites/**` are served by app/(webwow) (sites dashboard, CMS editor
+  // login), so the redirect excludes exactly those; every other old deep link
+  // keeps redirecting.
   async redirects() {
     return [
       {
-        source: '/webwow/:path*',
-        destination: '/ycode/:path*',
+        source: '/webwow/:path((?!edit(?:/|$)|sites(?:/|$)).+)',
+        destination: '/ycode/:path',
         permanent: true,
       },
     ];
@@ -131,6 +138,15 @@ const nextConfig: NextConfig = {
 
   webpack: (config, { isServer }) => {
     if (isServer) {
+      // Webwow: site-scoped `next/cache` wrapper (server graph only; `$` = exact
+      // match, so 'next/cache.js' inside the wrapper stays untouched).
+      const cacheWrapper = path.resolve(__dirname, 'lib/webwow/next-cache.ts');
+      if (Array.isArray(config.resolve.alias)) {
+        config.resolve.alias.push({ name: 'next/cache', onlyModule: true, alias: cacheWrapper });
+      } else {
+        config.resolve.alias = { ...(config.resolve.alias ?? {}), 'next/cache$': cacheWrapper };
+      }
+
       // Ignore optional dependencies that Knex tries to load
       // We only use PostgreSQL, so we don't need these drivers
       config.externals = config.externals || [];

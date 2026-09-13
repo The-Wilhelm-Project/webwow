@@ -37,6 +37,7 @@ import { STORAGE_FOLDERS } from '@/lib/asset-constants';
 import { parseCSVText } from '@/lib/csv-utils';
 import { getAssetProxyUrl } from '@/lib/asset-utils';
 import { getKnexClient } from '@/lib/knex-client';
+import { mergeClassStack } from '@/lib/layer-style-resolve';
 import { getDefaultSitemapSettings } from '@/lib/sitemap-utils';
 import { stringToTiptapContent } from '@/lib/text-format-utils';
 import {
@@ -612,13 +613,36 @@ function collectLayerClassNames(layers: Layer[]): Set<string> {
   return classNames;
 }
 
+/**
+ * Whether linking a layer to a shared style with this class signature would
+ * silently drop one of its classes.
+ *
+ * Publishing runs `syncLayerStyleChangesToDrafts`, which rebuilds
+ * `layer.classes` from the style stack through `mergeClassStack`. That merge is
+ * Tailwind-aware, and Webflow class names are not Tailwind: `text-weight-medium`
+ * and `text-size-medium` both parse as font-size utilities, so the first is
+ * evicted and the element silently loses its weight — the same trap that eats
+ * `w-background-video`. When the merge is not lossless the layer keeps its own
+ * verbatim class string and no style link, which is what makes it render like
+ * the Webflow original (the exported stylesheet matches on those names).
+ */
+function classSignatureSurvivesMerge(classSignature: string): boolean {
+  const tokens = classSignature.split(/\s+/).filter(Boolean);
+  return mergeClassStack(tokens).length === tokens.length;
+}
+
 function applyLayerStylesToTree(
   layers: Layer[],
-  styleIdByClassSignature: Map<string, string>
+  styleIdByClassSignature: Map<string, string>,
+  lossySignatures?: Set<string>
 ): Layer[] {
   const visit = (layer: Layer): Layer => {
     const classSignature = normalizeClassSignature(getLayerClasses(layer));
-    const matchedStyleId = classSignature ? styleIdByClassSignature.get(classSignature) : undefined;
+    let matchedStyleId = classSignature ? styleIdByClassSignature.get(classSignature) : undefined;
+    if (matchedStyleId && !classSignatureSurvivesMerge(classSignature)) {
+      lossySignatures?.add(classSignature);
+      matchedStyleId = undefined;
+    }
 
     const updated: Layer = {
       ...layer,
@@ -1598,6 +1622,17 @@ function rewriteCssUrls(
   });
 }
 
+/**
+ * The `<style>` blocks a Webflow page carries in its body.
+ *
+ * These are PAGE-scoped: this export puts the client-first global styles —
+ * including a fluid `html { font-size: calc(… + 0.86vw) }` — in an embed on the
+ * homepage only, and `.pageLayout { width: 19cm }` on the catalog page only.
+ * Concatenating them into the site-wide stylesheet applied them everywhere: the
+ * root font size dropped from 16px to 11.86px on the five pages that never had
+ * the embed, shrinking every `rem` padding on them. They are therefore stored
+ * on the page (`settings.custom_code.head`), not in the global CSS.
+ */
 function extractEmbeddedCssFromHtml(htmlContent: string): string {
   const root = parse(htmlContent);
   const body = root.querySelector('body');
@@ -1612,12 +1647,23 @@ function extractEmbeddedCssFromHtml(htmlContent: string): string {
   return blocks.join('\n\n');
 }
 
+/**
+ * The stylesheet hrefs of one page, in cascade order.
+ *
+ * `rel` and `href` appear in either order in real markup — a Webflow export
+ * writes `<link href="css/normalize.css" rel="stylesheet">`, href first. A
+ * regex that demanded `rel` before `href` matched nothing, so the importer fell
+ * back to sorting the CSS files alphabetically: `components.css` then
+ * `normalize.css`, which put normalize's `h1 { font-size: 2em }` AFTER
+ * components' `h1 { font-size: 38px }` and shrank every heading on the site.
+ */
 function extractStylesheetHrefsFromHtml(htmlContent: string): string[] {
   const hrefs: string[] = [];
-  const stylesheetRegex = /<link[^>]*rel=["']stylesheet["'][^>]*href=["']([^"']+)["'][^>]*>/gi;
 
-  for (const match of htmlContent.matchAll(stylesheetRegex)) {
-    const href = (match[1] || '').trim();
+  for (const match of htmlContent.matchAll(/<link\b[^>]*>/gi)) {
+    const tag = match[0];
+    if (!/\brel\s*=\s*["']?stylesheet\b/i.test(tag)) continue;
+    const href = (/\bhref\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1] || '').trim();
     if (!href || /^https?:\/\//i.test(href)) {
       continue;
     }
@@ -1657,6 +1703,485 @@ function orderCssFiles(
     .sort((a, b) => a.filePath.localeCompare(b.filePath));
 
   return [...ordered, ...remaining];
+}
+
+/* ------------------------------------------------------------------ *
+ * Webflow IX2 hover interactions -> CSS
+ *
+ * Webflow ships its interactions as data inside the exported site bundle
+ * (`Webflow.require("ix2").init({ events, actionLists, site })`), replayed at
+ * runtime by webflow.js. The export's JS is not carried over by the importer,
+ * so every hover animation the designer built would be lost.
+ *
+ * The hover subset maps cleanly onto plain CSS: a MOUSE_OVER event whose
+ * target is a class selector plus its paired MOUSE_OUT event is exactly a
+ * `:hover` rule with a transition. Emitting CSS (instead of ycode
+ * interactions) keeps the effect working for collection items injected at
+ * runtime and for every element carrying the class, and it survives ycode's
+ * Tailwind-aware class stack, which evicts unknown `w-`/framework tokens.
+ * ------------------------------------------------------------------ */
+
+/** A `{...}` literal as minifiers emit it: bare keys, `!0`/`!1`, hex numbers. */
+interface JsLiteralCursor {
+  index: number;
+}
+
+const JS_LITERAL_MAX_DEPTH = 64;
+
+/**
+ * Parse the JavaScript object literal starting at `start`.
+ *
+ * Deliberately a parser and not `eval`/`new Function`: the source is an
+ * uploaded ZIP, so it must never be executed on the server. Returns null when
+ * the text is not a literal this parser understands.
+ */
+function parseJsObjectLiteral(source: string, start: number): unknown | null {
+  const cursor: JsLiteralCursor = { index: start };
+
+  const skipWhitespace = () => {
+    while (cursor.index < source.length && /\s/.test(source[cursor.index])) cursor.index += 1;
+  };
+
+  const readString = (): string => {
+    const quote = source[cursor.index];
+    cursor.index += 1;
+    let out = '';
+    while (cursor.index < source.length) {
+      const char = source[cursor.index];
+      cursor.index += 1;
+      if (char === '\\') {
+        const escaped = source[cursor.index];
+        cursor.index += 1;
+        if (escaped === 'u') {
+          out += String.fromCharCode(Number.parseInt(source.substr(cursor.index, 4), 16));
+          cursor.index += 4;
+        } else if (escaped === 'n') out += '\n';
+        else if (escaped === 't') out += '\t';
+        else if (escaped === 'r') out += '\r';
+        else out += escaped;
+        continue;
+      }
+      if (char === quote) return out;
+      out += char;
+    }
+    throw new Error('unterminated string');
+  };
+
+  const readKey = (): string => {
+    skipWhitespace();
+    const char = source[cursor.index];
+    if (char === '"' || char === "'") return readString();
+    const match = /^[A-Za-z_$][\w$]*/.exec(source.slice(cursor.index, cursor.index + 64));
+    if (!match) throw new Error('bad key');
+    cursor.index += match[0].length;
+    return match[0];
+  };
+
+  const readValue = (depth: number): unknown => {
+    if (depth > JS_LITERAL_MAX_DEPTH) throw new Error('too deep');
+    skipWhitespace();
+    const char = source[cursor.index];
+    if (char === '{') {
+      cursor.index += 1;
+      const out: Record<string, unknown> = {};
+      skipWhitespace();
+      if (source[cursor.index] === '}') { cursor.index += 1; return out; }
+      for (;;) {
+        const key = readKey();
+        skipWhitespace();
+        if (source[cursor.index] !== ':') throw new Error('expected :');
+        cursor.index += 1;
+        out[key] = readValue(depth + 1);
+        skipWhitespace();
+        const next = source[cursor.index];
+        cursor.index += 1;
+        if (next === '}') return out;
+        if (next !== ',') throw new Error('expected , or }');
+        skipWhitespace();
+        if (source[cursor.index] === '}') { cursor.index += 1; return out; }
+      }
+    }
+    if (char === '[') {
+      cursor.index += 1;
+      const out: unknown[] = [];
+      skipWhitespace();
+      if (source[cursor.index] === ']') { cursor.index += 1; return out; }
+      for (;;) {
+        out.push(readValue(depth + 1));
+        skipWhitespace();
+        const next = source[cursor.index];
+        cursor.index += 1;
+        if (next === ']') return out;
+        if (next !== ',') throw new Error('expected , or ]');
+        skipWhitespace();
+        if (source[cursor.index] === ']') { cursor.index += 1; return out; }
+      }
+    }
+    if (char === '"' || char === "'") return readString();
+    // Minified booleans: `!0` === true, `!1` === false.
+    if (char === '!') {
+      cursor.index += 1;
+      const digit = source[cursor.index];
+      cursor.index += 1;
+      return digit === '0';
+    }
+    if (source.startsWith('null', cursor.index)) { cursor.index += 4; return null; }
+    if (source.startsWith('true', cursor.index)) { cursor.index += 4; return true; }
+    if (source.startsWith('false', cursor.index)) { cursor.index += 5; return false; }
+    if (source.startsWith('void 0', cursor.index)) { cursor.index += 6; return undefined; }
+    const numberMatch = /^-?(0[xX][0-9a-fA-F]+|\d*\.?\d+(?:[eE][-+]?\d+)?)/.exec(
+      source.slice(cursor.index, cursor.index + 40)
+    );
+    if (!numberMatch) throw new Error('bad value');
+    cursor.index += numberMatch[0].length;
+    return Number(numberMatch[0]);
+  };
+
+  try {
+    return readValue(0);
+  } catch {
+    return null;
+  }
+}
+
+interface Ix2Target {
+  selector?: string;
+  appliesTo?: string;
+  useEventTarget?: string | boolean;
+  id?: string;
+}
+
+interface Ix2ActionItem {
+  actionTypeId?: string;
+  config?: Record<string, unknown> & { target?: Ix2Target };
+}
+
+interface Ix2ActionList {
+  title?: string;
+  actionItemGroups?: Array<{ actionItems?: Ix2ActionItem[] }>;
+}
+
+interface Ix2Event {
+  eventTypeId?: string;
+  mediaQueries?: string[];
+  target?: Ix2Target;
+  action?: { config?: { actionListId?: string } };
+}
+
+interface Ix2Payload {
+  events?: Record<string, Ix2Event>;
+  actionLists?: Record<string, Ix2ActionList>;
+}
+
+/** Pull every `Webflow.require("ix2").init({...})` payload out of the export's JS. */
+function extractIx2Payloads(jsFiles: Array<{ filePath: string; content: string }>): Ix2Payload[] {
+  const payloads: Ix2Payload[] = [];
+  for (const file of jsFiles) {
+    const initRegex = /ix2["']?\)?\s*\.init\s*\(\s*\{/g;
+    for (const match of file.content.matchAll(initRegex)) {
+      const braceIndex = file.content.indexOf('{', match.index ?? 0);
+      if (braceIndex < 0) continue;
+      const parsed = parseJsObjectLiteral(file.content, braceIndex) as Ix2Payload | null;
+      if (parsed && (parsed.events || parsed.actionLists)) payloads.push(parsed);
+    }
+  }
+  return payloads;
+}
+
+/** Webflow easing name -> CSS timing function. */
+const IX2_EASINGS: Record<string, string> = {
+  ease: 'ease',
+  easeIn: 'ease-in',
+  easeOut: 'ease-out',
+  easeInOut: 'ease-in-out',
+  linear: 'linear',
+  inQuad: 'cubic-bezier(0.55, 0.085, 0.68, 0.53)',
+  outQuad: 'cubic-bezier(0.25, 0.46, 0.45, 0.94)',
+  inOutQuad: 'cubic-bezier(0.455, 0.03, 0.515, 0.955)',
+  inCubic: 'cubic-bezier(0.55, 0.055, 0.675, 0.19)',
+  outCubic: 'cubic-bezier(0.215, 0.61, 0.355, 1)',
+  inOutCubic: 'cubic-bezier(0.645, 0.045, 0.355, 1)',
+  inQuart: 'cubic-bezier(0.895, 0.03, 0.685, 0.22)',
+  outQuart: 'cubic-bezier(0.165, 0.84, 0.44, 1)',
+  inOutQuart: 'cubic-bezier(0.77, 0, 0.175, 1)',
+  inQuint: 'cubic-bezier(0.755, 0.05, 0.855, 0.06)',
+  outQuint: 'cubic-bezier(0.23, 1, 0.32, 1)',
+  inOutQuint: 'cubic-bezier(0.86, 0, 0.07, 1)',
+  inSine: 'cubic-bezier(0.47, 0, 0.745, 0.715)',
+  outSine: 'cubic-bezier(0.39, 0.575, 0.565, 1)',
+  inOutSine: 'cubic-bezier(0.445, 0.05, 0.55, 0.95)',
+  inExpo: 'cubic-bezier(0.95, 0.05, 0.795, 0.035)',
+  outExpo: 'cubic-bezier(0.19, 1, 0.22, 1)',
+  inOutExpo: 'cubic-bezier(1, 0, 0, 1)',
+  inCirc: 'cubic-bezier(0.6, 0.04, 0.98, 0.335)',
+  outCirc: 'cubic-bezier(0.075, 0.82, 0.165, 1)',
+  inOutCirc: 'cubic-bezier(0.785, 0.135, 0.15, 0.86)',
+  inBack: 'cubic-bezier(0.6, -0.28, 0.735, 0.045)',
+  outBack: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+  inOutBack: 'cubic-bezier(0.68, -0.55, 0.265, 1.55)',
+};
+
+/** Webflow breakpoint key -> the media query it stands for. */
+const IX2_MEDIA_QUERIES: Record<string, string> = {
+  main: '(min-width: 992px)',
+  medium: '(min-width: 768px) and (max-width: 991px)',
+  small: '(min-width: 480px) and (max-width: 767px)',
+  tiny: '(max-width: 479px)',
+};
+const IX2_ALL_MEDIA = ['main', 'medium', 'small', 'tiny'];
+
+/** Only class chains (`.a.b`) are turned into CSS; anything else is skipped. */
+function isClassChainSelector(selector: string | undefined): selector is string {
+  return !!selector && /^(\.[A-Za-z_][\w-]*)+$/.test(selector);
+}
+
+function cssUnit(raw: unknown, fallback: string): string {
+  const unit = String(raw ?? '').toLowerCase();
+  if (unit === 'px' || unit === '%' || unit === 'rem' || unit === 'em' || unit === 'vw' || unit === 'vh') return unit;
+  if (unit === 'deg') return 'deg';
+  return fallback;
+}
+
+function numberOr(raw: unknown, fallback: number): number {
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/** How long one CSS property takes to reach its hover value. */
+interface Ix2Timing {
+  durationMs: number;
+  delayMs: number;
+  easing: string;
+}
+
+/** Per-target CSS the hover state should settle on. */
+interface Ix2TargetState {
+  selector: string;
+  /** Plain declarations, last write wins. */
+  declarations: Map<string, string>;
+  /** Transform pieces, merged into one `transform` declaration. */
+  translate?: { x: string; y: string };
+  scale?: { x: number; y: number };
+  rotate?: number;
+  /** Timing per CSS property, taken from the action item that last wrote it. */
+  timings: Map<string, Ix2Timing>;
+}
+
+/**
+ * Fold an action list into its end state per target.
+ *
+ * Webflow plays action item groups in sequence; the last write to a property
+ * wins, so the final group is the resting state of the animation. A CSS
+ * transition can only express that end state, so intermediate groups (e.g. the
+ * brief green flash the fixed menu does on its way to white) are collapsed.
+ */
+function foldActionList(list: Ix2ActionList | undefined): Map<string, Ix2TargetState> {
+  const states = new Map<string, Ix2TargetState>();
+  if (!list?.actionItemGroups) return states;
+
+  for (const group of list.actionItemGroups) {
+    for (const item of group.actionItems || []) {
+      const config = item.config || {};
+      const target = config.target || {};
+      const useEventTarget = target.useEventTarget;
+      let selector: string;
+      if (useEventTarget === 'CHILDREN' && isClassChainSelector(target.selector)) {
+        selector = ` ${target.selector}`;
+      } else if (useEventTarget === true || target.appliesTo === 'TRIGGER_ELEMENT') {
+        selector = '';
+      } else {
+        // SIBLINGS / PARENT / element-id targets have no reliable CSS equivalent.
+        continue;
+      }
+
+      let state = states.get(selector);
+      if (!state) {
+        state = { selector, declarations: new Map(), timings: new Map() };
+        states.set(selector, state);
+      }
+
+      const timing: Ix2Timing = {
+        durationMs: numberOr(config.duration, 0),
+        delayMs: numberOr(config.delay, 0),
+        easing: IX2_EASINGS[String(config.easing || '')] || 'ease',
+      };
+      /** Groups play in sequence, so the last group's timing is the one that shows. */
+      const setDeclaration = (property: string, value: string) => {
+        state!.declarations.set(property, value);
+        state!.timings.set(property, timing);
+      };
+
+      switch (item.actionTypeId) {
+        case 'STYLE_SIZE': {
+          if (config.widthValue !== undefined && config.widthValue !== null) {
+            setDeclaration('width', `${numberOr(config.widthValue, 0)}${cssUnit(config.widthUnit, 'px')}`);
+          }
+          if (config.heightValue !== undefined && config.heightValue !== null) {
+            setDeclaration('height', `${numberOr(config.heightValue, 0)}${cssUnit(config.heightUnit, 'px')}`);
+          }
+          break;
+        }
+        case 'STYLE_TEXT_COLOR': {
+          setDeclaration('color', ix2Color(config));
+          break;
+        }
+        case 'STYLE_BACKGROUND_COLOR': {
+          setDeclaration('background-color', ix2Color(config));
+          break;
+        }
+        case 'STYLE_BORDER_COLOR': {
+          setDeclaration('border-color', ix2Color(config));
+          break;
+        }
+        case 'STYLE_OPACITY': {
+          setDeclaration('opacity', String(numberOr(config.value, 1)));
+          break;
+        }
+        case 'TRANSFORM_MOVE': {
+          state.translate = {
+            x: `${numberOr(config.xValue, 0)}${cssUnit(config.xUnit, 'px')}`,
+            y: `${numberOr(config.yValue, 0)}${cssUnit(config.yUnit, 'px')}`,
+          };
+          state.timings.set('transform', timing);
+          break;
+        }
+        case 'TRANSFORM_SCALE': {
+          state.scale = { x: numberOr(config.xValue, 1), y: numberOr(config.yValue, 1) };
+          state.timings.set('transform', timing);
+          break;
+        }
+        case 'TRANSFORM_ROTATE': {
+          state.rotate = numberOr(config.zValue, 0);
+          state.timings.set('transform', timing);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+  return states;
+}
+
+function ix2Color(config: Record<string, unknown>): string {
+  const r = Math.round(numberOr(config.rValue, 0));
+  const g = Math.round(numberOr(config.gValue, 0));
+  const b = Math.round(numberOr(config.bValue, 0));
+  const a = numberOr(config.aValue, 1);
+  return a >= 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
+function transformDeclaration(state: Ix2TargetState): string | null {
+  const parts: string[] = [];
+  if (state.translate) parts.push(`translate3d(${state.translate.x}, ${state.translate.y}, 0)`);
+  if (state.scale) parts.push(`scale3d(${state.scale.x}, ${state.scale.y}, 1)`);
+  if (state.rotate !== undefined) parts.push(`rotateZ(${state.rotate}deg)`);
+  return parts.length ? parts.join(' ') : null;
+}
+
+function cssTransition(property: string, timing: Ix2Timing | undefined): string {
+  if (!timing) return `${property} 200ms ease`;
+  const delay = timing.delayMs > 0 ? ` ${timing.delayMs}ms` : '';
+  return `${property} ${timing.durationMs}ms ${timing.easing}${delay}`;
+}
+
+function mediaQueryFor(keys: string[] | undefined): string | null {
+  if (!keys || keys.length === 0) return null;
+  const known = keys.filter(key => IX2_MEDIA_QUERIES[key]);
+  if (known.length === 0 || known.length === IX2_ALL_MEDIA.length) return null;
+  return known.map(key => IX2_MEDIA_QUERIES[key]).join(', ');
+}
+
+/**
+ * Turn the export's hover interactions into CSS.
+ *
+ * Only the hover state is emitted; the resting values are deliberately left to
+ * the site's own stylesheet, because Webflow does not apply the hover-out
+ * action list until the element has actually been hovered — writing those
+ * values into the base rule would change how the page looks on first paint.
+ * The base rule therefore carries only the transition that animates back.
+ */
+function buildIx2HoverCss(
+  jsFiles: Array<{ filePath: string; content: string }>,
+  warnings: string[]
+): string {
+  const payloads = extractIx2Payloads(jsFiles);
+  if (payloads.length === 0) return '';
+
+  const blocks: string[] = [];
+  let converted = 0;
+  let skipped = 0;
+
+  for (const payload of payloads) {
+    const events = payload.events || {};
+    const actionLists = payload.actionLists || {};
+
+    const outBySelector = new Map<string, Ix2Event>();
+    for (const event of Object.values(events)) {
+      if (event.eventTypeId === 'MOUSE_OUT' && isClassChainSelector(event.target?.selector)) {
+        outBySelector.set(event.target!.selector!, event);
+      }
+    }
+
+    const seen = new Set<string>();
+    for (const event of Object.values(events)) {
+      if (event.eventTypeId !== 'MOUSE_OVER') continue;
+      const trigger = event.target?.selector;
+      if (event.target?.appliesTo !== 'CLASS' || !isClassChainSelector(trigger)) {
+        if (event.eventTypeId === 'MOUSE_OVER') skipped += 1;
+        continue;
+      }
+      if (seen.has(trigger)) continue;
+      seen.add(trigger);
+
+      const hoverIn = foldActionList(actionLists[String(event.action?.config?.actionListId ?? '')]);
+      if (hoverIn.size === 0) { skipped += 1; continue; }
+      const outEvent = outBySelector.get(trigger);
+      const hoverOut = foldActionList(actionLists[String(outEvent?.action?.config?.actionListId ?? '')]);
+
+      const rules: string[] = [];
+      for (const [suffix, state] of hoverIn) {
+        const declarations = [...state.declarations].map(([property, value]) => `  ${property}: ${value};`);
+        const transform = transformDeclaration(state);
+        if (transform) declarations.push(`  transform: ${transform};`);
+        if (declarations.length === 0) continue;
+
+        // The base rule only transitions back; hover-out timing comes from the
+        // paired MOUSE_OUT action list when the export has one.
+        const back = hoverOut.get(suffix);
+        const properties = [...new Set([...state.timings.keys(), ...(back?.timings.keys() ?? [])])];
+        const transitionOut = properties
+          .map(property => cssTransition(property, back?.timings.get(property) ?? state.timings.get(property)))
+          .join(', ');
+        const transitionIn = properties
+          .map(property => cssTransition(property, state.timings.get(property)))
+          .join(', ');
+
+        rules.push(`${trigger}${suffix} {\n  transition: ${transitionOut};\n}`);
+        rules.push(`${trigger}:hover${suffix} {\n${declarations.join('\n')}\n  transition: ${transitionIn};\n}`);
+      }
+      if (rules.length === 0) { skipped += 1; continue; }
+
+      const media = mediaQueryFor(event.mediaQueries);
+      const title = actionLists[String(event.action?.config?.actionListId ?? '')]?.title;
+      const body = media
+        ? `@media ${media} {\n${rules.map(rule => rule.replace(/^/gm, '  ')).join('\n')}\n}`
+        : rules.join('\n');
+      blocks.push(`/* Webflow interaction${title ? `: ${title}` : ''} (${trigger}) */\n${body}`);
+      converted += 1;
+    }
+  }
+
+  if (converted > 0) {
+    warnings.push(
+      `${converted} Webflow hover interaction${converted === 1 ? '' : 's'} converted to CSS`
+      + (skipped > 0
+        ? `; ${skipped} interaction${skipped === 1 ? '' : 's'} skipped (scroll/click triggers and element-scoped targets have no CSS equivalent and need to be rebuilt in the builder).`
+        : '.')
+    );
+  }
+
+  return blocks.length ? `/* --- Webflow interactions (ix2) --- */\n${blocks.join('\n\n')}` : '';
 }
 
 function buildImportedCss(
@@ -1923,6 +2448,67 @@ function buildBackgroundVideoLayer(
   };
 }
 
+/**
+ * Map an element's children, folding `<br>`-separated text into one layer.
+ *
+ * Webflow writes multi-line footer blocks as bare text nodes joined by `<br>`
+ * (`Atelier Studio <br>von Brase <br>…`). Mapping each text node on its own
+ * turned the four address lines into four sibling inline layers, which the
+ * parent's flex row then laid out side by side. A run of text nodes and `<br>`s
+ * becomes a single text layer whose content carries the newlines, plus
+ * `whitespace-pre-line` so they render as the line breaks they were.
+ */
+function mapChildNodesToLayers(
+  element: HTMLElement,
+  assetIdBySource: Map<string, string>,
+  warnings: string[],
+  assetPublicUrlBySource?: Map<string, string>
+): Layer[] {
+  const nodes = element.childNodes;
+  const layers: Layer[] = [];
+  let index = 0;
+
+  const isBreak = (node: HtmlNode) =>
+    node.nodeType === NodeType.ELEMENT_NODE && (node as HTMLElement).tagName?.toLowerCase() === 'br';
+  const isText = (node: HtmlNode) => node.nodeType === NodeType.TEXT_NODE;
+
+  while (index < nodes.length) {
+    const node = nodes[index];
+    if (isBreak(node) || isText(node)) {
+      let end = index;
+      let hasBreak = false;
+      while (end < nodes.length && (isBreak(nodes[end]) || isText(nodes[end]))) {
+        if (isBreak(nodes[end])) hasBreak = true;
+        end += 1;
+      }
+      if (hasBreak) {
+        const lines: string[] = [];
+        let current = '';
+        for (let i = index; i < end; i += 1) {
+          if (isBreak(nodes[i])) {
+            lines.push(current.replace(/\s+/g, ' ').trim());
+            current = '';
+          } else {
+            current += nodes[i].text;
+          }
+        }
+        lines.push(current.replace(/\s+/g, ' ').trim());
+        const text = lines.filter((line, i) => line || (i > 0 && i < lines.length - 1)).join('\n');
+        if (text.trim()) {
+          layers.push(buildTextLayer(text, 'span', 'whitespace-pre-line'));
+        }
+        index = end;
+        continue;
+      }
+    }
+    const layer = mapElementToLayer(node, assetIdBySource, warnings, assetPublicUrlBySource);
+    if (layer) layers.push(layer);
+    index += 1;
+  }
+
+  return layers;
+}
+
 function mapElementToLayer(
   node: HtmlNode,
   assetIdBySource: Map<string, string>,
@@ -2038,9 +2624,7 @@ function mapElementToLayer(
 
   if (tag === 'a') {
     const href = resolveHref(element.getAttribute('href') || '#');
-    const children = element.childNodes
-      .map(child => mapElementToLayer(child, assetIdBySource, warnings, assetPublicUrlBySource))
-      .filter((layer): layer is Layer => !!layer);
+    const children = mapChildNodesToLayers(element, assetIdBySource, warnings, assetPublicUrlBySource);
 
     return {
       id: randomUUID(),
@@ -2061,9 +2645,7 @@ function mapElementToLayer(
     };
   }
 
-  const children = element.childNodes
-    .map(child => mapElementToLayer(child, assetIdBySource, warnings, assetPublicUrlBySource))
-    .filter((layer): layer is Layer => !!layer);
+  const children = mapChildNodesToLayers(element, assetIdBySource, warnings, assetPublicUrlBySource);
 
   const layerName = SAFE_HTML_TAGS.has(tag) ? tag : 'div';
 
@@ -2189,6 +2771,66 @@ function buildNavToggleInteraction(
   };
 }
 
+/**
+ * Webflow dropdowns (`.w-dropdown`) are runtime widgets too: `components.css`
+ * only hides `.w-dropdown-list`, and the opening lives in webflow.js. The
+ * toggle gets a `click` interaction (or `hover` for `data-hover="true"`) that
+ * reveals the list, exactly as `lib/webwow/import/webflow-zip/widgets.ts` does.
+ *
+ * Unlike the navbar the framework class is NOT stripped here: `.w-dropdown-list`
+ * also carries the panel's `position`, `min-width` and background, and the site
+ * stylesheet routinely overrides just one of them (this export sets
+ * `position: relative` on its own `.dropdown-list`). Instead
+ * `DROPDOWN_REVEAL_CSS` re-opens the panel once the runtime has removed
+ * `data-gsap-hidden`, which outranks `.w-dropdown-list { display: none }` on
+ * specificity and source order while leaving every other framework property in
+ * place.
+ */
+const DROPDOWN_DURATION_S = 0.2;
+const DROPDOWN_REVEAL_CSS = `/* --- Webflow dropdowns (revealed by the generated interaction) --- */
+.w-dropdown-list:not([data-gsap-hidden]) {
+  display: block;
+}`;
+
+function generateDropdownInteractions(layers: Layer[], warnings: string[]): number {
+  let generated = 0;
+  for (const dropdown of collectLayersWithClass(layers, 'w-dropdown')) {
+    const toggle = findLayerWithClass(dropdown, 'w-dropdown-toggle', 'w-dropdown');
+    const list = findLayerWithClass(dropdown, 'w-dropdown-list', 'w-dropdown');
+    if (!toggle || !list) {
+      warnings.push(`Dropdown without ${toggle ? 'list' : 'toggle'}: no interaction generated`);
+      continue;
+    }
+
+    const attributes = (dropdown.attributes || {}) as Record<string, unknown>;
+    const trigger = String(attributes['data-hover'] ?? '').toLowerCase() === 'true' ? 'hover' : 'click';
+    toggle.interactions = [
+      ...(toggle.interactions || []),
+      {
+        id: randomUUID(),
+        trigger,
+        timeline: { breakpoints: ['desktop', 'tablet', 'mobile'], repeat: 0, yoyo: true },
+        tweens: [
+          {
+            id: randomUUID(),
+            layer_id: list.id,
+            position: 0,
+            duration: DROPDOWN_DURATION_S,
+            ease: 'none',
+            from: { display: 'hidden' } as LayerInteraction['tweens'][number]['from'],
+            to: { display: 'visible' } as LayerInteraction['tweens'][number]['to'],
+            apply_styles: { display: 'on-load' },
+          },
+        ],
+      },
+    ];
+    stripClassTokens(list, token => DISPLAY_SHIM_CLASSES.has(token));
+    toggle.attributes = { ...(toggle.attributes || {}), role: 'button', tabindex: '0' };
+    generated++;
+  }
+  return generated;
+}
+
 function generateNavigationInteractions(layers: Layer[], warnings: string[]): number {
   let generated = 0;
   for (const nav of collectLayersWithClass(layers, 'w-nav')) {
@@ -2225,9 +2867,12 @@ function buildPagesFromHtml(
   htmlFiles: Array<{ filePath: string; content: string }>,
   assetIdBySource: Map<string, string>,
   assetPublicUrlBySource: Map<string, string>,
-  warnings: string[]
+  warnings: string[],
+  /** Set to the number of dropdown interactions generated, so the caller can emit their CSS. */
+  counters?: { dropdowns: number }
 ): Array<{ page: Record<string, unknown>; pageLayers: Record<string, unknown> }> {
-  return htmlFiles.map(({ filePath, content }, index) => {
+  let dropdowns = 0;
+  const pages = htmlFiles.map(({ filePath, content }, index) => {
     const slug = slugFromFilename(filePath);
     const fileBaseName = path.basename(filePath, '.html');
     const pageName = fileBaseName === 'index' ? 'Homepage' : fileBaseName.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -2247,7 +2892,14 @@ function buildPagesFromHtml(
       children,
     }];
 
+    const embeddedCss = rewriteCssUrls(
+      extractEmbeddedCssFromHtml(content),
+      filePath,
+      assetPublicUrlBySource
+    );
+
     generateNavigationInteractions(layers, warnings);
+    dropdowns += generateDropdownInteractions(layers, warnings);
 
     return {
       page: {
@@ -2260,7 +2912,9 @@ function buildPagesFromHtml(
         is_index: slug === '',
         is_dynamic: false,
         error_page: null,
-        settings: {},
+        settings: embeddedCss
+          ? { custom_code: { head: `<style id="webwow-webflow-page">\n${embeddedCss}\n</style>` } }
+          : {},
         is_published: false,
         is_publishable: true,
       },
@@ -2272,6 +2926,8 @@ function buildPagesFromHtml(
       },
     };
   });
+  if (counters) counters.dropdowns = dropdowns;
+  return pages;
 }
 
 function buildProjectManifest(projectName: string, stats: WebflowImportResult): ProjectManifest {
@@ -2324,6 +2980,8 @@ async function processWebflowImportInternal(
 
     const htmlFiles: Array<{ filePath: string; content: string }> = [];
     const cssFiles: Array<{ filePath: string; content: string }> = [];
+    /** Kept only to mine Webflow's IX2 interaction data; the JS itself is never shipped. */
+    const jsFiles: Array<{ filePath: string; content: string }> = [];
     const assets: AssetCollector = { files: [], rows: [] };
     const assetIdBySource = new Map<string, string>();
     // ZIP path / remote URL -> upstream asset proxy URL (for CSS url() rewriting)
@@ -2370,6 +3028,10 @@ async function processWebflowImportInternal(
       }
 
       if (lowerPath.endsWith('.js')) {
+        jsFiles.push({
+          filePath: normalizedPath,
+          content: await zipObject.async('text'),
+        });
         continue;
       }
 
@@ -2619,7 +3281,20 @@ async function processWebflowImportInternal(
       htmlFiles.flatMap(file => extractStylesheetHrefsFromHtml(file.content))
     ));
 
-    const builtPages = buildPagesFromHtml(htmlFiles, assetIdBySource, assetPublicUrlBySource, warnings);
+    const widgetCounters = { dropdowns: 0 };
+    const builtPages = buildPagesFromHtml(
+      htmlFiles,
+      assetIdBySource,
+      assetPublicUrlBySource,
+      warnings,
+      widgetCounters
+    );
+    if (widgetCounters.dropdowns > 0) {
+      warnings.push(
+        `${widgetCounters.dropdowns} Webflow dropdown${widgetCounters.dropdowns === 1 ? '' : 's'} `
+        + 'got a generated open/close interaction (the export ships no script for them).'
+      );
+    }
     const enhancedPages = enhancePagesWithCmsBindings(
       builtPages,
       normalizedCollections,
@@ -2629,24 +3304,32 @@ async function processWebflowImportInternal(
     );
     const pageRows = enhancedPages.map(entry => entry.page);
     const pageLayerRows = enhancedPages.map(entry => entry.pageLayers);
-    const embeddedCssBlocks = htmlFiles
-      .map(file => extractEmbeddedCssFromHtml(file.content))
-      .filter(Boolean);
     const baseCss = buildImportedCss(cssFiles, assetPublicUrlBySource, cssOrderFromHtml);
-    const importedCss = embeddedCssBlocks.length > 0
-      ? baseCss + '\n\n' + embeddedCssBlocks.join('\n\n')
-      : baseCss;
+    // Interaction CSS goes last so its `:hover` rules outrank the site stylesheet.
+    const ix2Css = buildIx2HoverCss(jsFiles, warnings);
+    const dropdownCss = widgetCounters.dropdowns > 0 ? DROPDOWN_REVEAL_CSS : '';
+    const importedCss = [baseCss, ix2Css, dropdownCss].filter(Boolean).join('\n\n');
     const { layerStyleRows, styleIdByClassSignature } = buildLayerStyles(
       cssFiles,
       pageLayerRows as Array<{ layers: Layer[] }>
     );
+    const lossySignatures = new Set<string>();
     const styledPageLayerRows = pageLayerRows.map((pageLayerRow) => ({
       ...pageLayerRow,
       layers: applyLayerStylesToTree(
         (pageLayerRow.layers as Layer[]) || [],
-        styleIdByClassSignature
+        styleIdByClassSignature,
+        lossySignatures
       ),
     }));
+    if (lossySignatures.size > 0) {
+      warnings.push(
+        `${lossySignatures.size} class combination${lossySignatures.size === 1 ? '' : 's'} `
+        + `(${[...lossySignatures].slice(0, 3).map(sig => `"${sig}"`).join(', ')}`
+        + `${lossySignatures.size > 3 ? ', …' : ''}) were kept as plain layer classes instead of a shared style, `
+        + 'because those Webflow class names read as conflicting Tailwind utilities and one of them would be dropped.'
+      );
+    }
     const dedupedLayerStyleRows = dedupeLayerStyles(layerStyleRows);
 
     result.pages = pageRows.length;

@@ -395,7 +395,8 @@ export default async function PageRenderer({
   translations,
   gaMeasurementId,
   globalCustomCodeBody,
-  ycodeBadge = true,
+  // Webwow: white-label fork - the "Made in Ycode" badge defaults to off.
+  ycodeBadge = false,
   passwordProtection,
 }: PageRendererProps) {
   const usePublishedData = page.is_published && !isPreview;

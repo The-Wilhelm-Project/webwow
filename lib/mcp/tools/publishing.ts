@@ -1,7 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { getUnpublishedPages, getAllDraftPages } from '@/lib/repositories/pageRepository';
-import { getUnpublishedLayerStyles, publishLayerStyles } from '@/lib/repositories/layerStyleRepository';
-import { getUnpublishedComponents, publishComponents } from '@/lib/repositories/componentRepository';
+// Webwow: the hardDeleteSoftDeleted* / cleanupDeletedCollections imports below are the
+// fork's addition - see the deletion block in the publish handler.
+import { getUnpublishedPages, getAllDraftPages, hardDeleteSoftDeletedPages } from '@/lib/repositories/pageRepository';
+import { getUnpublishedLayerStyles, publishLayerStyles, hardDeleteSoftDeletedLayerStyles } from '@/lib/repositories/layerStyleRepository';
+import { getUnpublishedComponents, publishComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
 import { getAllCollections, getUnpublishedCollections } from '@/lib/repositories/collectionRepository';
 import { getItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
 import { getUnpublishedAssets, publishAssets, hardDeleteSoftDeletedAssets } from '@/lib/repositories/assetRepository';
@@ -11,7 +13,7 @@ import { getAllLocales } from '@/lib/repositories/localeRepository';
 import { getUnpublishedTranslationsCount } from '@/lib/repositories/translationRepository';
 import { getUnpublishedGlobalVariables, publishGlobalVariables, hardDeleteSoftDeletedGlobalVariables } from '@/lib/repositories/globalVariableRepository';
 import { publishPages } from '@/lib/services/pageService';
-import { publishCollectionWithItems } from '@/lib/services/collectionService';
+import { publishCollectionWithItems, cleanupDeletedCollections } from '@/lib/services/collectionService';
 import { publishLocalisation } from '@/lib/services/localisationService';
 import { publishFolders } from '@/lib/services/folderService';
 import { publishCSS, savePublishedAt } from '@/lib/services/settingsService';
@@ -135,6 +137,14 @@ export function registerPublishingTools(server: McpServer) {
           changes.layer_styles = 0;
         }
       } catch { changes.layer_styles = 0; }
+
+      // Webwow: propagate draft deletions to the published copies. Without this a page
+      // deleted through MCP keeps serving after `publish` (zombie page); the HTTP publish
+      // route does the same in app/(builder)/ycode/api/publish/route.ts.
+      try { await hardDeleteSoftDeletedPages(); } catch { /* non-fatal */ }
+      try { await hardDeleteSoftDeletedComponents(); } catch { /* non-fatal */ }
+      try { await hardDeleteSoftDeletedLayerStyles(); } catch { /* non-fatal */ }
+      try { await cleanupDeletedCollections(); } catch { /* non-fatal */ }
 
       // Publish asset folders
       try {

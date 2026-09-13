@@ -1,5 +1,12 @@
 # Security Policy
 
+> **Webwow** is a fork of [ycode](https://github.com/ycode/ycode). Report anything that only
+> affects Webwow (the PostgreSQL/local-disk compatibility layer in `lib/webwow/**`, the Docker
+> deployment, the Webflow ZIP importer, multi-site, the `?edit` editor) through a private
+> security advisory on the Webwow repository:
+> <https://github.com/The-Wilhelm-Project/webwow/security/advisories/new>.
+> Vulnerabilities in the upstream builder itself go to ycode, as described below.
+
 ## Supported Versions
 
 | Version | Supported          |

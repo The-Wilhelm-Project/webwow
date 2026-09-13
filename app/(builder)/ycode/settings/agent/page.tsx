@@ -183,8 +183,9 @@ export default function AgentSettingsPage() {
               </FieldLabel>
               {isSavingEnabled && <Spinner className="size-3.5" />}
             </div>
+            {/* Webwow: white-label fork. */}
             <FieldDescription className="mb-0">
-              Show the Agent tab in the builder. Turn off to use Ycode in manual mode only.
+              Show the Agent tab in the builder. Turn off to use Webwow in manual mode only.
             </FieldDescription>
           </div>
           <Switch

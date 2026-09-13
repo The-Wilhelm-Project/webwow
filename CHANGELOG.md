@@ -72,6 +72,59 @@ Alle Upstream-Dateien bleiben weiterhin byte-identisch (`bash scripts/check-upst
   und die API-Route fehlen. Der Code ist damit unerreichbar und ändert nichts am laufenden Betrieb;
   für Importe gilt weiterhin der bisherige Importer unter Einstellungen → Templates.
 
+### Nachgezogen aus dem alten Fork (0.9.x) — White-Label und Fehlerkorrekturen
+
+Beim Neuaufbau als Kompatibilitätsschicht wurden alle Upstream-Dateien wieder byte-identisch, wodurch
+Anpassungen des alten Forks (ed9d522 → 09bd627) verloren gingen. Sie sind jetzt wieder da; die
+betroffenen Upstream-Dateien stehen in `scripts/sync-lists.sh` und sind in
+[docs/UPSTREAM-SYNC.md](docs/UPSTREAM-SYNC.md) §2a einzeln mit Re-Apply-Anleitung dokumentiert.
+
+**Fehlerkorrekturen**
+
+- **MCP-`publish` löscht gelöschte Entwürfe jetzt auch veröffentlicht.** Eine über MCP gelöschte Seite
+  (ebenso Komponenten, Layer-Styles, Collections) blieb nach `publish` weiter online, weil das
+  MCP-Tool die Hard-Delete-Aufräumung der HTTP-Publish-Route nicht mitmachte.
+- **Eigene Fehlerseiten funktionieren vor dem ersten Publish.** `/ycode/api/error-page` fällt auf die
+  Entwurfsfassung und das Entwurfs-CSS zurück, solange nichts veröffentlicht ist — vorher zeigte eine
+  frisch angelegte oder frisch importierte Site keine eigene 401/404/500-Seite.
+- **Kein „Loading builder data…"-Blitz mehr.** Der Vollbild-Loader des Builders erscheint nur noch beim
+  ersten Kaltstart, nicht bei jedem späteren kurzen `!builderDataPreloaded`.
+- **Migrations-Check verschluckt keine HTML-Antwort mehr.** Antwortet ein Proxy oder eine 500-Seite mit
+  HTML statt JSON, zeigt der Builder jetzt die Meldung statt `Unexpected token '<'`.
+
+**White-Label**
+
+- **Builder-Tab und PWA**: Titel „Webwow - Visual Website Builder", Favicons, `site.webmanifest`,
+  Open-Graph-Bild und `theme-color` sind verdrahtet (die Asset-Dateien lagen bisher unbenutzt in
+  `public/`). Bewusst **nur** im Builder-Layout — veröffentlichte Kundenseiten erben weder Favicon
+  noch OG-Bild von Webwow.
+- **~35 sichtbare „Ycode"-Texte** in Einstellungen, Integrationen (MCP, Webhooks, API, Airtable,
+  Webflow, Static Export), OAuth-Zustimmung, HTML-Import, Backup/Restore, Update-Hinweis und im
+  KI-Composer heißen jetzt „Webwow". Pfade, DOM-Ids, `ycode://`-URIs, `X-Ycode-*`-Header und die
+  Export-Endung `.ycode` bleiben unverändert (Upstream-Kompatibilität).
+- **Platzhalterseiten**: „Welcome to Webwow" (Setup-Assistent, leere Entwurfs- und veröffentlichte
+  Startseite), „Webwow Preview"; ohne veröffentlichte Inhalte steht im `<title>` nichts mehr von
+  „Ycode" / „Built with Ycode".
+- **MCP-Tool-Beschreibungen**: Der KI-Assistent stellt sich nicht mehr als „YCode" vor.
+- **Layout-Bibliothek**: Die Demo-Texte der Blog-Karten- und FAQ-Layouts warben für Ycode und die
+  Header-/Footer-Layouts setzten die `ycode`-Wortmarke ein — beides landete beim Einfügen direkt auf
+  der Seite des Nutzers. Texte und `public/ycode/layouts/assets/ycode-logo-black.svg` (gleiches
+  132×35-Seitenverhältnis) tragen jetzt die Fork-Marke, ebenso `public/y-filled.svg`.
+- **Statischer Export nach GitHub** committet als „Webwow Static Export" statt „Ycode Static Export".
+- **„Made in Ycode"-Badge**: Der Code-Default ist jetzt *aus* (`PageRenderer`, `not-found`,
+  `error-page`) — bisher hätte ein fehlender oder `NULL`-Wert der Einstellung ihn wieder eingeblendet.
+  Der HTML-Kommentar `<!-- Made in Ycode · ycode.com -->` in veröffentlichten Seiten bleibt vorerst
+  (Upstream 1.30.x, mit Tests abgesichert; siehe docs/UPSTREAM-SYNC.md §2a).
+- **Repo-Doku**: `CONTRIBUTING.md`, `SECURITY.md` und `.cursorrules` sagen jetzt, was hierher gehört
+  und was upstream. `LICENSE` und `CODE_OF_CONDUCT.md` bleiben absichtlich die Upstream-Fassung.
+
+**Sonstiges**
+
+- `/dev/css-controls` ist zurück: Entwickler-Sandbox für die Design-Control-Panels ohne Builder und
+  ohne Datenbank (in einem Production-Build 404).
+- `.gitignore` ignoriert `node_modules` in jedem Verzeichnis, nicht nur im Wurzelverzeichnis —
+  sonst landet `tools/vscode-tailwind-class-editor/node_modules/` im Commit.
+
 ## [1.30.15-webwow.1] - 2026-09-12 — Upstream-Sync auf ycode 1.30.15
 
 Erster Release der neuen Fork-Strategie. Die Versionsnummer folgt ab jetzt dem Upstream-Schema

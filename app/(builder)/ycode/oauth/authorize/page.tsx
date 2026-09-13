@@ -117,7 +117,7 @@ export default async function AuthorizePage({
     return (
       <ErrorPanel
         title="Unknown client"
-        message="The application requesting access has not been registered with this YCode instance."
+        message="The application requesting access has not been registered with this Webwow instance."
       />
     );
   }

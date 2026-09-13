@@ -233,13 +233,13 @@ export default function EmailSettingsPage() {
             </div>
             <div className="flex-1">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-muted-foreground">Ycode</span>
+                <span className="text-sm font-medium text-muted-foreground">Webwow</span>
                 <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
                   Only available on Cloud
                 </span>
               </div>
               <p className="text-xs text-muted-foreground mt-1">
-                Managed email delivery powered by Ycode — no configuration required
+                Managed email delivery powered by Webwow — no configuration required
               </p>
             </div>
           </div>

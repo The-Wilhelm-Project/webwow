@@ -34,8 +34,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Fetch error page
-    const pageData = await fetchErrorPage(errorCode, published);
+    // Fetch error page.
+    // Webwow: fall back to the draft variant when nothing has been published yet, so a
+    // freshly created or freshly imported site already serves its custom 401/404/500.
+    let pageData = await fetchErrorPage(errorCode, published);
+    if (!pageData && published) {
+      pageData = await fetchErrorPage(errorCode, false);
+    }
 
     if (!pageData) {
       return NextResponse.json(
@@ -45,16 +50,20 @@ export async function GET(request: NextRequest) {
     }
 
     const cssKey = published ? 'published_css' : 'draft_css';
+    // Webwow: same fallback for the stylesheet - published_css is empty before the
+    // first publish, which would render the error page unstyled.
+    const fallbackCssKey = published ? 'draft_css' : 'published_css';
     const [settings, colorVariablesCss] = await Promise.all([
-      getSettingsByKeys([cssKey, 'ycode_badge']),
+      getSettingsByKeys([cssKey, fallbackCssKey, 'ycode_badge']),
       generateColorVariablesCss(),
     ]);
 
     return NextResponse.json({
       pageData,
-      css: settings[cssKey] || null,
+      css: settings[cssKey] || settings[fallbackCssKey] || null,
       colorVariablesCss,
-      ycodeBadge: settings.ycode_badge ?? true,
+      // Webwow: white-label fork - the badge is off unless a site explicitly turns it on.
+      ycodeBadge: settings.ycode_badge ?? false,
     });
   } catch (error) {
     console.error('Failed to fetch error page:', error);

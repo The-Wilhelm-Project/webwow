@@ -189,7 +189,7 @@ export function BackupRestoreDialog({
             <div className="flex flex-col gap-4 pt-2">
               <p className="text-xs text-muted-foreground">
                 This will create a <code className="text-foreground/85">.ycode</code> backup file containing all of your project data. The file can be used to restore
-                your project data at a later date or to transfer your project to another instance of YCode.
+                your project data at a later date or to transfer your project to another instance of Webwow.
               </p>
               <div className="space-y-2">
                 <Label htmlFor="backup-name">

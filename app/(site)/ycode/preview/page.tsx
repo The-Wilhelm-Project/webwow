@@ -26,8 +26,9 @@ export default async function Home() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
         <div className="text-center p-8">
+          {/* Webwow: white-label fork. */}
           <h1 className="text-6xl font-bold text-gray-900 mb-4">
-            Ycode Preview
+            Webwow Preview
           </h1>
           <p className="text-xl text-gray-600 mb-8">
             No homepage found. Create an index page in the builder.
@@ -115,9 +116,10 @@ export async function generateMetadata(): Promise<Metadata> {
   const data = await fetchHomepage(false);
 
   if (!data) {
+    // Webwow: white-label fork - do not advertise the builder in the preview title.
     return {
-      title: 'Preview - Ycode',
-      description: 'Preview - Built with Ycode',
+      title: 'Preview',
+      description: 'Preview',
     };
   }
 

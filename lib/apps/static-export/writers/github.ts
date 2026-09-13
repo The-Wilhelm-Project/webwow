@@ -51,8 +51,9 @@ export async function createGithubWriter(config: ExportConfig): Promise<Writer> 
 
 async function pushViaApi(config: ExportConfig, files: OutputFile[]): Promise<number> {
   const { githubRepo: repo, githubBranch: branch, githubToken: token } = config
-  const authorName = config.githubAuthorName.trim() || 'Ycode Static Export'
-  const authorEmail = config.githubAuthorEmail.trim() || 'static-export@ycode.local'
+  // Webwow: white-label fork - default commit author of the static export.
+  const authorName = config.githubAuthorName.trim() || 'Webwow Static Export'
+  const authorEmail = config.githubAuthorEmail.trim() || 'static-export@webwow.local'
 
   const headers = apiHeaders(token)
 
@@ -287,8 +288,8 @@ async function bootstrapEmptyRepo(
   headers: HeadersInit,
 ): Promise<void> {
   const author = { name: authorName, email: authorEmail }
-  // base64 of "Ycode static export — initializing repository\n"
-  const content = Buffer.from('Ycode static export — initializing repository\n', 'utf-8').toString('base64')
+  // base64 of "Webwow static export — initializing repository\n"
+  const content = Buffer.from('Webwow static export — initializing repository\n', 'utf-8').toString('base64')
 
   const res = await fetch(
     `${GITHUB_API}/repos/${repo}/contents/.ycode-init`,
@@ -296,7 +297,7 @@ async function bootstrapEmptyRepo(
       method: 'PUT',
       headers,
       body: JSON.stringify({
-        message: 'Initialize repository for Ycode static export',
+        message: 'Initialize repository for Webwow static export',
         content,
         branch,
         author,

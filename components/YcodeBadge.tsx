@@ -7,7 +7,7 @@ export default function YcodeBadge() {
       href="https://ycode.com"
       target="_blank"
       rel="noopener noreferrer"
-      aria-label="This website was built using Ycode."
+      aria-label="This website was built using Webwow."
       style={{
         height: 'auto',
         background: '#050606',

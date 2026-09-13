@@ -1,6 +1,16 @@
-# Contributing to Ycode
+# Contributing to Webwow
 
-Thanks for your interest in contributing to Ycode! This guide will help you get started.
+**Webwow** is a fork of [ycode](https://github.com/ycode/ycode). *Put your energy into ycode ;-)* —
+improvements to the builder, the CMS and the canvas belong upstream, and the guide below is
+ycode's own and points at the ycode repository. Open a pull request **here** only for
+Webwow-specific work: the PostgreSQL/local-disk compatibility layer (`lib/webwow/**`), the Docker
+deployment, the Webflow ZIP importer, multi-site, the `?edit` editor and the white-label branding.
+Before touching an upstream file, read [docs/UPSTREAM-SYNC.md](docs/UPSTREAM-SYNC.md) §2 — files
+outside `scripts/sync-lists.sh` must stay byte-identical to upstream.
+
+---
+
+Thanks for your interest in contributing! This guide will help you get started.
 
 ## Before You Start
 

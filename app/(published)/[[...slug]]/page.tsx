@@ -329,8 +329,9 @@ export default async function Page({ params }: PageProps) {
       return (
         <div className="min-h-screen flex items-center justify-center bg-white">
           <div className="text-center p-8 flex flex-col items-center justify-center gap-2">
+            {/* Webwow: white-label fork - the placeholder homepage carries the fork's name. */}
             <h1 className="text-xl font-semibold text-neutral-900">
-              Welcome to Ycode
+              Welcome to Webwow
             </h1>
             <Link
               href="/ycode"
@@ -463,9 +464,11 @@ export async function generateMetadata({ params }: { params: Promise<{ slug?: st
 
   if (!data) {
     if (isHomepage) {
+      // Webwow: white-label fork - a site without published content must not
+      // advertise the builder in its <title>/<meta description>.
       return {
-        title: 'Ycode',
-        description: 'Built with Ycode',
+        title: '',
+        description: '',
       };
     }
 

@@ -54,13 +54,88 @@ aufsetzen. Nie blind "ours" nehmen — sonst gehen Upstream-Fixes verloren.
 | `tsconfig.json` | `baseUrl`, `exclude` (`tools`, `import`, `uploads`), ts-node `transpileOnly` + `tsconfig-paths/register` (knex-CLI) |
 | `eslint.config.mjs` | zusätzliche `ignores` (`tools/`, `import/`, `uploads/`, `docs/`) |
 | `.env.example` | Webwow-Variablen, keine `SUPABASE_*` |
-| `.gitignore`, `.dockerignore` | `/uploads`, Docker-Kontext |
+| `.gitignore`, `.dockerignore` | `uploads`, Docker-Kontext; `.gitignore` ignoriert `node_modules` **ohne** führenden Slash, sonst würde `tools/vscode-tailwind-class-editor/node_modules/` committet |
 | `README.md`, `CHANGELOG.md` | Webwow-Doku; im CHANGELOG steht der Upstream-Changelog unterhalb des Webwow-Eintrags |
 | `Dockerfile`, `docker-compose.yml`, `docker-entrypoint.sh` | Webwow-Deployment |
 | `app/(builder)/ycode/settings/templates/page.tsx` | zusätzlicher "Webflow ZIP importieren"-Button |
 | `public/favicon.svg`, `public/favicon-32.png`, `public/apple-touch-icon.png`, `public/og-image.png`, `public/og-image.svg`, `public/site.webmanifest`, `app/icon.svg` | Brand-Assets (Whitelabel) |
 | `.github/**` | eigene Issue-/PR-Templates, keine ycode-CODEOWNERS |
 | `instrumentation-client.ts` (nur falls angelegt) | optionaler Site-Switcher im Builder (MULTISITE.md); beim Anlegen in `DIVERGENT_FILES` eintragen |
+
+#### White-Label: Marken-Metadaten des Builders
+
+| Datei | Warum sie abweicht | Re-Apply nach einem Sync |
+|---|---|---|
+| `components/RootLayoutShell.tsx` | `defaultMetadata.title` = `Webwow - Visual Website Builder` | **nur** den Titel ersetzen. Icons/Manifest/Open Graph gehören hier *nicht* hinein: `components/site-document-layout.tsx` spreizt `defaultMetadata` in die Metadaten veröffentlichter Seiten, Kundenseiten bekämen sonst Webwows Favicon und OG-Bild |
+| `app/(builder)/layout.tsx` | `metadata` ergänzt `icons` (`/favicon.svg`, `/favicon-32.png`, `/apple-touch-icon.png`), `manifest: '/site.webmanifest'` und `openGraph` mit `/og-image.png`; dazu `export const viewport = { themeColor: '#0369FF' }` | Upstream-Fassung nehmen, den Webwow-Block wieder anhängen (er steht komplett zwischen zwei `// Webwow:`-Kommentaren) |
+| `public/y-filled.svg` | Default-Favicon-Vorschau in Settings → General; Upstream liefert die Y-Marke | Datei mit der Wilhelm-Marke aus `app/icon.svg` überschreiben |
+| `public/ycode/layouts/assets/ycode-logo-black.svg` | Upstream liefert die 132×35-`ycode`-Wortmarke, die die Header-/Footer-Layouts aus `lib/templates/layouts.ts` **in Kundenseiten einsetzen** | Datei überschreiben, dabei die 132×35-Box behalten (Seitenverhältnis), sonst verzerren die Layouts |
+
+#### White-Label: sichtbare "Ycode"-Texte
+
+Der Fork darf sich in der Oberfläche nicht als Ycode vorstellen. Betroffen sind nur **Anzeigetexte**.
+**Nicht** ersetzen: `/ycode`-Pfade, `ycode-*` DOM-Ids/Klassen, `ycode://`-MCP-URIs, `X-Ycode-*`-Header,
+die Export-Endung `.ycode`, Bezeichner wie `YCodeBuilder` und den Tab-Wert `ycode-sitemap`.
+Fundstellen nach einem Sync suchen:
+
+```bash
+grep -rn 'Ycode\|YCode' app components lib --include=*.ts --include=*.tsx \
+  | grep -viE '/ycode|ycode-|ycode://|X-Ycode|\.ycode|YCodeBuilder|YCodeLayout|ycode_badge|ycodeBadge'
+```
+
+| Datei | Ersetzte Stelle |
+|---|---|
+| `app/(builder)/ycode/welcome/page.tsx` | „Welcome to Webwow" (Setup-Assistent) |
+| `app/(builder)/ycode/components/YCodeBuilderMain.tsx` | Logo (bestehend) + Loader-Flag, siehe unten |
+| `app/(builder)/ycode/settings/general/page.tsx` | Google-Analytics-Text, Sitemap-Tab-Label „Webwow generated" (Wert bleibt `ycode-sitemap`) |
+| `app/(builder)/ycode/settings/updates/page.tsx` | „Check if your Webwow installation …" |
+| `app/(builder)/ycode/settings/agent/page.tsx` | „… to use Webwow in manual mode only." |
+| `app/(builder)/ycode/settings/email/page.tsx` | Provider-Karte „Webwow" / „… powered by Webwow" |
+| `app/(builder)/ycode/integrations/api/page.tsx`, `components/IntegrationsContent.tsx` | Überschrift und Nav-Label „Webwow API" |
+| `app/(builder)/ycode/integrations/mcp/page.tsx` | 3 × „your Webwow project" |
+| `app/(builder)/ycode/integrations/webhooks/page.tsx` | „… in your Webwow site." |
+| `app/(builder)/ycode/integrations/apps/page.tsx` | `<FieldLabel>Webwow Form</FieldLabel>` |
+| `app/(builder)/ycode/integrations/apps/airtable-settings.tsx` | 3 × „Webwow collections / Collection / fields" |
+| `app/(builder)/ycode/integrations/apps/static-export-settings.tsx` | Placeholder „Webwow Static Export" |
+| `app/(builder)/ycode/integrations/apps/webflow-settings.tsx` | 6 × „… into Webwow" / „the Webwow canvas" |
+| `app/(builder)/ycode/oauth/authorize/page.tsx`, `ConsentForm.tsx` | „this Webwow instance" / „your Webwow project" |
+| `app/(builder)/ycode/components/ImportHtmlDialog.tsx` | „… design settings in Webwow." |
+| `app/(builder)/ycode/components/ai/ChatComposer.tsx` | Placeholder „Ask Webwow…" |
+| `components/UpdateNotification.tsx` | „New Webwow update available!" |
+| `components/project/BackupRestoreDialog.tsx` | „… another instance of Webwow." |
+| `lib/apps/static-export/writers/github.ts`, `lib/apps/static-export/types.ts` | Default-Commit-Autor „Webwow Static Export" und die Init-Commit-Texte — landen im **GitHub-Repo des Nutzers** |
+| `lib/mcp/tools/assets.ts`, `collections.ts`, `animations.ts`, `locales.ts` | Tool-Beschreibungen: der KI-Assistent nennt sonst „YCode" |
+| `lib/templates/layouts.ts` | 17 Demo-Texte der Blog-Karten- und FAQ-Layouts (skriptbar, Kopfkommentar in der Datei) |
+| `app/(published)/[[...slug]]/page.tsx` | „Welcome to Webwow"-Platzhalter **und** Metadaten-Fallback `title`/`description` = `''` statt `Ycode` / `Built with Ycode` |
+| `app/(site)/_dynamic/page.tsx` | „Welcome to Webwow"-Platzhalter (Entwurfs-Homepage) |
+| `app/(site)/ycode/preview/page.tsx` | „Webwow Preview" + Metadaten-Fallback `Preview` / `Preview` |
+| `CONTRIBUTING.md`, `SECURITY.md`, `.cursorrules` | Fork-Hinweis am Anfang (Beiträge/Meldungen: Builder → ycode, Webwow-Schicht → dieses Repo); `.cursorrules` beschreibt zusätzlich die Kompatibilitätsschicht statt Supabase |
+
+`CODE_OF_CONDUCT.md` bleibt absichtlich unverändert (Upstream-Kontaktadresse, für die es keine
+Webwow-Entsprechung gibt). `LICENSE` bleibt ebenfalls die Upstream-MIT-Lizenz.
+
+#### White-Label: „Made in Ycode"-Badge aus
+
+| Datei | Warum sie abweicht | Re-Apply |
+|---|---|---|
+| `components/PageRenderer.tsx` | Prop-Default `ycodeBadge = false` statt `true` | eine Zeile |
+| `app/(site)/not-found.tsx` | `?? false` statt `?? true` (zwei Stellen) | zwei Zeilen |
+| `app/(builder)/ycode/api/error-page/route.ts` | `settings.ycode_badge ?? false` | eine Zeile |
+
+Die Migration `99999999999999_webwow_defaults.ts` setzt `ycode_badge = false`; die Defaults hier greifen,
+wenn die Einstellung fehlt oder `NULL` ist. Der Toggle in Settings → General ist entfernt.
+**Offen:** `lib/ycode-html-comment.ts` stempelt weiterhin `<!-- Made in Ycode · ycode.com -->` in jede
+veröffentlichte Seite (Upstream 1.30.x, kein Setting). Entfernen hieße `MADE_IN_YCODE_COMMENT` ändern und
+`lib/stamp-html-response.test.ts` + `lib/ycode-html-comment.test.ts` mitziehen — bewusst noch nicht getan.
+
+#### Verhaltens- und Fehlerkorrekturen des Forks
+
+| Datei | Warum sie abweicht | Re-Apply nach einem Sync |
+|---|---|---|
+| `lib/mcp/tools/publishing.ts` | Das MCP-`publish`-Tool baut den Publish-Ablauf nach, ließ aber die Hard-Delete-Aufräumung aus: eine über MCP gelöschte Seite blieb nach dem Publish online (Zombie). | Nach dem `// Publish layer styles`-Block vier `try { await …(); } catch {}` für `hardDeleteSoftDeletedPages` / `…Components` / `…LayerStyles` / `cleanupDeletedCollections` einsetzen (Importe oben ergänzen). Reihenfolge wie in `app/(builder)/ycode/api/publish/route.ts`. **Upstream-Bug** — falls ycode ihn behebt, Abweichung wieder entfernen. |
+| `app/(builder)/ycode/api/error-page/route.ts` | Ohne Fallback auf die Entwurfsfassung zeigt eine frisch angelegte oder frisch importierte Site bis zum ersten Publish keine eigene 401/404/500-Seite. | `fetchErrorPage(code, false)` als Fallback, und `draft_css` als Fallback-Key in `getSettingsByKeys` |
+| `app/(builder)/ycode/components/YCodeBuilderMain.tsx` | Modulweites `builderHasRenderedOnce`: der Vollbild-Loader „Loading builder data…" erscheint nur beim ersten Kaltstart, nicht bei jedem späteren transienten `!builderDataPreloaded`. | Flag nach den Imports anlegen, Guard auf `!builderDataPreloaded && !builderHasRenderedOnce` erweitern, danach `builderHasRenderedOnce = true` |
+| `components/MigrationChecker.tsx` | `parseResponseSafely()`: eine HTML-Antwort (Proxy, 500-Fehlerseite) ließ `response.json()` mit `Unexpected token '<'` platzen, statt die Meldung anzuzeigen. | Helfer wieder einsetzen und `response.json()` durch ihn ersetzen. Der Migrationslauf bleibt bewusst blockierend (siehe Kommentar in der Datei) |
 
 ### 2b. Webwow-eigene Dateien (Upstream kennt sie nicht → keine Konflikte)
 
@@ -83,6 +158,10 @@ aufsetzen. Nie blind "ours" nehmen — sonst gehen Upstream-Fixes verloren.
   `components/project/WebflowImportDialog.tsx` — Webflow-ZIP-Importer
 * `scripts/webwow-*.ts` (`webwow-user`, `webwow-sites`), `scripts/sync-upstream.sh`, `scripts/sync-lists.sh`,
   `scripts/check-upstream-identity.sh`
+* `app/(builder)/dev/css-controls/**` — Entwickler-Sandbox für die Design-Control-Panels
+  (`SpacingControls`, `TypographyControls`, `EffectControls` gegen einen Dummy-Layer, ohne Datenbank).
+  Liegt in der Route-Gruppe `(builder)`, damit sie das dortige Root-Layout erbt; URL bleibt
+  `/dev/css-controls`. In einem Production-Build antwortet die Route mit 404.
 * `docs/**`, `.github/**`, `import/**` (Beispiel-Export), `tools/**`
 
 Alles andere im Repository muss nach einem Merge **identisch mit Upstream** sein. Die Listen aus 2a/2b stehen

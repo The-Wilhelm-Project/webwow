@@ -7,7 +7,8 @@ import { cn } from '@/lib/utils';
 const INTEGRATIONS_ITEMS = [
   { id: 'apps', label: 'Apps', path: '/ycode/integrations/apps' },
   { id: 'webhooks', label: 'Webhooks', path: '/ycode/integrations/webhooks' },
-  { id: 'api', label: 'Ycode API', path: '/ycode/integrations/api' },
+  // Webwow: white-label fork - label only, the /ycode path stays upstream.
+  { id: 'api', label: 'Webwow API', path: '/ycode/integrations/api' },
   { id: 'mcp', label: 'MCP', path: '/ycode/integrations/mcp' },
 ];
 

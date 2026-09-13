@@ -48,13 +48,85 @@ DIVERGENT_FILES=(
   # White-Label: Wilhelm-Marke statt ycode-Logo, kein "Made in Ycode"-Badge, generator-Meta "Webwow".
   # Bei einem Sync: Upstream-Änderung übernehmen und die Marke erneut einsetzen (Pfad aus app/icon.svg).
   "app/(builder)/ycode/components/HeaderBar.tsx"
-  "app/(builder)/ycode/components/YCodeBuilderMain.tsx"
   "app/(builder)/ycode/accept-invite/page.tsx"
-  "app/(builder)/ycode/welcome/page.tsx"
-  "app/(builder)/ycode/settings/general/page.tsx"
   "components/site-document-layout.tsx"
+  # White-Label, zweite Welle: sichtbare "Ycode"-Texte in App-Registry, MCP-Instruktionen,
+  # Update-Hinweis, Test-Webhook, Static-Export-Autor, Badge-Beschriftung und Web-Clip-Vorschau.
+  "lib/apps/registry.ts"
+  "lib/mcp/instructions.ts"
+  "lib/mcp/resources/reference.ts"
+  "app/(builder)/ycode/api/webhooks/[id]/route.ts"
+  "lib/apps/static-export/writers/github.ts"
+  "lib/apps/static-export/types.ts"
+  "app/(builder)/ycode/integrations/apps/static-export-settings.tsx"
+  "components/YcodeBadge.tsx"
+  "public/webwow-webclip.png"
   "lib/apps/static-export/document.ts"
   "lib/services/webflowImportService.ts"
+
+  # White-Label: Marken-Metadaten des Builders (Titel, Icons, Manifest, Open Graph, themeColor).
+  # Re-Apply: in RootLayoutShell nur den Titel ersetzen; Icons/Manifest/OG gehören ausschließlich
+  # in app/(builder)/layout.tsx, sonst erben veröffentlichte Kundenseiten Webwows Favicon.
+  "components/RootLayoutShell.tsx"
+  "app/(builder)/layout.tsx"
+  "public/y-filled.svg"
+  "public/ycode/layouts/assets/ycode-logo-black.svg"
+
+  # White-Label: sichtbare "Ycode"-Texte in der Builder-Oberfläche -> "Webwow".
+  # Re-Apply: Upstream-Fassung übernehmen und nur die Textstellen ersetzen. NICHT anfassen:
+  # /ycode-Pfade, ycode-* DOM-Ids/Klassen, ycode:// URIs, X-Ycode-* Header, .ycode-Endung,
+  # Bezeichner wie YCodeBuilder und der Tab-Wert "ycode-sitemap".
+  # Fundstellen suchen: grep -rn 'Ycode\|YCode' app components lib --include=*.tsx --include=*.ts
+  "app/(builder)/ycode/components/YCodeBuilderMain.tsx"
+  "app/(builder)/ycode/welcome/page.tsx"
+  "app/(builder)/ycode/settings/general/page.tsx"
+  "app/(builder)/ycode/settings/updates/page.tsx"
+  "app/(builder)/ycode/settings/agent/page.tsx"
+  "app/(builder)/ycode/settings/email/page.tsx"
+  "app/(builder)/ycode/integrations/api/page.tsx"
+  "app/(builder)/ycode/integrations/mcp/page.tsx"
+  "app/(builder)/ycode/integrations/webhooks/page.tsx"
+  "app/(builder)/ycode/integrations/apps/page.tsx"
+  "app/(builder)/ycode/integrations/apps/airtable-settings.tsx"
+  "app/(builder)/ycode/integrations/apps/static-export-settings.tsx"
+  "app/(builder)/ycode/integrations/apps/webflow-settings.tsx"
+  "app/(builder)/ycode/oauth/authorize/page.tsx"
+  "app/(builder)/ycode/oauth/authorize/ConsentForm.tsx"
+  "app/(builder)/ycode/components/IntegrationsContent.tsx"
+  "app/(builder)/ycode/components/ImportHtmlDialog.tsx"
+  "app/(builder)/ycode/components/ai/ChatComposer.tsx"
+  "components/UpdateNotification.tsx"
+  "components/project/BackupRestoreDialog.tsx"
+  "lib/apps/static-export/writers/github.ts"
+  "lib/apps/static-export/types.ts"
+  # MCP-Tool-Beschreibungen: der KI-Assistent darf sich nicht als YCode vorstellen.
+  "lib/mcp/tools/assets.ts"
+  "lib/mcp/tools/collections.ts"
+  "lib/mcp/tools/animations.ts"
+  "lib/mcp/tools/locales.ts"
+  # Demo-Texte der Layout-Bibliothek (Blog-Karten, FAQ) landen beim Einfügen auf Kundenseiten.
+  # Re-Apply per Skript, siehe Kopfkommentar der Datei.
+  "lib/templates/layouts.ts"
+
+  # White-Label: Platzhalterseiten und Metadaten-Fallbacks ohne veröffentlichte Inhalte.
+  "app/(published)/[[...slug]]/page.tsx"
+  "app/(site)/_dynamic/page.tsx"
+  "app/(site)/ycode/preview/page.tsx"
+
+  # White-Label: "Made in Ycode"-Badge ist aus, solange eine Site ihn nicht ausdrücklich einschaltet
+  # (Upstream-Default ist an). Re-Apply: true -> false bzw. ?? true -> ?? false.
+  "components/PageRenderer.tsx"
+  "app/(site)/not-found.tsx"
+
+  # Verhaltens-/Fehlerkorrekturen des Forks (Details in docs/UPSTREAM-SYNC.md §2a)
+  "lib/mcp/tools/publishing.ts"
+  "components/MigrationChecker.tsx"
+  "app/(builder)/ycode/api/error-page/route.ts"
+
+  # Fork-Doku statt Upstream-Doku (Beitrag, Security-Kontakt, Cursor-Regeln)
+  "CONTRIBUTING.md"
+  "SECURITY.md"
+  ".cursorrules"
 )
 
 # Pfad-Präfixe, die nur in Webwow existieren (Upstream kennt sie nicht). Konflikte hier sind
@@ -81,6 +153,7 @@ DIVERGENT_PREFIXES=(
   ".github/"
   "import/"
   "tools/"
+  "app/(builder)/dev/"
 )
 
 # is_divergent <pfad> -> 0, wenn der Pfad in DIVERGENT_FILES steht oder mit einem DIVERGENT_PREFIXES-Eintrag beginnt.

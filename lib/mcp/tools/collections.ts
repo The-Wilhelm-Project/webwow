@@ -71,7 +71,8 @@ function buildFieldData(input: z.infer<typeof fieldDataSchema> | undefined): Col
 export function registerCollectionTools(server: McpServer) {
   server.tool(
     'list_collections',
-    "List all CMS collections with their IDs, names, slugs, and default sorting. Collections are YCode's CMS — each collection is like a database table.",
+    // Webwow: white-label fork - the AI assistant must not name the upstream product.
+    "List all CMS collections with their IDs, names, slugs, and default sorting. Collections are Webwow's CMS — each collection is like a database table.",
     {},
     async () => {
       const collections = await getAllCollections();

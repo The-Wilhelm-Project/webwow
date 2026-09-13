@@ -674,7 +674,7 @@ export default function AirtableSettings({
               <Empty>
                 <EmptyTitle>No connections</EmptyTitle>
                 <EmptyDescription>
-                  Add a new connection to start syncing Airtable data into Ycode collections.
+                  Add a new connection to start syncing Airtable data into Webwow collections.
                 </EmptyDescription>
               </Empty>
             )}
@@ -792,7 +792,7 @@ export default function AirtableSettings({
                     </Field>
 
                     <Field className="flex-1 min-w-0">
-                      <FieldLabel>Ycode Collection</FieldLabel>
+                      <FieldLabel>Webwow Collection</FieldLabel>
                       <Select
                         value={form.collectionId}
                         onValueChange={handleCollectionChange}
@@ -925,7 +925,7 @@ function FieldMappingGrid({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
-        <span className="flex-1 text-xs font-medium">Ycode fields</span>
+        <span className="flex-1 text-xs font-medium">Webwow fields</span>
         <span className="w-3" />
         <span className="flex-1 text-xs font-medium">Airtable fields</span>
       </div>

@@ -764,7 +764,7 @@ export default function AppsPage() {
     <>
       {/* Form Selection */}
       <Field>
-        <FieldLabel>Ycode Form</FieldLabel>
+        <FieldLabel>Webwow Form</FieldLabel>
         {isLoadingForms ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground py-1">
             <Spinner /> Loading forms...

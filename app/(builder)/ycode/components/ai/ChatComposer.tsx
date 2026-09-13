@@ -297,7 +297,8 @@ export default function ChatComposer({
     extensions: [
       StarterKit.configure({ heading: false }),
       Placeholder.configure({
-        placeholder: 'Ask Ycode...',
+        // Webwow: white-label fork.
+        placeholder: 'Ask Webwow...',
       }),
       LayerMentionWithView,
     ],

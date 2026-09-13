@@ -459,7 +459,7 @@ export default function StaticExportSettings() {
               <FieldLabel htmlFor="github-author-name">Commit Author Name (optional)</FieldLabel>
               <Input
                 id="github-author-name"
-                placeholder="Ycode Static Export"
+                placeholder="Webwow Static Export"
                 value={config.githubAuthorName}
                 onChange={(e) => updateConfig({ githubAuthorName: e.target.value })}
                 className="text-xs"
@@ -470,7 +470,7 @@ export default function StaticExportSettings() {
               <FieldLabel htmlFor="github-author-email">Commit Author Email (optional)</FieldLabel>
               <Input
                 id="github-author-email"
-                placeholder="static-export@ycode.local"
+                placeholder="static-export@webwow.local"
                 value={config.githubAuthorEmail}
                 onChange={(e) => updateConfig({ githubAuthorEmail: e.target.value })}
                 className="font-mono text-xs"

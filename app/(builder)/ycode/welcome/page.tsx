@@ -182,12 +182,13 @@ export default function WelcomePage() {
               />
             </svg>
 
+            {/* Webwow: white-label fork - the setup wizard greets with the fork's name. */}
             <Label
               className="animate-in fade-in slide-in-from-bottom-1 duration-700"
               size="sm"
               style={{ animationDelay: '2500ms', animationFillMode: 'both' }}
             >
-              Welcome to Ycode
+              Welcome to Webwow
             </Label>
             <Label
               variant="muted"

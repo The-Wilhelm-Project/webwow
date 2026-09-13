@@ -420,7 +420,7 @@ export function registerLocaleTools(server: McpServer) {
   server.tool(
     'set_rich_text_translation',
     `Translate a rich-text content key by passing structured blocks. The blocks are converted
-to the Tiptap JSON shape that Ycode expects for richtext translations and stored as
+to the Tiptap JSON shape that Webwow expects for richtext translations and stored as
 content_value. Equivalent to calling set_translation with content_type "richtext" but the
 agent doesn't have to assemble the JSON by hand.
 

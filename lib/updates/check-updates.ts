@@ -122,7 +122,7 @@ export async function checkForUpdates(currentVersion: string): Promise<CheckUpda
           'Click the <strong class="text-white">"Sync fork"</strong> button (above the file list)',
           'Click <strong class="text-white">"Update branch"</strong>',
           'Vercel will automatically redeploy with the latest changes',
-          '⚠️ Please reload this page (Ycode builder) after deployment to apply the latest migrations',
+          '⚠️ Please reload this page (Webwow builder) after deployment to apply the latest migrations',
         ];
       } else {
         updateMethod = 'git-pull';
@@ -137,7 +137,7 @@ export async function checkForUpdates(currentVersion: string): Promise<CheckUpda
           `Merge updates:<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git merge upstream/main</code>`,
           `Push to your repo:<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git push origin main</code>`,
           'Vercel will automatically redeploy',
-          '⚠️ Please reload this page (Ycode builder) after deployment to apply the latest migrations',
+          '⚠️ Please reload this page (Webwow builder) after deployment to apply the latest migrations',
         ];
       }
     } else {

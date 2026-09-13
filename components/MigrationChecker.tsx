@@ -14,6 +14,25 @@ interface MigrationCheckerProps {
   onComplete: () => void;
 }
 
+/**
+ * Webwow: read a response without assuming JSON. A proxy or a 500 HTML error page
+ * would otherwise blow up on `response.json()` with `Unexpected token '<'`.
+ */
+async function parseResponseSafely(response: Response): Promise<Record<string, unknown>> {
+  const contentType = response.headers.get('content-type') || '';
+  const rawText = await response.text();
+
+  if (contentType.includes('application/json')) {
+    try {
+      return JSON.parse(rawText);
+    } catch {
+      return { error: rawText || 'Invalid JSON response' };
+    }
+  }
+
+  return { error: rawText || `HTTP ${response.status}: ${response.statusText}` };
+}
+
 export default function MigrationChecker({ onComplete }: MigrationCheckerProps) {
   const [isChecking, setIsChecking] = useState(true);
   const [progress, setProgress] = useState('Checking database status...');
@@ -32,18 +51,17 @@ export default function MigrationChecker({ onComplete }: MigrationCheckerProps) 
       const response = await fetch('/ycode/api/setup/migrate', {
         method: 'POST',
       });
+      const result = await parseResponseSafely(response);
 
       if (!response.ok) {
         console.error('Migration request failed');
-        console.error(await response.json());
+        console.error(result);
         onComplete(); // Allow builder to load anyway
         return;
       }
 
-      const result = await response.json();
-
       if (result.error) {
-        setError(result.error);
+        setError(String(result.error));
         setIsChecking(false);
         return;
       }

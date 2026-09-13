@@ -82,7 +82,7 @@ export default function ConsentForm(props: ConsentFormProps) {
         <div className="text-sm text-white/80 leading-relaxed">
           <p>
             <span className="font-medium text-white">{props.clientName}</span> is requesting
-            access to your YCode project through the Model Context Protocol.
+            access to your Webwow project through the Model Context Protocol.
           </p>
           <p className="mt-3 text-white/60">
             If you approve, this application will be able to read and modify your pages,

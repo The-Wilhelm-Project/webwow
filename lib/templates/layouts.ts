@@ -2,6 +2,14 @@
  * Layout Templates
  *
  * Pre-built combinations of layers with styles
+ *
+ * Webwow: the sample copy in the blog-card and FAQ layouts advertised Ycode, and the
+ * header/footer layouts embedded the ycode wordmark. Inserting such a layout put that
+ * marketing text straight onto a user's page, so every `'text': '...Ycode...'` value was
+ * rewritten to Webwow (and public/ycode/layouts/assets/ycode-logo-black.svg now carries
+ * the Wilhelm mark). After an upstream sync, check with
+ *   grep -n "'text': '[^']*Ycode" lib/templates/layouts.ts
+ * and re-run the substitution on the hits (text values only, never keys or asset paths).
  */
 
 import { LayerTemplate } from '@/types';
@@ -13369,7 +13377,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'type': 'paragraph',
                                               'content': [
                                                 {
-                                                  'text': 'How to create a professional website in minutes with Ycode',
+                                                  'text': 'How to create a professional website in minutes with Webwow',
                                                   'type': 'text'
                                                 }
                                               ]
@@ -13979,7 +13987,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'type': 'paragraph',
                                               'content': [
                                                 {
-                                                  'text': 'The ultimate guide to building responsive websites using Ycode',
+                                                  'text': 'The ultimate guide to building responsive websites using Webwow',
                                                   'type': 'text'
                                                 }
                                               ]
@@ -14284,7 +14292,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'type': 'paragraph',
                                               'content': [
                                                 {
-                                                  'text': 'Building professional websites with Ycode in 5 steps',
+                                                  'text': 'Building professional websites with Webwow in 5 steps',
                                                   'type': 'text'
                                                 }
                                               ]
@@ -14784,7 +14792,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'type': 'paragraph',
                                               'content': [
                                                 {
-                                                  'text': 'How to create a professional website in minutes with Ycode',
+                                                  'text': 'How to create a professional website in minutes with Webwow',
                                                   'type': 'text'
                                                 }
                                               ]
@@ -15716,7 +15724,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           'type': 'paragraph',
                                           'content': [
                                             {
-                                              'text': 'How to create a professional website in minutes with Ycode',
+                                              'text': 'How to create a professional website in minutes with Webwow',
                                               'type': 'text'
                                             }
                                           ]
@@ -16371,7 +16379,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           'content': [
                                             {
                                               'type': 'text',
-                                              'text': 'The ultimate guide to building responsive websites using Ycode'
+                                              'text': 'The ultimate guide to building responsive websites using Webwow'
                                             }
                                           ]
                                         }
@@ -16968,7 +16976,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'type': 'paragraph',
                                               'content': [
                                                 {
-                                                  'text': 'How to create a professional website in minutes with Ycode',
+                                                  'text': 'How to create a professional website in minutes with Webwow',
                                                   'type': 'text'
                                                 }
                                               ]
@@ -18404,7 +18412,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'type': 'paragraph',
                                               'content': [
                                                 {
-                                                  'text': 'How to create a professional website in minutes with Ycode',
+                                                  'text': 'How to create a professional website in minutes with Webwow',
                                                   'type': 'text'
                                                 }
                                               ]
@@ -18870,7 +18878,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'content': [
                                                 {
                                                   'type': 'text',
-                                                  'text': 'The ultimate guide to building responsive websites using Ycode'
+                                                  'text': 'The ultimate guide to building responsive websites using Webwow'
                                                 }
                                               ]
                                             }
@@ -19431,7 +19439,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'type': 'paragraph',
                                               'content': [
                                                 {
-                                                  'text': 'How to create a professional website in minutes with Ycode',
+                                                  'text': 'How to create a professional website in minutes with Webwow',
                                                   'type': 'text'
                                                 }
                                               ]
@@ -20043,7 +20051,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                               'type': 'paragraph',
                                               'content': [
                                                 {
-                                                  'text': 'Building professional websites with Ycode in 5 steps',
+                                                  'text': 'Building professional websites with Webwow in 5 steps',
                                                   'type': 'text'
                                                 }
                                               ]
@@ -33518,7 +33526,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                     'content': [
                                       {
                                         'type': 'text',
-                                        'text': 'Ycode is a no-code platform that allows users to build fully responsive websites without writing code.'
+                                        'text': 'Webwow is a no-code platform that allows users to build fully responsive websites without writing code.'
                                       }
                                     ]
                                   }
@@ -33537,7 +33545,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                     'content': [
                                       {
                                         'type': 'text',
-                                        'text': 'What is Ycode?'
+                                        'text': 'What is Webwow?'
                                       }
                                     ]
                                   }
@@ -33809,7 +33817,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                     'content': [
                                       {
                                         'type': 'text',
-                                        'text': 'No, Ycode is designed for non-developers and does not require any coding experience to build and launch websites.'
+                                        'text': 'No, Webwow is designed for non-developers and does not require any coding experience to build and launch websites.'
                                       }
                                     ]
                                   }
@@ -33828,7 +33836,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                     'content': [
                                       {
                                         'type': 'text',
-                                        'text': 'Do I need coding knowledge to use Ycode?'
+                                        'text': 'Do I need coding knowledge to use Webwow?'
                                       }
                                     ]
                                   }
@@ -34100,7 +34108,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                     'content': [
                                       {
                                         'type': 'text',
-                                        'text': 'Yes, Ycode allows team collaboration for free! Enabling multiple users to work on the same project simultaneously.'
+                                        'text': 'Yes, Webwow allows team collaboration for free! Enabling multiple users to work on the same project simultaneously.'
                                       }
                                     ]
                                   }
@@ -34119,7 +34127,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                     'content': [
                                       {
                                         'type': 'text',
-                                        'text': 'Can I collaborate with a team on Ycode projects?'
+                                        'text': 'Can I collaborate with a team on Webwow projects?'
                                       }
                                     ]
                                   }

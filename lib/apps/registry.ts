@@ -70,20 +70,20 @@ export const apps: AppDefinition[] = [
   {
     id: 'airtable',
     name: 'Airtable',
-    description: 'One-way sync from Airtable tables to your Ycode collections with real-time webhook support.',
+    description: 'One-way sync from Airtable tables to your Webwow collections with real-time webhook support.',
     logo: airtableLogo,
     categories: ['popular', 'cms-data'],
     implemented: true,
-    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+    author: { name: 'Webwow', url: 'https://github.com/The-Wilhelm-Project/webwow' },
   },
   {
     id: 'webflow',
     name: 'Webflow',
-    description: 'Migrate Webflow CMS collections into Ycode and paste Webflow designs with global styles intact.',
+    description: 'Migrate Webflow CMS collections into Webwow and paste Webflow designs with global styles intact.',
     logo: webflowLogo,
     categories: ['popular', 'cms-data'],
     implemented: true,
-    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+    author: { name: 'Webwow', url: 'https://github.com/The-Wilhelm-Project/webwow' },
   },
   {
     id: 'mailerlite',
@@ -92,7 +92,7 @@ export const apps: AppDefinition[] = [
     logo: mailerliteLogo,
     categories: ['popular', 'email'],
     implemented: true,
-    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+    author: { name: 'Webwow', url: 'https://github.com/The-Wilhelm-Project/webwow' },
   },
   {
     id: 'mailchimp',
@@ -125,7 +125,7 @@ export const apps: AppDefinition[] = [
     logo: mapboxLogo,
     categories: ['popular', 'maps'],
     implemented: true,
-    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+    author: { name: 'Webwow', url: 'https://github.com/The-Wilhelm-Project/webwow' },
   },
   {
     id: 'google-maps-embed',
@@ -134,7 +134,7 @@ export const apps: AppDefinition[] = [
     logo: googleMapsEmbedLogo,
     categories: ['popular', 'maps'],
     implemented: true,
-    author: { name: 'Ycode', url: 'https://github.com/ycode/ycode' },
+    author: { name: 'Webwow', url: 'https://github.com/The-Wilhelm-Project/webwow' },
   },
   {
     id: 'static-export',

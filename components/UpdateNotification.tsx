@@ -68,8 +68,9 @@ export default function UpdateNotification() {
               />
             </svg>
             <div>
+              {/* Webwow: white-label fork - the update notice names the fork, not upstream. */}
               <p className="font-semibold">
-                🎉 New Ycode update available!
+                🎉 New Webwow update available!
               </p>
               <p className="text-sm text-blue-100">
                 Version {updateInfo.latestVersion} is now available (you have {updateInfo.currentVersion})

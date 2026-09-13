@@ -3,8 +3,11 @@ import type { Metadata } from 'next';
 import DarkModeProvider from '@/components/DarkModeProvider';
 import { htmlDirFromLang } from '@/lib/html-lang';
 
+// Webwow: white-label fork - the builder must not introduce itself as Ycode.
+// Only the title/description live here; they are the fallback for published pages
+// too, so brand icons, manifest and Open Graph stay in app/(builder)/layout.tsx.
 export const defaultMetadata: Metadata = {
-  title: 'Ycode - Visual Website Builder',
+  title: 'Webwow - Visual Website Builder',
   description: 'Self-hosted visual website builder',
 };
 

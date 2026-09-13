@@ -33,6 +33,9 @@ export default async function NotFound() {
     const globalSettings = await fetchGlobalPageSettings().catch(() => null);
     const { page, pageLayers, components } = errorPageData;
 
+    // Webwow: white-label fork - the "Made in Ycode" badge stays off unless a site
+    // explicitly enables it (upstream defaults a missing setting to on).
+
     return (
       <PageRenderer
         page={page}
@@ -42,15 +45,16 @@ export default async function NotFound() {
         colorVariablesCss={globalSettings?.colorVariablesCss || undefined}
         globalCustomCodeHead={globalSettings?.globalCustomCodeHead}
         globalCustomCodeBody={globalSettings?.globalCustomCodeBody}
-        ycodeBadge={globalSettings?.ycodeBadge ?? true}
+        ycodeBadge={globalSettings?.ycodeBadge ?? false}
       />
     );
   }
 
-  let showBadge = true;
+  // Webwow: white-label fork - see above, the badge defaults to off.
+  let showBadge = false;
   try {
     const setting = await getSettingByKey('ycode_badge');
-    showBadge = setting ?? true;
+    showBadge = setting ?? false;
   } catch {
     // Supabase not configured
   }

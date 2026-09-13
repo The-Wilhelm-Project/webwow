@@ -46,7 +46,7 @@ import {
   type ProjectExportData,
   type ProjectManifest,
 } from '@/lib/services/projectService';
-import type { CollectionFieldType, Layer } from '@/types';
+import type { Breakpoint, CollectionFieldType, FieldVariable, Layer, LayerInteraction } from '@/types';
 import type { WebflowImportPayload, WebflowImportResult } from '@/types/webwow';
 
 interface ParsedWebflowCsv {
@@ -73,6 +73,8 @@ interface NormalizedField {
   type: CollectionFieldType;
   order: number;
   referenceCollectionId: string | null;
+  /** Asset column holding several URLs per row (Webflow multi-image gallery). */
+  isMultiAsset: boolean;
 }
 
 interface ImportedAsset {
@@ -219,6 +221,46 @@ function inferAssetFieldType(urlOrPath: string): CollectionFieldType {
   if (AUDIO_EXTENSIONS.has(extension)) return 'audio';
   if (IMAGE_EXTENSIONS.has(extension)) return 'image';
   return 'document';
+}
+
+function isAssetFieldType(type: CollectionFieldType): boolean {
+  return type === 'image' || type === 'video' || type === 'audio' || type === 'document';
+}
+
+/**
+ * A Webflow multi-image column exports as one cell holding several URLs separated
+ * by `;` (or `,`). ycode's asset fields hold a single asset, so the importer keeps
+ * the first URL and flags the field so the binder can recognise a gallery list.
+ */
+function splitAssetUrls(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  const parts = trimmed.split(/[;,]\s*(?=https?:\/\/)/g).map(part => part.trim()).filter(Boolean);
+  return parts.length > 0 ? parts : [trimmed];
+}
+
+/**
+ * Webflow rich-text columns export as HTML. ycode's text fields render their value
+ * verbatim, so the markup would show up as literal `<p>` tags; flatten it to text
+ * with blank lines between blocks instead.
+ */
+function htmlToPlainText(value: string): string {
+  return value
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|li|ul|ol|blockquote)>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function looksLikeHtml(value: string): boolean {
+  return /<(p|div|h[1-6]|ul|ol|li|br|strong|em|span|a|img)\b[^>]*>/i.test(value);
 }
 
 function sanitizeCollectionName(name: string): string {
@@ -387,6 +429,37 @@ function registerAsset(
     storagePath,
     proxyUrl: getAssetProxyUrl({ id, filename: displayName, mime_type: mimeType, storage_path: storagePath }),
   };
+}
+
+/**
+ * An asset the importer could not fetch (a CMS image on a CDN this server cannot
+ * reach). No bytes are stored: the row keeps the original URL in `public_url` and
+ * leaves `storage_path` empty, which is exactly what `getAssetProxyUrl()` falls
+ * back on — so the image renders on any server that can reach the CDN, and the
+ * layout keeps a real asset reference instead of an empty field.
+ */
+function registerRemoteAsset(collector: AssetCollector, url: string): ImportedAsset {
+  const id = randomUUID();
+  let filename = 'asset';
+  try {
+    filename = path.basename(new URL(url).pathname) || 'asset';
+  } catch {
+    filename = path.basename(url) || 'asset';
+  }
+  const displayName = filename.replace(/\.[^/.]+$/, '') || filename;
+
+  collector.rows.push({
+    id,
+    source: 'webflow-import',
+    filename: displayName,
+    storage_path: null,
+    public_url: url,
+    file_size: null,
+    mime_type: inferMimeType(filename),
+    is_published: false,
+  });
+
+  return { id, storagePath: '', proxyUrl: url };
 }
 
 /**
@@ -654,7 +727,8 @@ function createFieldInlineVariableTag(
   fieldId: string,
   fieldType: CollectionFieldType,
   source: 'page' | 'collection',
-  collectionLayerId?: string
+  collectionLayerId?: string,
+  format?: string
 ): string {
   const variable: Record<string, unknown> = {
     type: 'field',
@@ -668,6 +742,9 @@ function createFieldInlineVariableTag(
 
   if (collectionLayerId) {
     (variable.data as Record<string, unknown>).collection_layer_id = collectionLayerId;
+  }
+  if (format) {
+    (variable.data as Record<string, unknown>).format = format;
   }
 
   return `<ycode-inline-variable>${JSON.stringify(variable)}</ycode-inline-variable>`;
@@ -705,6 +782,237 @@ function isLikelyDetailPageSlug(pageSlug: string): boolean {
   return slug.startsWith('detail-') || slug.includes('detail_') || slug.includes('/detail-');
 }
 
+/**
+ * ─── CMS binding ─────────────────────────────────────────────────────────────
+ *
+ * A Webflow static export carries no CMS values: every bound leaf is an empty
+ * `w-dyn-bind-empty` slot, every collection list holds exactly one template
+ * item and item links are `href="#"`. Which CSV column belongs in which slot has
+ * to be recovered from structure and names. The rules below are ported from the
+ * v2 pipeline (`lib/webwow/import/webflow-zip/binding.ts`):
+ *
+ *  1. Collection per list — a rich-text slot or a nested list narrows it to the
+ *     collection that has a rich-text / multi-image field; otherwise name
+ *     similarity (page name, wrapper classes, preceding heading, `work ~ Werke`),
+ *     then "same item template as an already bound list", then the largest
+ *     collection.
+ *  2. Field per slot, in this order — images and CMS-bound backgrounds to the
+ *     image field, the first heading to Name, rich text to the rich-text field,
+ *     then the remaining text slots: a class name or an adjacent label that
+ *     resembles a field name wins, otherwise the best-filled text-like columns in
+ *     CSV order. Columns that are empty in every row are never bound (that is
+ *     what made imported lists render blank rows).
+ *
+ * Every slot that is bound also loses its `w-dyn-bind-empty` class: Webflow's
+ * `components.css` carries `.w-dyn-bind-empty { display: none !important }`, so a
+ * bound-but-still-marked slot renders its value into a hidden box — the reason
+ * the imported exhibition rows looked empty.
+ */
+
+const CMS_TEXT_FIELD_TYPES = new Set<CollectionFieldType>([
+  'text', 'date', 'date_only', 'number', 'option', 'email', 'phone', 'link',
+]);
+const IMAGE_FIELD_NAME_RE = /werk|bild|image|cover|foto|photo|main/i;
+const ORDER_FIELD_NAME_RE = /order|reihenfolge|sort/i;
+const FEATURE_FIELD_NAME_RE = /feature|highlight/i;
+/** Webflow's placeholder for a background image that is bound to a CMS field. */
+const WEBFLOW_CMS_BACKGROUND_MARKER = 'background-image.svg';
+const CMS_NAME_SYNONYMS: Record<string, string[]> = {
+  work: ['werke', 'works', 'arbeiten'],
+  exhibitions: ['ausstellungen'],
+  artist: ['kuenstler', 'artists'],
+};
+
+function normaliseName(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/ß/g, 'ss')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+function similarity(a: string, b: string): number {
+  const x = normaliseName(a);
+  const y = normaliseName(b);
+  if (!x || !y) return 0;
+  return 1 - levenshtein(x, y) / Math.max(x.length, y.length);
+}
+
+function synonymsOf(value: string): string[] {
+  const normalized = normaliseName(value);
+  const out = new Set<string>([normalized]);
+  for (const [key, list] of Object.entries(CMS_NAME_SYNONYMS)) {
+    const group = [key, ...list].map(normaliseName);
+    if (group.includes(normalized)) for (const entry of group) out.add(entry);
+  }
+  return [...out];
+}
+
+function nameSimilarity(a: string, b: string): number {
+  let best = 0;
+  for (const x of synonymsOf(a)) for (const y of synonymsOf(b)) best = Math.max(best, similarity(x, y));
+  return best;
+}
+
+function phraseSimilarity(phrase: string, name: string): number {
+  const words = phrase.split(/[\s_-]+/).filter(word => word.length >= 3);
+  return Math.max(nameSimilarity(phrase, name), ...words.map(word => nameSimilarity(word, name)), 0);
+}
+
+function stripTrailingDigits(className: string): string {
+  return className.replace(/[-_]?\d+$/g, '').replace(/[-_]+/g, ' ').trim();
+}
+
+interface LayerIndex {
+  nodes: Layer[];
+  parent: Map<string, Layer>;
+}
+
+function indexLayerTree(layers: Layer[]): LayerIndex {
+  const nodes: Layer[] = [];
+  const parent = new Map<string, Layer>();
+  const walk = (list: Layer[], parentLayer?: Layer) => {
+    for (const layer of list) {
+      nodes.push(layer);
+      if (parentLayer) parent.set(layer.id, parentLayer);
+      if (layer.children?.length) walk(layer.children, layer);
+    }
+  };
+  walk(layers);
+  return { nodes, parent };
+}
+
+function layerAncestors(layer: Layer, index: LayerIndex): Layer[] {
+  const out: Layer[] = [];
+  let current = index.parent.get(layer.id);
+  while (current) {
+    out.push(current);
+    current = index.parent.get(current.id);
+  }
+  return out;
+}
+
+/** Pre-order descendants; subtrees matching `stopAt` are skipped (their root optionally kept). */
+function layerDescendants(
+  layer: Layer,
+  stopAt?: (candidate: Layer) => boolean,
+  includeStop = false
+): Layer[] {
+  const out: Layer[] = [];
+  const walk = (list: Layer[]) => {
+    for (const child of list) {
+      if (stopAt?.(child)) {
+        if (includeStop) out.push(child);
+        continue;
+      }
+      out.push(child);
+      if (child.children?.length) walk(child.children);
+    }
+  };
+  walk(layer.children || []);
+  return out;
+}
+
+function firstLayerDescendant(layer: Layer, predicate: (candidate: Layer) => boolean): Layer | undefined {
+  for (const child of layer.children || []) {
+    if (predicate(child)) return child;
+    const found = firstLayerDescendant(child, predicate);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function tiptapPlainText(node: unknown): string {
+  if (!node || typeof node !== 'object') return '';
+  const typed = node as { text?: unknown; content?: unknown };
+  let out = typeof typed.text === 'string' ? typed.text : '';
+  if (Array.isArray(typed.content)) {
+    for (const child of typed.content) out += tiptapPlainText(child);
+  }
+  return out;
+}
+
+function layerPlainText(layer: Layer): string {
+  const content = (layer.variables?.text as { data?: { content?: unknown } } | undefined)?.data?.content;
+  if (typeof content === 'string') return content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (content) return tiptapPlainText(content).replace(/\s+/g, ' ').trim();
+  return '';
+}
+
+function layerTagName(layer: Layer): string {
+  const tag = layer.settings?.tag;
+  if (typeof tag === 'string' && tag) return tag.toLowerCase();
+  const name = String(layer.name || 'div').toLowerCase();
+  if (name === 'image') return 'img';
+  if (SAFE_HTML_TAGS.has(name)) return name;
+  return 'div';
+}
+
+function isBindEmptySlot(layer: Layer): boolean {
+  return layerHasClassToken(layer, 'w-dyn-bind-empty');
+}
+
+function isDynListLayer(layer: Layer): boolean {
+  return layerHasClassToken(layer, 'w-dyn-list');
+}
+
+function isDynItemLayer(layer: Layer): boolean {
+  return layerHasClassToken(layer, 'w-dyn-item');
+}
+
+/**
+ * Class groups whose CSS rule paints Webflow's CMS background placeholder
+ * (`…/img/background-image.svg`). Inside a collection item such an element is a
+ * CMS-bound background image, not a decorative one — Webflow binds the field to
+ * `background-image`, so there is no `<img>` and no `w-dyn-bind-empty` marker.
+ */
+function extractCmsBackgroundClassGroups(
+  cssFiles: Array<{ filePath: string; content: string }>
+): string[][] {
+  const groups: string[][] = [];
+  const seen = new Set<string>();
+  for (const file of cssFiles) {
+    for (const match of file.content.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      const body = match[2];
+      if (!/background(-image)?\s*:/.test(body) || !body.includes(WEBFLOW_CMS_BACKGROUND_MARKER)) continue;
+      const selectorList = (match[1].split('{').pop() || '').trim();
+      for (const selector of selectorList.split(',')) {
+        const trimmed = selector.trim();
+        if (!/^(\.[A-Za-z0-9_-]+)+$/.test(trimmed)) continue;
+        const tokens = trimmed.split('.').filter(Boolean);
+        const key = tokens.join('.');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        groups.push(tokens);
+      }
+    }
+  }
+  return groups;
+}
+
+function hasCmsBackground(layer: Layer, groups: string[][]): boolean {
+  if (groups.length === 0) return false;
+  const tokens = new Set(classTokens(layer));
+  if (tokens.size === 0) return false;
+  return groups.some(group => group.every(token => tokens.has(token)));
+}
+
 function getCollectionFields(
   collectionId: string,
   fields: NormalizedField[]
@@ -714,300 +1022,546 @@ function getCollectionFields(
     .sort((a, b) => a.order - b.order);
 }
 
-function getPreferredTextFields(fields: NormalizedField[]): NormalizedField[] {
-  const allowed = new Set<CollectionFieldType>(['text', 'number', 'date', 'rich_text']);
-  const nameField = fields.find(field => field.key === 'name');
-  const rest = fields.filter(
-    field =>
-      field !== nameField
-      && allowed.has(field.type)
-      && field.key !== 'slug'
-  );
-
-  return nameField ? [nameField, ...rest] : rest;
+function customCollectionFields(fields: NormalizedField[]): NormalizedField[] {
+  return fields.filter(field => field.key === null);
 }
 
-function bindDynamicItemTemplate(
-  layer: Layer,
-  textFields: NormalizedField[],
-  imageField: NormalizedField | null,
-  detailPageId: string | null,
-  collectionLayerId: string,
-  textFieldIndexRef: { index: number }
-): Layer {
-  let updated: Layer = { ...layer };
+function fieldFillRatio(collection: NormalizedCollection, field: NormalizedField): number {
+  if (collection.rows.length === 0) return 0;
+  let filled = 0;
+  for (const row of collection.rows) {
+    if ((row[field.csvHeader] || '').trim()) filled++;
+  }
+  return filled / collection.rows.length;
+}
 
-  if (detailPageId && updated.settings?.tag === 'a') {
-    updated = {
-      ...updated,
-      variables: {
-        ...updated.variables,
+function singleImageFieldOf(fields: NormalizedField[]): NormalizedField | undefined {
+  const images = customCollectionFields(fields).filter(field => field.type === 'image' && !field.isMultiAsset);
+  return images.find(field => IMAGE_FIELD_NAME_RE.test(field.name)) || images[0];
+}
+
+function multiImageFieldOf(fields: NormalizedField[]): NormalizedField | undefined {
+  return customCollectionFields(fields).find(field => field.type === 'image' && field.isMultiAsset);
+}
+
+function anyImageFieldOf(fields: NormalizedField[]): NormalizedField | undefined {
+  return singleImageFieldOf(fields) || multiImageFieldOf(fields);
+}
+
+interface BindScope {
+  source: 'page' | 'collection';
+  collection: NormalizedCollection;
+  fields: NormalizedField[];
+  used: Set<string>;
+  collectionLayerId?: string;
+  detailPageId: string | null;
+  cmsBackgroundGroups: string[][];
+  index: LayerIndex;
+  label: string;
+  warnings: string[];
+}
+
+function fieldBindingFor(field: NormalizedField, scope: BindScope) {
+  const data: Record<string, unknown> = {
+    field_id: field.id,
+    field_type: field.type,
+    relationships: [] as string[],
+    source: scope.source,
+  };
+  if (scope.collectionLayerId) data.collection_layer_id = scope.collectionLayerId;
+  if (field.type === 'date' || field.type === 'date_only') data.format = 'date-eu-dot';
+  return { type: 'field' as const, data } as unknown as FieldVariable;
+}
+
+function dropBindEmptyClass(layer: Layer): void {
+  const tokens = classTokens(layer).filter(token => token !== 'w-dyn-bind-empty');
+  layer.classes = tokens.join(' ');
+}
+
+function bindTextSlot(layer: Layer, field: NormalizedField, scope: BindScope): void {
+  dropBindEmptyClass(layer);
+  const tag = layerTagName(layer);
+  layer.name = 'text';
+  layer.restrictions = { ...(layer.restrictions || {}), editText: true };
+  layer.settings = { ...(layer.settings || {}), tag };
+  layer.variables = {
+    ...(layer.variables || {}),
+    text: {
+      type: 'dynamic_text',
+      data: {
+        content: createFieldInlineVariableTag(
+          field.id,
+          field.type,
+          scope.source,
+          scope.collectionLayerId,
+          field.type === 'date' || field.type === 'date_only' ? 'date-eu-dot' : undefined
+        ),
+      },
+    },
+  } as Layer['variables'];
+  layer.children = undefined;
+  scope.used.add(field.id);
+}
+
+function bindImageSlot(layer: Layer, field: NormalizedField, scope: BindScope): void {
+  dropBindEmptyClass(layer);
+  const existingAlt = (layer.variables?.image as { alt?: unknown } | undefined)?.alt;
+  layer.name = 'image';
+  layer.settings = { ...(layer.settings || {}), tag: 'img' };
+  layer.variables = {
+    ...(layer.variables || {}),
+    image: {
+      src: fieldBindingFor(field, scope),
+      alt: (existingAlt || { type: 'dynamic_text', data: { content: '' } }),
+    },
+  } as Layer['variables'];
+  layer.children = undefined;
+  scope.used.add(field.id);
+}
+
+/**
+ * A CMS-bound background. The resolved URL travels as the `--bg-img` custom
+ * property, which only paints where something reads it — so the rule is written
+ * into the layer's own inline style, where it also outranks the site CSS rule
+ * that still points at Webflow's placeholder SVG.
+ */
+function bindBackgroundSlot(layer: Layer, field: NormalizedField, scope: BindScope): void {
+  layer.variables = {
+    ...(layer.variables || {}),
+    backgroundImage: { src: fieldBindingFor(field, scope) },
+  } as Layer['variables'];
+  const existingStyle = (layer.attributes?.style as string | undefined) || '';
+  if (!/background-image\s*:\s*var\(--bg-img\)/.test(existingStyle)) {
+    layer.attributes = {
+      ...(layer.attributes || {}),
+      style: `${existingStyle ? `${existingStyle.replace(/;\s*$/, '')}; ` : ''}background-image: var(--bg-img)`,
+    };
+  }
+  scope.used.add(field.id);
+}
+
+/**
+ * The collection item's own root carries the bound background on some templates
+ * (Webflow's "Featured painting" block). A field variable sitting on that root is
+ * never resolved — `injectCollectionData` only walks the item's children, so the
+ * published page falls back to ycode's grey placeholder. The binding therefore
+ * goes onto an inserted, absolutely positioned first child that covers the root.
+ */
+function addBackgroundFillerChild(itemRoot: Layer, field: NormalizedField, scope: BindScope): void {
+  const filler: Layer = {
+    id: randomUUID(),
+    name: 'div',
+    classes: 'absolute inset-0 bg-cover bg-center pointer-events-none',
+    attributes: { style: 'background-image: var(--bg-img)' },
+    variables: { backgroundImage: { src: fieldBindingFor(field, scope) } } as Layer['variables'],
+    children: [],
+  };
+  if (!classTokens(itemRoot).includes('relative')) {
+    itemRoot.classes = `${getLayerClasses(itemRoot)} relative`.trim();
+  }
+  itemRoot.children = [filler, ...(itemRoot.children || [])];
+  scope.used.add(field.id);
+}
+
+/** Text-like candidates: Name first, then filled custom columns (fill ratio desc, CSV order). */
+function textFieldCandidates(scope: BindScope): NormalizedField[] {
+  const out: NormalizedField[] = [];
+  const nameField = scope.fields.find(field => field.key === 'name');
+  if (nameField && !scope.used.has(nameField.id)) out.push(nameField);
+  const custom = customCollectionFields(scope.fields)
+    .filter(field => CMS_TEXT_FIELD_TYPES.has(field.type) && !scope.used.has(field.id))
+    .map((field, order) => ({ field, order, ratio: fieldFillRatio(scope.collection, field) }))
+    .filter(entry => entry.ratio > 0)
+    .sort((a, b) => b.ratio - a.ratio || a.order - b.order)
+    .map(entry => entry.field);
+  return [...out, ...custom];
+}
+
+/** Class names plus an adjacent literal label ("Order:") — hints for which field a slot wants. */
+function slotFieldHints(layer: Layer, scope: BindScope): string[] {
+  const hints = classTokens(layer)
+    .filter(token => !token.startsWith('w-'))
+    .map(stripTrailingDigits)
+    .filter(Boolean);
+  const parent = scope.index.parent.get(layer.id);
+  const siblings = parent?.children || [];
+  const position = siblings.indexOf(layer);
+  for (let i = position - 1; i >= 0 && i >= position - 2; i--) {
+    const text = layerPlainText(siblings[i]) || (siblings[i].children || []).map(layerPlainText).join(' ').trim();
+    if (text && text.length <= 24) hints.push(text.replace(/[:：]\s*$/, '').trim());
+  }
+  return hints.filter(Boolean);
+}
+
+function bindSlots(roots: Layer[], scope: BindScope): void {
+  const nodes: Layer[] = [];
+  for (const root of roots) {
+    if (isDynListLayer(root)) nodes.push(root);
+    else nodes.push(root, ...layerDescendants(root, isDynListLayer, true));
+  }
+
+  const imageField = anyImageFieldOf(scope.fields);
+  const nameField = scope.fields.find(field => field.key === 'name');
+  const itemRoot = scope.source === 'collection' ? roots[0] : undefined;
+
+  // 1. <img> slots and CMS-bound backgrounds -> the collection's image field.
+  for (const node of nodes) {
+    if (String(node.name) === 'image' && isBindEmptySlot(node)) {
+      if (imageField) bindImageSlot(node, imageField, scope);
+    } else if (String(node.name) !== 'image' && hasCmsBackground(node, scope.cmsBackgroundGroups)) {
+      if (!imageField) continue;
+      if (node === itemRoot) addBackgroundFillerChild(node, imageField, scope);
+      else bindBackgroundSlot(node, imageField, scope);
+    }
+  }
+
+  // 1b. A nested list inside an item is Webflow's gallery over a multi-image
+  //     column; ycode holds one asset per field, so its single template item
+  //     shows the first image.
+  for (const node of nodes) {
+    if (!isDynListLayer(node) || node === roots[0]) continue;
+    const nestedItem = firstLayerDescendant(node, isDynItemLayer);
+    if (!nestedItem || !imageField) continue;
+    for (const inner of [nestedItem, ...layerDescendants(nestedItem)]) {
+      if (String(inner.name) === 'image' && isBindEmptySlot(inner)) {
+        bindImageSlot(inner, imageField, scope);
+      }
+    }
+  }
+
+  // 2. The first heading slot -> Name.
+  let nameBound = false;
+  for (const node of nodes) {
+    if (!isBindEmptySlot(node) || !/^h[1-6]$/.test(layerTagName(node))) continue;
+    if (nameField && !nameBound) {
+      bindTextSlot(node, nameField, scope);
+      nameBound = true;
+    }
+  }
+
+  // 3. Rich text slots -> the rich-text field when the collection has one.
+  const richField = customCollectionFields(scope.fields).find(field => field.type === 'rich_text');
+  for (const node of nodes) {
+    if (!isBindEmptySlot(node) || !layerHasClassToken(node, 'w-richtext')) continue;
+    if (richField) bindTextSlot(node, richField, scope);
+  }
+
+  // 4. Remaining text slots.
+  for (const node of nodes) {
+    if (!isBindEmptySlot(node)) continue;
+    if (String(node.name) === 'image') continue;
+    let chosen: NormalizedField | undefined;
+    let bestScore = 0;
+    for (const hint of slotFieldHints(node, scope)) {
+      for (const field of customCollectionFields(scope.fields)) {
+        if (scope.used.has(field.id) || !CMS_TEXT_FIELD_TYPES.has(field.type)) continue;
+        if (fieldFillRatio(scope.collection, field) === 0) continue;
+        const score = phraseSimilarity(hint, field.name);
+        if (score >= 0.7 && score > bestScore) {
+          chosen = field;
+          bestScore = score;
+        }
+      }
+    }
+    if (!chosen) {
+      const candidates = textFieldCandidates(scope).filter(field => nameBound ? field.key !== 'name' : true);
+      chosen = candidates[0];
+    }
+    if (!chosen) continue;
+    bindTextSlot(node, chosen, scope);
+    if (chosen.key === 'name') nameBound = true;
+  }
+
+  // 5. Placeholder links (href="#") inside an item -> that item's detail page.
+  if (scope.source === 'collection' && scope.detailPageId) {
+    for (const node of nodes) {
+      if (layerTagName(node) !== 'a') continue;
+      const href = ((node.variables?.link as { url?: { data?: { content?: string } } } | undefined)?.url?.data?.content || '').trim();
+      if (href && href !== '#') continue;
+      node.variables = {
+        ...(node.variables || {}),
         link: {
           type: 'page',
-          page: {
-            id: detailPageId,
-            collection_item_id: 'current-collection',
-          },
+          page: { id: scope.detailPageId, collection_item_id: 'current-collection' },
         },
-      },
-    };
-  }
-
-  const isImageCandidate = imageField && (
-    (updated.name === 'image' && layerHasClass(updated, 'w-dyn-bind-empty'))
-    || (updated.name === 'image')
-    || (updated.name === 'div' && !updated.children?.length && !layerHasClass(updated, 'w-dyn-bind-empty')
-        && !layerHasClass(updated, 'w-dyn-empty') && !layerHasClass(updated, 'w-dyn-items')
-        && !layerHasClass(updated, 'w-dyn-list'))
-  );
-
-  if (isImageCandidate && imageField) {
-    const existingImage = updated.variables?.image;
-    const fieldBinding = {
-      type: 'field' as const,
-      data: {
-        field_id: imageField.id,
-        field_type: imageField.type,
-        relationships: [] as string[],
-        source: 'collection' as const,
-        collection_layer_id: collectionLayerId,
-      },
-    };
-
-    if (updated.name === 'image') {
-      updated = {
-        ...updated,
-        variables: {
-          ...updated.variables,
-          image: {
-            ...(existingImage || {}),
-            src: fieldBinding,
-            alt: existingImage?.alt || {
-              type: 'dynamic_text',
-              data: { content: '' },
-            },
-          },
-        },
-      };
-    } else {
-      updated = {
-        ...updated,
-        name: 'image',
-        settings: { ...(updated.settings || {}), tag: 'img' },
-        variables: {
-          ...updated.variables,
-          image: {
-            src: fieldBinding,
-            alt: { type: 'dynamic_text', data: { content: '' } },
-          },
-        },
-      };
-    }
-  } else if (updated.name === 'div' && layerHasClass(updated, 'w-dyn-bind-empty')) {
-    const nextTextField = textFields[textFieldIndexRef.index];
-    if (nextTextField) {
-      textFieldIndexRef.index += 1;
-      updated = {
-        ...updated,
-        name: 'text',
-        restrictions: {
-          ...updated.restrictions,
-          editText: true,
-        },
-        settings: {
-          ...(updated.settings || {}),
-          tag: 'div',
-        },
-        variables: {
-          ...updated.variables,
-          text: {
-            type: 'dynamic_text',
-            data: {
-              content: createFieldInlineVariableTag(
-                nextTextField.id,
-                nextTextField.type,
-                'collection',
-                collectionLayerId
-              ),
-            },
-          },
-        },
-        children: undefined,
-      };
+      } as Layer['variables'];
     }
   }
-
-  if (updated.children?.length) {
-    updated = {
-      ...updated,
-      children: updated.children.map(child =>
-        bindDynamicItemTemplate(
-          child,
-          textFields,
-          imageField,
-          detailPageId,
-          collectionLayerId,
-          textFieldIndexRef
-        )
-      ),
-    };
-  }
-
-  return updated;
 }
 
-function bindCollectionLayersForPage(
-  layers: Layer[],
-  collectionId: string,
-  fields: NormalizedField[],
-  detailPageId: string | null,
-  limit?: number
-): Layer[] {
-  const collectionFields = getCollectionFields(collectionId, fields);
-  const textFields = getPreferredTextFields(collectionFields);
-  const imageField = collectionFields.find(field => field.type === 'image') || null;
+interface CollectionChoice {
+  collection: NormalizedCollection;
+  confidence: number;
+  reason: string;
+}
 
-  const processLayer = (layer: Layer): Layer => {
-    let updated: Layer = { ...layer };
+interface ListEntry {
+  pageName: string;
+  /** Collection this page is the detail page of, when it is one. */
+  detailCollectionId?: string;
+  index: LayerIndex;
+  list: Layer;
+  item: Layer;
+  heading?: string;
+  wrapperClasses: string[];
+  signature: string;
+  choice: CollectionChoice | null;
+  /** Collection the list was bound to (set once the choice is applied). */
+  boundCollectionId?: string;
+}
 
-    // Webflow toggles empty states via runtime JS.
-    // We do not execute Webflow JS, so hide this block by default.
-    if (layerHasClass(updated, 'w-dyn-empty')) {
-      const currentClasses = getLayerClasses(updated);
-      const hasHidden = currentClasses.split(/\s+/).includes('hidden');
-      updated = {
-        ...updated,
-        classes: hasHidden ? currentClasses : `${currentClasses} hidden`.trim(),
-      };
+/** How many items a "related items" list on a detail page shows. */
+const RELATED_LIST_LIMIT = 3;
+
+/** Site classes of the item and its first two descendants — the template's identity across pages. */
+function itemTemplateSignature(item: Layer): string {
+  return [item, ...layerDescendants(item).slice(0, 2)]
+    .map(layer => `${layerTagName(layer)}:${classTokens(layer).filter(token => !token.startsWith('w-')).join('.')}`)
+    .join('|');
+}
+
+function precedingHeadingText(index: LayerIndex, list: Layer): string | undefined {
+  const position = index.nodes.indexOf(list);
+  const inside = new Set(layerDescendants(list).map(layer => layer.id));
+  for (let i = position - 1; i >= 0; i--) {
+    const node = index.nodes[i];
+    if (inside.has(node.id)) continue;
+    if (!/^h[1-6]$/.test(layerTagName(node))) continue;
+    const text = layerPlainText(node);
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function chooseCollectionForList(
+  entry: ListEntry,
+  collections: NormalizedCollection[],
+  fieldsByCollection: Map<string, NormalizedField[]>
+): CollectionChoice | null {
+  if (collections.length === 0) return null;
+
+  const inner = layerDescendants(entry.item);
+  if (inner.some(node => layerHasClassToken(node, 'w-richtext'))) {
+    const withRich = collections.filter(collection =>
+      customCollectionFields(fieldsByCollection.get(collection.id) || []).some(field => field.type === 'rich_text'));
+    if (withRich.length === 1) {
+      return { collection: withRich[0], confidence: 0.8, reason: 'template has a rich-text slot and only this collection has a rich-text field' };
     }
-
-    if (layerHasClass(updated, 'w-dyn-item')) {
-      const collectionLayerId = updated.id;
-      const textFieldIndexRef = { index: 0 };
-
-      updated = {
-        ...updated,
-        variables: {
-          ...updated.variables,
-          collection: {
-            id: collectionId,
-            sort_by: 'manual',
-            sort_order: 'asc',
-            ...(typeof limit === 'number' ? { limit } : {}),
-          },
-        },
-        children: (updated.children || []).map(child =>
-          bindDynamicItemTemplate(
-            child,
-            textFields,
-            imageField,
-            detailPageId,
-            collectionLayerId,
-            textFieldIndexRef
-          )
-        ),
-      };
-
-      return updated;
+  }
+  if (inner.some(isDynListLayer)) {
+    const withMulti = collections.filter(collection => multiImageFieldOf(fieldsByCollection.get(collection.id) || []));
+    if (withMulti.length === 1) {
+      return { collection: withMulti[0], confidence: 0.8, reason: 'template has a nested list and only this collection has a multi-image field' };
     }
+  }
 
-    if (updated.children?.length) {
-      updated = {
-        ...updated,
-        children: updated.children.map(processLayer),
-      };
+  const candidates = [entry.pageName, ...entry.wrapperClasses.map(stripTrailingDigits), entry.heading || ''];
+  let best: { collection: NormalizedCollection; score: number; via: string } | null = null;
+  for (const collection of collections) {
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const score = phraseSimilarity(candidate, collection.name);
+      if (score >= 0.6 && (!best || score > best.score)) best = { collection, score, via: candidate };
     }
+  }
+  if (best) {
+    return { collection: best.collection, confidence: 0.7, reason: `"${best.via}" ~ collection "${best.collection.name}"` };
+  }
 
-    return updated;
-  };
+  const largest = [...collections].sort((a, b) => b.rows.length - a.rows.length)[0];
+  return { collection: largest, confidence: 0.5, reason: `fallback: largest collection (${largest.rows.length} items)` };
+}
 
-  return layers.map(processLayer);
+/** Sorting, the "Featured" filter and its limit, read off the list's own class names. */
+function listCollectionSettings(
+  entry: ListEntry,
+  fields: NormalizedField[]
+): Record<string, unknown> {
+  const custom = customCollectionFields(fields);
+  // Only the list's OWN classes decide the filter — a parent called
+  // `.feature-block` must not silently filter the works list down to the
+  // featured ones.
+  const ownClasses = classTokens(entry.list).filter(token => !token.startsWith('w-'));
+  const settings: Record<string, unknown> = { sort_by: 'manual', sort_order: 'asc' };
+
+  const orderField = custom.find(field => field.type === 'number' && ORDER_FIELD_NAME_RE.test(field.name));
+  if (orderField) {
+    settings.sort_by = orderField.id;
+    settings.sort_order = 'asc';
+  }
+
+  // "More from this collection" on a detail page is a teaser, not the archive.
+  if (entry.detailCollectionId && entry.detailCollectionId === entry.boundCollectionId) {
+    settings.limit = RELATED_LIST_LIMIT;
+  }
+
+  if (ownClasses.some(token => FEATURE_FIELD_NAME_RE.test(token))) {
+    const flag = custom.find(field => field.type === 'boolean' && FEATURE_FIELD_NAME_RE.test(field.name));
+    if (flag) {
+      settings.filters = {
+        groups: [{
+          id: randomUUID(),
+          conditions: [{
+            id: randomUUID(),
+            source: 'collection_field',
+            fieldId: flag.id,
+            fieldType: 'boolean',
+            operator: 'is',
+            value: 'true',
+          }],
+        }],
+      };
+      if (ownClasses.includes('feature')) settings.limit = 1;
+    }
+  }
+
+  return settings;
+}
+
+/** Webflow shows `.w-dyn-empty` only while a list is empty; ours never is. */
+function hideEmptyStates(layers: Layer[]): void {
+  for (const layer of indexLayerTree(layers).nodes) {
+    if (!layerHasClassToken(layer, 'w-dyn-empty')) continue;
+    if (layerHasClassToken(layer, 'hidden')) continue;
+    layer.classes = `${getLayerClasses(layer)} hidden`.trim();
+  }
 }
 
 function enhancePagesWithCmsBindings(
   builtPages: BuiltPageEntry[],
   collections: NormalizedCollection[],
-  fields: NormalizedField[]
+  fields: NormalizedField[],
+  cmsBackgroundGroups: string[][],
+  warnings: string[]
 ): BuiltPageEntry[] {
   const pages = builtPages.map(entry => ({
     page: { ...entry.page },
     pageLayers: { ...entry.pageLayers },
   }));
+  if (collections.length === 0) return pages;
+
+  const fieldsByCollection = new Map<string, NormalizedField[]>();
+  for (const collection of collections) {
+    fieldsByCollection.set(collection.id, getCollectionFields(collection.id, fields));
+  }
 
   const detailPageIdByCollectionId = new Map<string, string>();
-  const dynamicPageCollectionBySlug = new Map<string, string>();
+  const detailCollectionIdByPageId = new Map<string, string>();
 
-  // Pass 1: Mark dynamic detail pages and assign CMS settings
+  // Pass 1: dynamic detail pages — mark them, then bind their page-level slots.
   for (const entry of pages) {
     const pageSlug = String(entry.page.slug || '');
     const collection = inferCollectionForPageSlug(pageSlug, collections);
-    if (!collection || !isLikelyDetailPageSlug(pageSlug)) {
-      continue;
-    }
+    if (!collection || !isLikelyDetailPageSlug(pageSlug)) continue;
 
-    const collectionFields = getCollectionFields(collection.id, fields);
+    const collectionFields = fieldsByCollection.get(collection.id) || [];
     const slugField = collectionFields.find(field => field.key === 'slug')
       || collectionFields.find(field => field.name.trim().toLowerCase() === 'slug');
-
-    if (!slugField) {
-      continue;
-    }
+    if (!slugField) continue;
 
     entry.page.is_dynamic = true;
     entry.page.settings = {
       ...(entry.page.settings as Record<string, unknown> || {}),
-      cms: {
-        collection_id: collection.id,
-        slug_field_id: slugField.id,
-      },
+      cms: { collection_id: collection.id, slug_field_id: slugField.id },
     };
-
     detailPageIdByCollectionId.set(collection.id, String(entry.page.id));
-    dynamicPageCollectionBySlug.set(pageSlug, collection.id);
+    detailCollectionIdByPageId.set(String(entry.page.id), collection.id);
   }
-
-  // Pass 2: Bind Webflow dynamic item placeholders to real collection bindings
-  const sortedCollections = [...collections].sort((a, b) => b.rows.length - a.rows.length);
 
   for (const entry of pages) {
     const pageSlug = String(entry.page.slug || '');
-    const explicitCollection = inferCollectionForPageSlug(pageSlug, collections);
-    const isDetailPage = dynamicPageCollectionBySlug.has(pageSlug);
-    const pageLayers = (entry.pageLayers.layers as Layer[]) || [];
+    if (!isLikelyDetailPageSlug(pageSlug)) continue;
+    const collection = inferCollectionForPageSlug(pageSlug, collections);
+    if (!collection || !entry.page.is_dynamic) continue;
+    const layers = (entry.pageLayers.layers as Layer[]) || [];
+    bindSlots(layers, {
+      source: 'page',
+      collection,
+      fields: fieldsByCollection.get(collection.id) || [],
+      used: new Set<string>(),
+      detailPageId: null,
+      cmsBackgroundGroups,
+      index: indexLayerTree(layers),
+      label: `page ${pageSlug}`,
+      warnings,
+    });
+  }
 
-    if (explicitCollection) {
-      const detailPageId = detailPageIdByCollectionId.get(explicitCollection.id) || null;
-      entry.pageLayers.layers = bindCollectionLayersForPage(
-        pageLayers,
-        explicitCollection.id,
-        fields,
-        detailPageId,
-        isDetailPage ? 3 : undefined
-      );
-      continue;
-    }
-
-    if (!layerTreeHasDynItems(pageLayers) || collections.length === 0) {
-      continue;
-    }
-
-    let collectionIndex = 0;
-    const bindDynListSubtrees = (layers: Layer[]): Layer[] => {
-      return layers.map(layer => {
-        if (layerHasClass(layer, 'w-dyn-list') || layerHasClass(layer, 'w-dyn-items')) {
-          const coll = sortedCollections[collectionIndex % sortedCollections.length];
-          collectionIndex++;
-          const detailPageId = detailPageIdByCollectionId.get(coll.id) || null;
-          return bindCollectionLayersForPage([layer], coll.id, fields, detailPageId)[0] || layer;
-        }
-        if (layer.children?.length) {
-          return { ...layer, children: bindDynListSubtrees(layer.children) };
-        }
-        return layer;
+  // Pass 2: every top-level collection list, on every page.
+  const entries: ListEntry[] = [];
+  for (const entry of pages) {
+    const layers = (entry.pageLayers.layers as Layer[]) || [];
+    const index = indexLayerTree(layers);
+    for (const list of index.nodes) {
+      if (!isDynListLayer(list)) continue;
+      if (layerAncestors(list, index).some(isDynItemLayer)) continue;
+      const item = firstLayerDescendant(list, isDynItemLayer);
+      if (!item) continue;
+      const parent = index.parent.get(list.id);
+      const wrapperClasses = [...classTokens(list), ...(parent ? classTokens(parent) : [])]
+        .filter(token => !token.startsWith('w-'));
+      entries.push({
+        pageName: String(entry.page.slug || entry.page.name || ''),
+        detailCollectionId: detailCollectionIdByPageId.get(String(entry.page.id)),
+        index,
+        list,
+        item,
+        heading: precedingHeadingText(index, list),
+        wrapperClasses,
+        signature: itemTemplateSignature(item),
+        choice: null,
       });
-    };
+    }
+  }
 
-    entry.pageLayers.layers = bindDynListSubtrees(pageLayers);
+  for (const entry of entries) {
+    entry.choice = chooseCollectionForList(entry, collections, fieldsByCollection);
+  }
+  // A list whose item template matches a confidently bound one inherits its collection.
+  const confident = entries.filter(entry => entry.choice && entry.choice.confidence >= 0.6);
+  for (const entry of entries) {
+    if (entry.choice && entry.choice.confidence >= 0.6) continue;
+    const twin = confident.find(other => other.signature === entry.signature && other !== entry);
+    if (twin?.choice) {
+      entry.choice = {
+        collection: twin.choice.collection,
+        confidence: 0.9,
+        reason: `same item template as the list bound to ${twin.choice.collection.name}`,
+      };
+    }
+  }
+
+  for (const entry of entries) {
+    if (!entry.choice) continue;
+    const collection = entry.choice.collection;
+    entry.boundCollectionId = collection.id;
+    const collectionFields = fieldsByCollection.get(collection.id) || [];
+    entry.item.variables = {
+      ...(entry.item.variables || {}),
+      collection: {
+        id: collection.id,
+        ...listCollectionSettings(entry, collectionFields),
+      },
+    } as Layer['variables'];
+    warnings.push(
+      `Collection list "${entry.wrapperClasses.join('.') || 'w-dyn-list'}" on page "${entry.pageName || 'index'}" bound to "${collection.name}" (${entry.choice.reason})`
+    );
+    bindSlots([entry.item], {
+      source: 'collection',
+      collection,
+      fields: collectionFields,
+      used: new Set<string>(),
+      collectionLayerId: entry.item.id,
+      detailPageId: detailPageIdByCollectionId.get(collection.id) || null,
+      cmsBackgroundGroups,
+      index: entry.index,
+      label: `list on ${entry.pageName}`,
+      warnings,
+    });
+  }
+
+  for (const entry of pages) {
+    hideEmptyStates((entry.pageLayers.layers as Layer[]) || []);
   }
 
   return pages;
@@ -1186,6 +1740,10 @@ const PRESERVED_WEBFLOW_ATTRIBUTES = [
   'data-delay',
   'data-w-id',
   'role',
+  // Webflow's grid/Quick-Stack placement lives in `#w-node-… { grid-template-columns: … }`
+  // rules in the site stylesheet. Without the id those rules never match and every
+  // Quick Stack collapses to a single column (the artist page's two-column bio).
+  'id',
 ];
 
 /** Inline style (with rewritten asset URLs) plus the preserved Webflow attributes. */
@@ -1200,6 +1758,169 @@ function getPreservedAttributes(
     if (value !== null && value !== undefined && value !== '') attributes[name] = value;
   }
   return Object.keys(attributes).length > 0 ? attributes : undefined;
+}
+
+/**
+ * `node-html-parser` returns `undefined` (not `null`) for a missing attribute, so
+ * the natural-looking `getAttribute(name) !== null` test is true for EVERY boolean
+ * attribute. That made imported `<video>` elements come out with `controls`,
+ * `autoplay`, `loop` and `muted` all set regardless of the source markup — which is
+ * why background videos rendered as a 300x150 player with visible controls.
+ */
+function hasBooleanAttribute(element: HTMLElement, name: string): boolean {
+  const value = element.getAttribute(name);
+  return value !== null && value !== undefined;
+}
+
+/** Webflow's own `data-*` switches, which use the strings "true"/"false". */
+function webflowFlag(element: HTMLElement, name: string, fallback: boolean): boolean {
+  const raw = element.getAttribute(name);
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  return raw.toLowerCase() !== 'false';
+}
+
+/**
+ * Framework classes ycode's Tailwind-aware class stack cannot carry.
+ * `getAffectedProperties("w-background-video")` reads the `w-` prefix as a width
+ * utility, so `mergeClassStack` evicts the class from the layer and the wrapper
+ * loses `position: relative; overflow: hidden` — the reason the hero video used to
+ * render as a small inline player in the top-left corner. We therefore emit the
+ * geometry as explicit Tailwind utilities instead of trusting the class name.
+ */
+const BACKGROUND_VIDEO_WRAPPER_CLASSES = 'relative overflow-hidden';
+const BACKGROUND_VIDEO_VIDEO_CLASSES = 'absolute inset-0 w-full h-full object-cover';
+/** Webflow's own bg-video classes: the ones we replace with explicit utilities. */
+const BACKGROUND_VIDEO_FRAMEWORK_CLASSES = new Set([
+  'w-background-video',
+  'w-background-video-atom',
+]);
+
+function isBackgroundVideoWrapper(element: HTMLElement, className: string): boolean {
+  if (element.tagName?.toLowerCase() === 'video') return false;
+  const classes = className.split(/\s+/);
+  if (classes.includes('w-background-video') || classes.includes('w-background-video-atom')) return true;
+  return !!element.getAttribute('data-video-urls') && !!element.querySelector('video');
+}
+
+/**
+ * Webflow background video (`<div class="w-background-video">` wrapping an
+ * autoplaying `<video>`): rebuilt as a positioned, overflow-hidden box whose video
+ * child fills it. Webflow's play/pause control and the `<noscript>` fallback are
+ * dropped — both need Webflow's runtime JS, which the static export does not ship.
+ */
+function buildBackgroundVideoLayer(
+  element: HTMLElement,
+  className: string,
+  styleAttr: Record<string, string> | undefined,
+  assetIdBySource: Map<string, string>,
+  assetPublicUrlBySource: Map<string, string>,
+  warnings: string[]
+): Layer {
+  const lookup = <T,>(map: Map<string, T>, raw: string): T | undefined => {
+    const normalized = normalizeSlashes(raw.trim()).replace(/^\.\//, '');
+    if (!normalized || /^https?:\/\//.test(normalized) || normalized.startsWith('data:')) return undefined;
+    return map.get(normalized)
+      || map.get(stripTopLevelFolder(normalized))
+      || map.get(path.basename(normalized));
+  };
+  const lookupAsset = (raw: string): string | undefined => lookup(assetIdBySource, raw);
+  const lookupUrl = (raw: string): string | undefined => lookup(assetPublicUrlBySource, raw);
+
+  const videoElement = element.querySelector('video');
+
+  // Candidate sources: <source src> children first, then `data-video-urls`.
+  const candidates: string[] = [];
+  for (const source of videoElement?.querySelectorAll('source') || []) {
+    const src = source.getAttribute('src');
+    if (src) candidates.push(src);
+  }
+  for (const url of (element.getAttribute('data-video-urls') || '').split(',')) {
+    if (url.trim()) candidates.push(url.trim());
+  }
+  const videoSrcFromTag = videoElement?.getAttribute('src');
+  if (videoSrcFromTag) candidates.push(videoSrcFromTag);
+
+  // mp4 first: the only container every browser can decode.
+  const ordered = [...new Set(candidates)].sort(
+    (a, b) => Number(/\.mp4$/i.test(b)) - Number(/\.mp4$/i.test(a))
+  );
+  const resolved = ordered
+    .map(candidate => ({ candidate, assetId: lookupAsset(candidate), url: lookupUrl(candidate) }))
+    .filter((entry): entry is { candidate: string; assetId: string; url: string } => !!entry.assetId && !!entry.url);
+  if (resolved.length === 0) {
+    warnings.push(`Background video source not found in import payload (${ordered[0] || 'no source'})`);
+  } else if (resolved.length > 1) {
+    // Worth saying out loud: a browser without the chosen container's codec now
+    // shows the poster frame instead of silently falling back to the second file.
+    warnings.push(
+      `Background video kept "${path.basename(resolved[0].candidate)}"; `
+      + `alternate format(s) ${resolved.slice(1).map(r => path.basename(r.candidate)).join(', ')} dropped `
+      + '(a video layer holds one source — the poster is shown where that format cannot be decoded)'
+    );
+  }
+
+  const posterRaw = element.getAttribute('data-poster-url')
+    || (videoElement?.getAttribute('style') || '').match(/url\((?:&quot;|["']?)([^)"'&]+)/)?.[1]
+    || '';
+  const posterAssetId = posterRaw ? lookupAsset(posterRaw) : undefined;
+  const posterUrl = posterRaw ? lookupUrl(posterRaw) : undefined;
+  if (posterRaw && !posterAssetId) {
+    warnings.push(`Background video poster not found in import payload (${posterRaw})`);
+  }
+
+  const wrapperClasses = [
+    ...className.split(/\s+/).filter(c => c && !BACKGROUND_VIDEO_FRAMEWORK_CLASSES.has(c)),
+    ...BACKGROUND_VIDEO_WRAPPER_CLASSES.split(' '),
+  ];
+
+  // Webflow ships every background video twice (mp4 + webm) and lets the browser
+  // pick the container it can decode. ycode's video layer models a single
+  // `variables.video.src` and upstream's renderer rejects `<source>` children
+  // (React: "source is a void element tag"), so we take the mp4 — the first
+  // `<source>` in the export and the only container every shipping browser can
+  // decode — and rely on `poster` for anything that cannot play it, which keeps
+  // the hero showing the video's own first frame instead of a black box.
+  const videoVariables: Record<string, unknown> = {
+    src: resolved[0]
+      ? { type: 'asset', data: { asset_id: resolved[0].assetId } }
+      : { type: 'dynamic_text', data: { content: ordered[0] || '' } },
+  };
+  if (posterAssetId) {
+    videoVariables.poster = { type: 'asset', data: { asset_id: posterAssetId } };
+  }
+
+  const videoLayer: Layer = {
+    id: randomUUID(),
+    name: 'video',
+    classes: BACKGROUND_VIDEO_VIDEO_CLASSES,
+    attributes: {
+      // Webflow paints the poster as a CSS background on the <video> itself, not
+      // just as its `poster` attribute — and that is what keeps the frame visible
+      // when the browser cannot decode the container (the `poster` attribute is
+      // dropped the moment the element errors). Without it those tiles render
+      // blank instead of showing the still.
+      ...(posterUrl
+        ? { style: `background-image: url("${posterUrl}"); background-size: cover; background-position: 50% 50%;` }
+        : {}),
+      // A background video is decoration: never chrome, always silent, and
+      // `playsinline` so mobile Safari does not hijack it into fullscreen.
+      controls: false,
+      autoplay: webflowFlag(element, 'data-autoplay', true),
+      loop: webflowFlag(element, 'data-loop', true),
+      muted: true,
+      preload: 'auto',
+      'aria-hidden': 'true',
+    },
+    variables: { video: videoVariables } as Layer['variables'],
+  };
+
+  return {
+    id: randomUUID(),
+    name: 'div',
+    classes: [...new Set(wrapperClasses)].join(' '),
+    attributes: styleAttr,
+    children: [videoLayer],
+  };
 }
 
 function mapElementToLayer(
@@ -1226,17 +1947,36 @@ function mapElementToLayer(
     return null;
   }
 
-  if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'small', 'label', 'blockquote'].includes(tag)) {
-    const text = element.text.trim();
-    if (!text) return null;
-    const html = element.innerHTML.trim();
-    const hasInnerHtml = html.includes('<');
-    return buildTextLayer(hasInnerHtml ? html : text, tag, className);
-  }
-
   const urlMap = assetPublicUrlBySource || new Map<string, string>();
   const inlineStyle = getInlineStyle(element, urlMap);
   const styleAttr = getPreservedAttributes(element, inlineStyle);
+
+  if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'small', 'label', 'blockquote'].includes(tag)) {
+    const text = element.text.trim();
+    if (!text) {
+      // An empty heading/paragraph is normally noise — except when Webflow marked it
+      // as a CMS slot. Dropping those lost half the bindable slots on every list
+      // (`<h1 class="… w-dyn-bind-empty">` is where the item's Name belongs).
+      if (!className.split(/\s+/).includes('w-dyn-bind-empty')) return null;
+      return {
+        id: randomUUID(),
+        name: 'text',
+        classes: className,
+        settings: { tag },
+        attributes: styleAttr,
+        restrictions: { editText: true },
+        variables: { text: { type: 'dynamic_text', data: { content: '' } } },
+      };
+    }
+    const html = element.innerHTML.trim();
+    const hasInnerHtml = html.includes('<');
+    const textLayer = buildTextLayer(hasInnerHtml ? html : text, tag, className);
+    return styleAttr ? { ...textLayer, attributes: styleAttr } : textLayer;
+  }
+
+  if (isBackgroundVideoWrapper(element, className)) {
+    return buildBackgroundVideoLayer(element, className, styleAttr, assetIdBySource, urlMap, warnings);
+  }
 
   if (tag === 'img') {
     const src = element.getAttribute('src') || '';
@@ -1281,10 +2021,10 @@ function mapElementToLayer(
       classes: className,
       attributes: {
         ...styleAttr,
-        controls: element.getAttribute('controls') !== null,
-        autoplay: element.getAttribute('autoplay') !== null,
-        loop: element.getAttribute('loop') !== null,
-        muted: element.getAttribute('muted') !== null,
+        controls: hasBooleanAttribute(element, 'controls'),
+        autoplay: hasBooleanAttribute(element, 'autoplay'),
+        loop: hasBooleanAttribute(element, 'loop'),
+        muted: hasBooleanAttribute(element, 'muted') || hasBooleanAttribute(element, 'autoplay'),
       },
       variables: {
         video: {
@@ -1314,7 +2054,10 @@ function mapElementToLayer(
           url: { type: 'dynamic_text', data: { content: href } },
         },
       },
-      children: children.length > 0 ? children : [buildTextLayer(element.text.trim() || 'Link', 'span')],
+      // An empty anchor stays empty. Webflow uses them as icon buttons whose
+      // artwork is a CSS background (the back-to-top arrow); injecting a "Link"
+      // placeholder printed that word on top of the icon on every page.
+      children,
     };
   }
 
@@ -1331,7 +2074,8 @@ function mapElementToLayer(
   if (children.length === 0) {
     const text = element.text.trim();
     if (text) {
-      return buildTextLayer(text, tag === 'div' ? 'div' : tag, className);
+      const textLayer = buildTextLayer(text, tag === 'div' ? 'div' : tag, className);
+      return styleAttr ? { ...textLayer, attributes: styleAttr } : textLayer;
     }
   }
 
@@ -1343,6 +2087,138 @@ function mapElementToLayer(
     attributes: styleAttr,
     children,
   };
+}
+
+/**
+ * Webflow navbar (`.w-nav`) toggle.
+ *
+ * The static export ships no JavaScript for the hamburger: `components.css` only
+ * hides `.w-nav-menu` (`.w-nav[data-collapse='all'] .w-nav-menu { display:none }`)
+ * and shows `.w-nav-button`; the opening is done by Webflow's runtime, which the
+ * export does not include. We replace it with a ycode `click` interaction on the
+ * button layer that toggles the menu layer's display, mirroring
+ * `lib/webwow/import/webflow-zip/widgets.ts`.
+ *
+ * The menu's visibility has to be owned by exactly one mechanism. ycode's runtime
+ * shows a layer by REMOVING `data-gsap-hidden`, which cannot beat a CSS
+ * `display: none` that still matches — so the `w-nav-menu` class is stripped from
+ * the menu layer (its geometry comes from the site's own `.nav-menu` class) and
+ * the on-load hidden state comes from the interaction instead.
+ */
+const NAV_COLLAPSE_BREAKPOINTS: Record<string, Breakpoint[]> = {
+  all: ['desktop', 'tablet', 'mobile'],
+  medium: ['tablet', 'mobile'],
+  small: ['mobile'],
+  tiny: ['mobile'],
+};
+const DEFAULT_NAV_DURATION_MS = 400;
+/** Tailwind display shims that would survive a `data-gsap-hidden` removal. */
+const DISPLAY_SHIM_CLASSES = new Set(['hidden', 'max-lg:hidden', 'max-md:hidden']);
+
+function classTokens(layer: Layer): string[] {
+  const raw = layer.classes;
+  if (Array.isArray(raw)) return raw.flatMap(c => String(c).split(/\s+/)).filter(Boolean);
+  return String(raw || '').split(/\s+/).filter(Boolean);
+}
+
+function layerHasClassToken(layer: Layer, token: string): boolean {
+  return classTokens(layer).includes(token);
+}
+
+function findLayerWithClass(layer: Layer, token: string, stopAt: string): Layer | undefined {
+  for (const child of layer.children || []) {
+    if (layerHasClassToken(child, token)) return child;
+    // A nested navbar owns its own parts — do not steal them.
+    if (layerHasClassToken(child, stopAt)) continue;
+    const found = findLayerWithClass(child, token, stopAt);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function collectLayersWithClass(layers: Layer[], token: string, out: Layer[] = []): Layer[] {
+  for (const layer of layers) {
+    if (layerHasClassToken(layer, token)) out.push(layer);
+    if (layer.children) collectLayersWithClass(layer.children, token, out);
+  }
+  return out;
+}
+
+/** Drop class tokens that would keep a toggled layer invisible after the runtime reveals it. */
+function stripClassTokens(layer: Layer, drop: (token: string) => boolean): void {
+  const kept = classTokens(layer).filter(token => !drop(token));
+  layer.classes = Array.isArray(layer.classes) ? (kept as unknown as Layer['classes']) : kept.join(' ');
+}
+
+function buildNavToggleInteraction(
+  menuLayerId: string,
+  breakpoints: Breakpoint[],
+  durationSeconds: number,
+  animation: string
+): LayerInteraction {
+  // `data-animation="over-right" | "over-left"` slides the panel in from that edge.
+  const slide = animation === 'over-right' ? '100%' : animation === 'over-left' ? '-100%' : null;
+  const from: Record<string, string> = { display: 'hidden' };
+  const to: Record<string, string> = { display: 'visible' };
+  if (slide) {
+    from.x = slide;
+    to.x = '0%';
+  } else {
+    from.autoAlpha = '0';
+    to.autoAlpha = '100';
+  }
+
+  return {
+    id: randomUUID(),
+    trigger: 'click',
+    timeline: { breakpoints, repeat: 0, yoyo: true },
+    tweens: [
+      {
+        id: randomUUID(),
+        layer_id: menuLayerId,
+        position: 0,
+        duration: durationSeconds,
+        ease: 'power2.out',
+        from: from as LayerInteraction['tweens'][number]['from'],
+        to: to as LayerInteraction['tweens'][number]['to'],
+        // `on-load` = paint the hidden state server-side, so the menu is closed
+        // before hydration instead of flashing open.
+        apply_styles: { display: 'on-load' },
+      },
+    ],
+  };
+}
+
+function generateNavigationInteractions(layers: Layer[], warnings: string[]): number {
+  let generated = 0;
+  for (const nav of collectLayersWithClass(layers, 'w-nav')) {
+    const attributes = (nav.attributes || {}) as Record<string, unknown>;
+    const collapse = String(attributes['data-collapse'] ?? 'medium').toLowerCase();
+    if (collapse === 'none') continue;
+
+    const button = findLayerWithClass(nav, 'w-nav-button', 'w-nav');
+    const menu = findLayerWithClass(nav, 'w-nav-menu', 'w-nav');
+    if (!button || !menu) {
+      warnings.push(`Navbar without ${button ? 'menu' : 'hamburger button'}: no toggle interaction generated`);
+      continue;
+    }
+
+    const ms = Number.parseInt(String(attributes['data-duration'] ?? ''), 10);
+    const duration = (Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_NAV_DURATION_MS) / 1000;
+    const breakpoints = NAV_COLLAPSE_BREAKPOINTS[collapse] || NAV_COLLAPSE_BREAKPOINTS.medium;
+    const animation = String(attributes['data-animation'] ?? '').toLowerCase();
+
+    button.interactions = [
+      ...(button.interactions || []),
+      buildNavToggleInteraction(menu.id, breakpoints, duration, animation),
+    ];
+    // The interaction is now the single owner of the menu's visibility.
+    stripClassTokens(menu, token => token === 'w-nav-menu' || DISPLAY_SHIM_CLASSES.has(token));
+    // Webflow renders the hamburger as a plain <div>; make it behave like a control.
+    button.attributes = { ...(button.attributes || {}), role: 'button', tabindex: '0' };
+    generated++;
+  }
+  return generated;
 }
 
 function buildPagesFromHtml(
@@ -1370,6 +2246,8 @@ function buildPagesFromHtml(
       classes: body?.getAttribute('class') || '',
       children,
     }];
+
+    generateNavigationInteractions(layers, warnings);
 
     return {
       page: {
@@ -1451,6 +2329,8 @@ async function processWebflowImportInternal(
     // ZIP path / remote URL -> upstream asset proxy URL (for CSS url() rewriting)
     const assetPublicUrlBySource = new Map<string, string>();
     const remoteAssetCache = new Map<string, string>();
+    /** CMS asset URLs this server could not fetch — reported once, not per row. */
+    const undownloadedAssetUrls = new Set<string>();
 
     const rememberAsset = (source: string, asset: ImportedAsset, includeBaseName: boolean) => {
       const normalizedSource = normalizeSlashes(source);
@@ -1574,6 +2454,7 @@ async function processWebflowImportInternal(
           type: fieldType,
           order: index,
           referenceCollectionId,
+          isMultiAsset: isAssetFieldType(fieldType) && values.some(value => splitAssetUrls(value).length > 1),
         });
       });
     }
@@ -1667,8 +2548,11 @@ async function processWebflowImportInternal(
                 warnings.push(`Multi relation "${rawValue}" in ${collection.name}.${header} produced no mapped IDs`);
               }
             }
-          } else if (field.type === 'image' || field.type === 'video' || field.type === 'audio' || field.type === 'document') {
-            const normalized = normalizeSlashes(rawValue).replace(/^\.\//, '');
+          } else if (isAssetFieldType(field.type)) {
+            // A multi-image column holds several URLs in one cell; ycode's asset
+            // fields hold one asset, so the first one wins.
+            const first = splitAssetUrls(rawValue)[0] || rawValue;
+            const normalized = normalizeSlashes(first).replace(/^\.\//, '');
             let assetId = assetIdBySource.get(normalized) || assetIdBySource.get(stripTopLevelFolder(normalized));
 
             if (!assetId && /^https?:\/\//.test(normalized)) {
@@ -1681,6 +2565,17 @@ async function processWebflowImportInternal(
                   remoteAssetCache.set(normalized, uploaded.id);
                   rememberAsset(normalized, uploaded, false);
                   assetId = uploaded.id;
+                } else {
+                  // The CDN was unreachable from this server. Dropping the value
+                  // leaves a hole in the layout forever; instead record an asset
+                  // that points straight at the original URL, so the image still
+                  // appears wherever the CDN *is* reachable. The importer counts
+                  // these and reports them once instead of once per row.
+                  const remote = registerRemoteAsset(assets, normalized);
+                  remoteAssetCache.set(normalized, remote.id);
+                  rememberAsset(normalized, remote, false);
+                  assetId = remote.id;
+                  undownloadedAssetUrls.add(normalized);
                 }
               }
             }
@@ -1688,9 +2583,11 @@ async function processWebflowImportInternal(
             if (assetId) {
               finalValue = assetId;
             } else {
-              warnings.push(`Asset reference "${rawValue}" in ${collection.name}.${header} could not be downloaded/resolved`);
+              warnings.push(`Asset reference "${rawValue}" in ${collection.name}.${header} could not be resolved`);
               finalValue = null;
             }
+          } else if (field.type === 'text' && looksLikeHtml(rawValue)) {
+            finalValue = htmlToPlainText(rawValue);
           } else if (field.type === 'boolean') {
             const lower = rawValue.toLowerCase();
             finalValue = (lower === 'true' || lower === 'yes' || lower === '1') ? 'true' : 'false';
@@ -1711,6 +2608,13 @@ async function processWebflowImportInternal(
       }
     }
 
+    if (undownloadedAssetUrls.size > 0) {
+      warnings.push(
+        `${undownloadedAssetUrls.size} CMS asset${undownloadedAssetUrls.size === 1 ? '' : 's'} could not be downloaded from their CDN. `
+        + 'The original URLs were kept as the field value, so the images appear on any server that can reach the CDN.'
+      );
+    }
+
     const cssOrderFromHtml = Array.from(new Set(
       htmlFiles.flatMap(file => extractStylesheetHrefsFromHtml(file.content))
     ));
@@ -1719,7 +2623,9 @@ async function processWebflowImportInternal(
     const enhancedPages = enhancePagesWithCmsBindings(
       builtPages,
       normalizedCollections,
-      fields
+      fields,
+      extractCmsBackgroundClassGroups(cssFiles),
+      warnings
     );
     const pageRows = enhancedPages.map(entry => entry.page);
     const pageLayerRows = enhancedPages.map(entry => entry.pageLayers);

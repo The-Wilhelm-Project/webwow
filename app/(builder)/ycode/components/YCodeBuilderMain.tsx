@@ -40,6 +40,10 @@ import { checkCircularReference, detachSpecificLayerFromComponent } from '@/lib/
 // Right sidebar is always visible in editor mode - load eagerly to avoid delay
 import RightPanel from '../components/RightPanel';
 
+// Webwow: once the builder UI has rendered, never re-show the full-screen loader.
+// Module scope on purpose - it must survive remounts of this component.
+let builderHasRenderedOnce = false;
+
 // Lazy-loaded components (heavy, not needed on initial render)
 const CMS = lazy(() => import('../components/CMS'));
 const CollectionItemSheet = lazy(() => import('../components/CollectionItemSheet'));
@@ -2252,9 +2256,13 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
   }
 
   // Wait for builder data to be preloaded (BLOCKING) - prevents race conditions
-  if (!builderDataPreloaded) {
+  // Webwow: block only on the very first cold paint. Later transient
+  // `!builderDataPreloaded` states (store re-init, layout re-render) used to flash
+  // this full-screen loader on every click.
+  if (!builderDataPreloaded && !builderHasRenderedOnce) {
     return <BuilderLoading message="Loading builder data..." />;
   }
+  builderHasRenderedOnce = true;
 
   // Authenticated - show builder (only after migrations AND data preload complete)
   return (

@@ -45,8 +45,9 @@ export default function ImportHtmlDialog({
       >
         <DialogHeader>
           <DialogTitle>Convert HTML to layers</DialogTitle>
+          {/* Webwow: white-label fork. */}
           <DialogDescription>
-            If you use Tailwind CSS, classes will be converted to design settings in Ycode. &apos;Script&apos; and &apos;Style&apos; tags will be ignored.
+            If you use Tailwind CSS, classes will be converted to design settings in Webwow. &apos;Script&apos; and &apos;Style&apos; tags will be ignored.
           </DialogDescription>
         </DialogHeader>
 

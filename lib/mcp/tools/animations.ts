@@ -88,7 +88,8 @@ function ensureIds(interaction: z.infer<typeof interactionSchema>): LayerInterac
 export function registerAnimationTools(server: McpServer) {
   server.tool(
     'add_animation',
-    `Add a curated animation to a layer using one of YCode's preset patterns.
+    // Webwow: white-label fork - the AI assistant must not name the upstream product.
+    `Add a curated animation to a layer using one of Webwow's preset patterns.
 
 Presets cover ~80% of animation needs. Use set_layer_interactions for full GSAP control.
 

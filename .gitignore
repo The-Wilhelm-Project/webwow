@@ -1,5 +1,6 @@
 # dependencies
-/node_modules
+# Webwow: not anchored - tools/vscode-tailwind-class-editor/ has its own node_modules.
+node_modules
 /.pnp
 .pnp.*
 .yarn/*

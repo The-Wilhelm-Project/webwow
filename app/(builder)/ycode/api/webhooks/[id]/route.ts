@@ -151,7 +151,7 @@ export async function POST(
       event: 'test',
       timestamp: new Date().toISOString(),
       data: {
-        message: 'This is a test webhook from Ycode',
+        message: 'This is a test webhook from Webwow',
         webhook_id: webhook.id,
         webhook_name: webhook.name,
       },

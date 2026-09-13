@@ -420,8 +420,9 @@ export default function WebhooksPage() {
           </Button>
         </header>
 
+        {/* Webwow: white-label fork. */}
         <p className="text-sm text-muted-foreground mb-6">
-          Receive real-time notifications when events occur in your Ycode site.
+          Receive real-time notifications when events occur in your Webwow site.
         </p>
 
         {isLoading ? (

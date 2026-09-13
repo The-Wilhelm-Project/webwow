@@ -134,8 +134,9 @@ export default function UpdatesSettingsPage() {
 
           <div>
             <FieldLegend>Version status</FieldLegend>
+            {/* Webwow: white-label fork. */}
             <FieldDescription>
-              Check if your Ycode installation is up to date with the latest release.
+              Check if your Webwow installation is up to date with the latest release.
             </FieldDescription>
           </div>
 

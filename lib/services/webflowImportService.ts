@@ -1169,6 +1169,39 @@ function getInlineStyle(
   });
 }
 
+/**
+ * Webflow attributes that its own stylesheet (`components.css`) keys off. Without
+ * them rules like `.w-nav[data-collapse="all"] .w-nav-menu { display: none }`
+ * never match and the imported page renders with its navigation permanently
+ * open. Kept to a whitelist so no arbitrary markup travels into layer settings.
+ */
+const PRESERVED_WEBFLOW_ATTRIBUTES = [
+  'data-collapse',
+  'data-animation',
+  'data-duration',
+  'data-easing',
+  'data-easing2',
+  'data-doc-height',
+  'data-hover',
+  'data-delay',
+  'data-w-id',
+  'role',
+];
+
+/** Inline style (with rewritten asset URLs) plus the preserved Webflow attributes. */
+function getPreservedAttributes(
+  element: HTMLElement,
+  inlineStyle: string | undefined
+): Record<string, string> | undefined {
+  const attributes: Record<string, string> = {};
+  if (inlineStyle) attributes.style = inlineStyle;
+  for (const name of PRESERVED_WEBFLOW_ATTRIBUTES) {
+    const value = element.getAttribute(name);
+    if (value !== null && value !== undefined && value !== '') attributes[name] = value;
+  }
+  return Object.keys(attributes).length > 0 ? attributes : undefined;
+}
+
 function mapElementToLayer(
   node: HtmlNode,
   assetIdBySource: Map<string, string>,
@@ -1203,7 +1236,7 @@ function mapElementToLayer(
 
   const urlMap = assetPublicUrlBySource || new Map<string, string>();
   const inlineStyle = getInlineStyle(element, urlMap);
-  const styleAttr = inlineStyle ? { style: inlineStyle } : undefined;
+  const styleAttr = getPreservedAttributes(element, inlineStyle);
 
   if (tag === 'img') {
     const src = element.getAttribute('src') || '';

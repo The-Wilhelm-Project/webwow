@@ -45,6 +45,16 @@ DIVERGENT_FILES=(
   "public/og-image.png"
   "public/og-image.svg"
   "public/site.webmanifest"
+  # White-Label: Wilhelm-Marke statt ycode-Logo, kein "Made in Ycode"-Badge, generator-Meta "Webwow".
+  # Bei einem Sync: Upstream-Änderung übernehmen und die Marke erneut einsetzen (Pfad aus app/icon.svg).
+  "app/(builder)/ycode/components/HeaderBar.tsx"
+  "app/(builder)/ycode/components/YCodeBuilderMain.tsx"
+  "app/(builder)/ycode/accept-invite/page.tsx"
+  "app/(builder)/ycode/welcome/page.tsx"
+  "app/(builder)/ycode/settings/general/page.tsx"
+  "components/site-document-layout.tsx"
+  "lib/apps/static-export/document.ts"
+  "lib/services/webflowImportService.ts"
 )
 
 # Pfad-Präfixe, die nur in Webwow existieren (Upstream kennt sie nicht). Konflikte hier sind

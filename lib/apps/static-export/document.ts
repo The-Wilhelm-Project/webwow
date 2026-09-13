@@ -689,7 +689,7 @@ export function buildDocument({
   const head: string[] = []
   head.push('<meta charset="UTF-8" />')
   head.push('<meta name="viewport" content="width=device-width, initial-scale=1.0" />')
-  head.push('<meta name="generator" content="Ycode" />')
+  head.push('<meta name="generator" content="Webwow" />')
   head.push(`<title>${escapeHtml(title)}</title>`)
   if (description) {
     head.push(`<meta name="description" content="${escapeHtml(description)}" />`)

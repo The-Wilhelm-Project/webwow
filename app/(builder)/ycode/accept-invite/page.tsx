@@ -175,28 +175,14 @@ export default function AcceptInvitePage() {
           <div className="flex flex-col items-center gap-6">
             <svg
               className="size-10 fill-current"
-              viewBox="0 0 24 24"
+              viewBox="0 0 12.506 11.972"
               xmlns="http://www.w3.org/2000/svg"
             >
-              <g
-                stroke="none" strokeWidth="1"
-                fill="none" fillRule="evenodd"
-              >
-                <g transform="translate(-30.000000, -30.000000)">
-                  <g>
-                    <g transform="translate(30.000000, 30.000000)">
-                      <rect
-                        x="0" y="0"
-                        width="24" height="24"
-                      />
-                      <path
-                        d="M11.4241533,0 L11.4241533,5.85877951 L6.024,8.978 L12.6155735,12.7868008 L10.951,13.749 L23.0465401,6.75101349 L23.0465401,12.6152717 L3.39516096,23.9856666 L3.3703726,24 L3.34318129,23.9827156 L0.96,22.4713365 L0.96,16.7616508 L3.36417551,18.1393242 L7.476,15.76 L0.96,11.9090099 L0.96,6.05375516 L11.4241533,0 Z"
-                        className="fill-current"
-                      />
-                    </g>
-                  </g>
-                </g>
-              </g>
+              <path
+                d="M7.456,4.644A5.558,5.558,0,0,1,10.062.112L10.023.044A8.685,8.685,0,0,1,11.159,5.08a15.806,15.806,0,0,1-.993,4.688A5.439,5.439,0,0,1,7.456,4.644ZM1.328,4.87.005,0,7.448,4.822,0,9.7ZM10.007.019l.016.025Z"
+                transform="translate(0.833 1.13)"
+                fill="currentColor"
+              />
             </svg>
 
             <Alert variant="destructive">
@@ -221,28 +207,14 @@ export default function AcceptInvitePage() {
       <div className="pt-12 pb-8 flex items-center justify-center">
         <svg
           className="size-5 fill-current"
-          viewBox="0 0 24 24"
+          viewBox="0 0 12.506 11.972"
           xmlns="http://www.w3.org/2000/svg"
         >
-          <g
-            stroke="none" strokeWidth="1"
-            fill="none" fillRule="evenodd"
-          >
-            <g transform="translate(-30.000000, -30.000000)">
-              <g>
-                <g transform="translate(30.000000, 30.000000)">
-                  <rect
-                    x="0" y="0"
-                    width="24" height="24"
-                  />
-                  <path
-                    d="M11.4241533,0 L11.4241533,5.85877951 L6.024,8.978 L12.6155735,12.7868008 L10.951,13.749 L23.0465401,6.75101349 L23.0465401,12.6152717 L3.39516096,23.9856666 L3.3703726,24 L3.34318129,23.9827156 L0.96,22.4713365 L0.96,16.7616508 L3.36417551,18.1393242 L7.476,15.76 L0.96,11.9090099 L0.96,6.05375516 L11.4241533,0 Z"
-                    className="fill-current"
-                  />
-                </g>
-              </g>
-            </g>
-          </g>
+          <path
+            d="M7.456,4.644A5.558,5.558,0,0,1,10.062.112L10.023.044A8.685,8.685,0,0,1,11.159,5.08a15.806,15.806,0,0,1-.993,4.688A5.439,5.439,0,0,1,7.456,4.644ZM1.328,4.87.005,0,7.448,4.822,0,9.7ZM10.007.019l.016.025Z"
+            transform="translate(0.833 1.13)"
+            fill="currentColor"
+          />
         </svg>
       </div>
 

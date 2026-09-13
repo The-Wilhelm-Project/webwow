@@ -11,7 +11,7 @@ import { runWithYcodeStamp } from '@/lib/ycode-html-comment';
 
 const ycodeGeneratorMetadata: Metadata = {
   ...defaultMetadata,
-  other: { generator: 'Ycode' },
+  other: { generator: 'Webwow' },
 };
 
 interface SiteDocumentLayoutProps {

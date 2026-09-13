@@ -486,23 +486,8 @@ export default function GeneralSettingsPage() {
                   </ButtonGroup>
                 </Field>
 
-                <FieldSeparator className="col-span-2" />
-
-                <Field orientation="horizontal" className="flex-row-reverse col-span-2">
-                  <FieldContent>
-                    <FieldLabel htmlFor="badge">Display the &ldquo;Made in Ycode&rdquo; badge</FieldLabel>
-                    <FieldDescription>
-                      {isCloudVersion()
-                        ? 'Upgrade to a project plan in order to disable the badge.'
-                        : 'Help support Ycode by displaying this badge on your website.'}
-                    </FieldDescription>
-                  </FieldContent>
-                  <Switch
-                    id="badge"
-                    checked={ycodeBadge}
-                    onCheckedChange={setYcodeBadge}
-                  />
-                </Field>
+                {/* Webwow: the "Made in Ycode" badge toggle is removed (white-label fork);
+                    `ycode_badge` is seeded to false by database/migrations/99999999999999_webwow_defaults.ts. */}
 
                 <FieldSeparator className="col-span-2" />
 

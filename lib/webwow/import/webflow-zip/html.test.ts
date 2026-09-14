@@ -158,7 +158,9 @@ test('embeds: style-only -> headStyles, svg-only -> icon, script embeds -> htmlE
     <div class="icon w-embed"><svg viewBox="0 0 10 10"><rect onclick="evil()" width="1" height="1"/></svg></div>
     <div class="code-embed w-embed w-script"><script src="https://elfsightcdn.com/platform.js" async></script><div class="elfsight-app-1"></div></div>`,
   '<style>html{font-size:1rem}</style><script type="text/javascript">!function(o,c){var n=c.documentElement,t=" w-mod-";n.className+=t+"js"}(window,document);</script><script src="https://example.com/analytics.js"></script>'), ctx);
-  assert.deepEqual(page.headStyles, ['html{font-size:1rem}', '.x{color:red}']);
+  // Class selectors in a page's own <style> are namespaced like the site residual
+  // CSS (see `namespacePageStyles`); tag selectors are left alone.
+  assert.deepEqual(page.headStyles, ['html{font-size:1rem}', '.wf-x{color:red}']);
   assert.equal(page.roots.length, 2);
   const [icon, embed] = page.roots;
   assert.equal(icon.kind, 'icon');
@@ -493,4 +495,39 @@ test('sample index.html: slots, video, embeds and class hygiene', { skip: !exist
   assert.equal(ctx.warn.count('link_broken'), 1, 'the #https://facebook link');
   const footerCells = collect(page, (n) => n.wf.siteClasses[0] === 'footer-right_links');
   assert.ok(footerCells.some((c) => (c.children ?? []).some((k) => k.kind === 'text' && (k.text ?? '').includes('\n'))), 'footer text runs keep line breaks');
+});
+
+test('a framework class styled by the site stylesheet keeps those values on top of the shim', () => {
+  // Webflow writes the designer's Quick Stack values into the SITE sheet,
+  // under the framework class name.
+  const styles = buildStyleModel({
+    siteCss: ['.w-layout-layout { grid-row-gap: 20px; grid-column-gap: 20px; justify-content: center; padding: 20px }'],
+    assetUrl: () => null,
+    warn: new Warnings(),
+  });
+  const zip = fakeZip({});
+  const page = parsePage(
+    doc('<div class="w-layout-layout wf-layout-layout"><div class="w-layout-cell">x</div></div>'),
+    ctxFor(zip, { styles }),
+  );
+  const grid = page.roots[0];
+  assert.ok(grid.frameworkClasses?.includes('grid'), 'the hand-written shim still applies');
+  assert.ok(grid.frameworkClasses?.includes('p-[20px]'), `site padding applied: ${grid.frameworkClasses?.join(' ')}`);
+  assert.ok(grid.frameworkClasses?.includes('gap-x-[20px]'));
+});
+
+test('a page-scoped <style> gets its class selectors namespaced and its layers hooked', () => {
+  const page = parsePage(
+    doc('<div class="pageLayout"><p class="pageLayout note">x</p></div>',
+      '<style>@media print { .pageLayout { width: 19cm } } .pageLayout .note { color: red }</style>'),
+    ctxFor(fakeZip({})),
+  );
+  const css = page.headStyles.join('\n');
+  assert.match(css, /@media print \{ \.wf-pagelayout \{ width: 19cm \} \}/);
+  assert.match(css, /\.wf-pagelayout \.wf-note/);
+  assert.equal(css.includes('.pageLayout'), false, 'no raw Webflow class name is left in the block');
+
+  const hooked = [...page.nodeIndex.values()].filter((n) => (n.classes ?? []).includes('wf-pagelayout'));
+  assert.equal(hooked.length, 2, 'both elements carrying the class get the inert hook');
+  assert.ok((hooked[1].classes ?? []).includes('wf-note'));
 });

@@ -20,7 +20,7 @@
 
 import { parse, HTMLElement, NodeType, type Node } from 'node-html-parser';
 import type { ImportImage, ImportStyleRef } from '@/lib/import/types';
-import { UNDERLAY_TAGS, wfClass, type WfStyleModel } from './css';
+import { UNDERLAY_TAGS, namespaceSelector, wfClass, type WfStyleModel } from './css';
 import {
   DROPDOWN_CHEVRON_SVG,
   FRAMEWORK_CLASSES,
@@ -393,12 +393,24 @@ class PageParser {
       }
       addFw(shim);
     }
+    // A framework class the *site* stylesheet also styles (Webflow writes the
+    // designer's Quick Stack values into `.w-layout-layout` there) contributes
+    // those translated classes on top of the hand-written shim — otherwise the
+    // shim's `grid` arrives without the gaps and padding the page was built with.
+    for (const c of wf.classNames) {
+      if (!FRAMEWORK_CLASSES[c]) continue;
+      const fromSheet = styles.classes.get(c);
+      if (fromSheet) addFw(fromSheet.ref.classes);
+    }
     if (framework.length > 0) node.frameworkClasses = framework;
 
     const oneOff: string[] = [];
     if (wf.htmlId) {
       const grid = styles.ids.get(wf.htmlId);
       if (grid) oneOff.push(...grid);
+      // A Quick Stack id rule inside a media query ycode has no tier for (`tiny`)
+      // stays in the residual stylesheet, which can only match through the id.
+      if (styles.residual.ids.has(wf.htmlId)) wf.keepHtmlId = true;
     }
     if (wf.classNames.includes('w-condition-invisible')) oneOff.push('hidden');
     for (const c of wf.classNames) {
@@ -758,5 +770,58 @@ export function parsePage(html: string, ctx: HtmlContext): WfPage {
   parser.parseBody(root, page);
   if (parser.headScripts.length > 0) page.headScripts = parser.headScripts;
   if (parser.googleFonts.size > 0) page.googleFontFamilies = [...parser.googleFonts];
+  namespacePageStyles(page);
   return page;
+}
+
+/** `.pageLayout` inside a page's own `<style>` -> `.wf-pagelayout`, plus the hook on the layers. */
+const CLASS_TOKEN_RE = /\.(-?[_a-zA-Z][\w-]*)/g;
+
+/** Namespace every class selector of a stylesheet; at-rule preludes stay verbatim. */
+function namespaceCssClasses(css: string): { css: string; classes: Set<string> } {
+  const classes = new Set<string>();
+  let out = '';
+  let buf = '';
+  for (const ch of css) {
+    if (ch === '{') {
+      const trimmed = buf.trim();
+      if (trimmed && !trimmed.startsWith('@') && trimmed.includes('.')) {
+        for (const m of trimmed.matchAll(CLASS_TOKEN_RE)) classes.add(m[1]);
+        out += buf.replace(trimmed, namespaceSelector(trimmed));
+      } else {
+        out += buf;
+      }
+      out += ch;
+      buf = '';
+    } else if (ch === '}' || ch === ';') {
+      out += buf + ch;
+      buf = '';
+    } else {
+      buf += ch;
+    }
+  }
+  return { css: out + buf, classes };
+}
+
+/**
+ * A page's embedded `<style>` blocks target Webflow class names, and v2 does not
+ * put those on layers (D1). Their selectors are namespaced like the site
+ * residual CSS and every node carrying the original class gets the inert
+ * `wf-<name>` hook — otherwise the block is stored, served and matches nothing
+ * (the print stylesheet of `catalog.html` is a whole page layout).
+ */
+export function namespacePageStyles(page: WfPage): void {
+  if (page.headStyles.length === 0) return;
+  const wanted = new Set<string>();
+  page.headStyles = page.headStyles.map((css) => {
+    const result = namespaceCssClasses(css);
+    for (const c of result.classes) wanted.add(c);
+    return result.css;
+  });
+  if (wanted.size === 0) return;
+  for (const node of page.nodeIndex.values()) {
+    const hooks = node.wf.classNames.filter((c) => wanted.has(c)).map(wfClass);
+    if (hooks.length === 0) continue;
+    node.classes = [...new Set([...(node.classes ?? []), ...hooks])];
+  }
 }

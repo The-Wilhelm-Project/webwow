@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.30.15-webwow.2] - 2026-09-13 — Mehrere Websites, `?edit`-Editor, Webflow-Importer v2
+## [1.30.15-webwow.2] - 2026-09-14 — Mehrere Websites, `?edit`-Editor, Webflow-Importer v2
 
 Alle Upstream-Dateien bleiben weiterhin byte-identisch (`bash scripts/check-upstream-identity.sh`).
 
@@ -61,16 +61,52 @@ Alle Upstream-Dateien bleiben weiterhin byte-identisch (`bash scripts/check-upst
   (`lib/webwow/proxy-policy.ts`: allow/deny/rewrite pro Route, Enumerations-Test über alle `route.ts`);
   Design, Einstellungen, Benutzer, Integrationen und die Sites-API sind gesperrt.
 
-### Webflow-Importer v2 — Vorarbeit, noch nicht aktiv — [docs/IMPORTER.md](docs/IMPORTER.md)
+### Webflow-Importer v2 — jetzt der Importer — [docs/IMPORTER.md](docs/IMPORTER.md)
 
-- Neue Pipeline unter `lib/webwow/import/webflow-zip/**`, die den Export in das native ycode-Modell
-  überführen soll (CSS → Tailwind-Layer-Styles inkl. Breakpoints und Hover, HTML → Layer, CSV →
-  Collections mit Referenzen, strukturelle CMS-Bindung, Webflow-Interaktionen → ycode-Animationen
-  ohne `eval`, Menü-/Dropdown-Verhalten, Schriften, entschärftes Rest-CSS, Zip-Bomb- und
-  SSRF-Grenzen). Mit Unit-Tests gegen den Beispiel-Export abgedeckt.
-- **Noch nicht verdrahtet**: `server-materializer`, `convert-bridge`, `components`, `pages`, `index`
-  und die API-Route fehlen. Der Code ist damit unerreichbar und ändert nichts am laufenden Betrieb;
-  für Importe gilt weiterhin der bisherige Importer unter Einstellungen → Templates.
+Der Dialog unter Einstellungen → Templates ruft ab sofort **v2** auf
+(`POST /ycode/api/webwow/webflow/import`). v1 (`lib/services/webflowImportService.ts`,
+`POST /ycode/api/webflow/import`) bleibt lauffähig, ist aber Legacy und wird von keiner Oberfläche
+mehr benutzt.
+
+- **Das Design wird übersetzt statt danebengelegt.** v1 hat das Webflow-Stylesheet wörtlich in
+  `settings.custom_code_head` mitgeliefert (92,6 KB) und 658 Layer-Styles **ohne** Design-Daten
+  angelegt — das Design-Panel war für jeden importierten Layer leer. v2 legt am Beispiel-Export 119
+  Layer-Styles an, **116 davon (97,5 %) mit echten `design`-Daten**; 283 von 338 Layern tragen Design
+  (87,1 % ohne Komponenten-Instanzen), und in `layer.classes` steht **kein** roher Webflow-Klassenname
+  mehr. Im `custom_code_head` bleiben **5,2 KB** eingegrenztes Rest-CSS ohne `<script>`.
+- **Webflow-Klassen werden wiederverwendbare Layer-Styles**, Combo-Klassen ein zweiter Style-Chip
+  darüber, Tag-Regeln ein Underlay, `991px`/`767px` die ycode-Breakpoints `medium`/`small`, Hover ein
+  `hover:`-Variant. Aus Webflows `normalize.css`/`components.css` (45 KB) werden nur die Tag-Regeln
+  übernommen, der Rest verworfen.
+- **Wiederkehrende Bereiche werden Komponenten**: 4 Komponenten (Navbar, Footer, fixed-menu_item,
+  Div) mit 13 Instanzen. Weicht eine Instanz ab (`navbar black`), bleibt sie inline und wird als
+  `component_skipped` gemeldet, statt die Komponente für alle zu verbiegen.
+- **CMS**: CSV-Exporte werden Collections mit Feldtypen, Referenzen und Multi-Referenzen; die
+  Collection-Listen im HTML werden strukturell gebunden (Sortierung, Limit, „nur veröffentlichte"),
+  die Vorlagen-Felder an Text-, Rich-Text-, Bild-, **Hintergrundbild**-, Link- und
+  Multi-Asset-Bindungen. Detailseiten binden gegen den aktuellen Eintrag.
+- **Verhalten statt Webflow-Skripte**: Menü- und Dropdown-Klicks werden als ycode-Interaktionen
+  erzeugt, Webflows IX2-Definitionen ohne `eval` gelesen und auf Animationen abgebildet (9 Hover,
+  4 Scroll-into-view, 3 Klick). `webflow.js` und jQuery werden nicht mitgeliefert.
+- **Jeder Verlust wird gemeldet.** Der Ergebnisdialog zeigt die Zählungen und die Warnungen **nach
+  Ursache gruppiert** (CSS ohne Entsprechung, geratene CMS-Zuordnung, Dateien, HTML/Widgets,
+  Animationen, Sonstiges) mit einem Satz, was die Gruppe bedeutet. Zwei Optionen im Dialog:
+  CDN-Download der CMS-Bilder abschalten und Slug-Kollisionen mit Suffix lösen statt abbrechen.
+- **Ein Slug-Konflikt bricht ab, bevor geschrieben wird** (`400 {"code":"slug_conflict"}`); die
+  Startseite und die Fehlerseiten der Migration werden wiederverwendet statt dupliziert.
+- Neue Module: `server-materializer.ts` (schreibt über die Repositories, nie über HTTP oder Zustand),
+  `convert-bridge.ts`, `components.ts`, `pages.ts`, `index.ts` und die Route
+  `app/(builder)/ycode/api/webwow/webflow/import/route.ts` (owner|admin, multipart, 300 s).
+
+**Korrekturen dieser Runde**
+
+- **CMS-Hintergrundbilder blieben leer.** Die vier Klassen, die `--bg-img` überhaupt erst anzeigen
+  (`bg-cover bg-center bg-no-repeat bg-[image:var(--bg-img)]`), standen nur in `layer.classes` — einem
+  abgeleiteten Wert, den ycode aus dem Style-Stack neu berechnet. Sie werden jetzt als Override am
+  obersten Style-Chip verankert und überleben jedes Neu-Auffalten; auf der Werk-Seite sind das 85
+  Karten, die vorher nichts angezeigt haben.
+- **Die zweite Videoquelle verschwand still.** Webflow liefert mp4 und webm, ycode speichert eine
+  Datei pro Video. Die mp4 wird behalten, die verworfene webm jetzt als `embed_dropped` gemeldet.
 
 ### Nachgezogen aus dem alten Fork (0.9.x) — White-Label und Fehlerkorrekturen
 

@@ -336,7 +336,7 @@ export function normaliseDeclarations(
   vars: Record<string, string>,
   assetUrl: CssAssetResolver,
   warn: Warnings,
-): { css: string; boundBackground: boolean; dropped: CssDeclaration[] } {
+): { css: string; normalised: CssDeclaration[]; boundBackground: boolean; dropped: CssDeclaration[] } {
   const ctx: NormaliseContext = { vars, assetUrl, warn, mode: 'convert' };
   const out: CssDeclaration[] = [];
   const dropped: CssDeclaration[] = [];
@@ -347,8 +347,9 @@ export function normaliseDeclarations(
     if (r.dropped) dropped.push(decl);
     out.push(...r.decls);
   }
-  const css = dedupeByProp(out).map((d) => `${d.prop}: ${d.value}`).join('; ');
-  return { css, boundBackground, dropped };
+  const normalised = dedupeByProp(out);
+  const css = normalised.map((d) => `${d.prop}: ${d.value}`).join('; ');
+  return { css, normalised, boundBackground, dropped };
 }
 
 /** Serialise declarations for residual CSS (vars resolved, urls rewritten, `!important` kept). */
@@ -360,9 +361,29 @@ function residualBlock(decls: CssDeclaration[], vars: Record<string, string>, as
 }
 
 /** Declaration block -> whitespace-safe Tailwind classes. */
-function convertBlock(decls: CssDeclaration[], vars: Record<string, string>, assetUrl: CssAssetResolver, warn: Warnings): { classes: string[]; boundBackground: boolean } {
-  const { css, boundBackground } = normaliseDeclarations(decls, vars, assetUrl, warn);
-  const classes = css ? cssToClasses(css).map(fixClassWhitespace).filter(Boolean) : [];
+/**
+ * Convert one declaration block to utility classes, **one declaration at a
+ * time**, so that
+ *
+ *  a) a value containing a `;` (a `url(data:…;base64,…)`) cannot corrupt the
+ *     declaration after it — upstream's `cssToClasses` splits its input on `;`;
+ *  b) every declaration that yields no class at all is counted in a
+ *     `css_dropped` warning naming the property. Without this the loss is
+ *     invisible: `cssToClasses` silently returns `[]` for anything its
+ *     arbitrary-value fallback refuses (SPEC §4.5, target "every dropped
+ *     declaration is counted").
+ */
+function convertBlock(decls: CssDeclaration[], vars: Record<string, string>, assetUrl: CssAssetResolver, warn: Warnings, selector: string): { classes: string[]; boundBackground: boolean } {
+  const { normalised, boundBackground } = normaliseDeclarations(decls, vars, assetUrl, warn);
+  const classes: string[] = [];
+  for (const decl of normalised) {
+    const produced = cssToClasses(`${decl.prop}: ${decl.value}`).map(fixClassWhitespace).filter(Boolean);
+    if (produced.length === 0) {
+      warn.add('css_dropped', `declaration ${decl.prop} on ${selector} produced no utility class`);
+      continue;
+    }
+    classes.push(...produced);
+  }
   return { classes, boundBackground };
 }
 
@@ -433,6 +454,15 @@ function scopeSelector(selector: string): string {
 
 export interface BuildStyleModelInput {
   siteCss: string[];
+  /**
+   * Webflow's own `normalize.css` / `components.css`. Only their **tag** rules
+   * are read — `h1 { font-size: 38px }` and friends, which every Webflow page
+   * relies on and which no site class repeats. Their `.w-*` rules are covered
+   * by `framework-classes.ts`, and nothing from these sheets ever reaches the
+   * residual CSS: v1 shipped all 54 KB of them verbatim, which is exactly what
+   * v2 exists to stop.
+   */
+  frameworkCss?: string[];
   assetUrl: CssAssetResolver;
   warn: Warnings;
 }
@@ -441,18 +471,25 @@ export function buildStyleModel(input: BuildStyleModelInput): WfStyleModel {
   const { assetUrl, warn } = input;
 
   // 1. Tokenize every sheet in order; merge :root vars (later sheets win).
-  const sheets: CssSheet[] = input.siteCss.map((css) => tokenizeCss(css));
+  // Framework sheets come first so the site stylesheet always overrides them.
+  const sources: { css: string; framework: boolean }[] = [
+    ...(input.frameworkCss ?? []).map((css) => ({ css, framework: true })),
+    ...input.siteCss.map((css) => ({ css, framework: false })),
+  ];
   const vars: Record<string, string> = {};
-  const rules: CssRule[] = [];
+  const rules: (CssRule & { framework?: boolean })[] = [];
   const atRules: CssSheet['atRules'] = [];
   const fontFaces: CssFontFace[] = [];
   let orderOffset = 0;
-  for (const sheet of sheets) {
-    Object.assign(vars, sheet.rootVars);
-    for (const rule of sheet.rules) rules.push({ ...rule, order: rule.order + orderOffset });
+  for (const source of sources) {
+    const sheet: CssSheet = tokenizeCss(source.css);
+    if (!source.framework) {
+      Object.assign(vars, sheet.rootVars);
+      atRules.push(...sheet.atRules);
+      fontFaces.push(...sheet.fontFaces);
+    }
+    for (const rule of sheet.rules) rules.push({ ...rule, order: rule.order + orderOffset, framework: source.framework });
     orderOffset += sheet.rules.length + 1;
-    atRules.push(...sheet.atRules);
-    fontFaces.push(...sheet.fontFaces);
   }
 
   const classAccum = new Map<string, VariantAccumulator>();
@@ -480,10 +517,16 @@ export function buildStyleModel(input: BuildStyleModelInput): WfStyleModel {
   };
 
   for (const rule of rules) {
-    for (const d of rule.declarations) {
-      if (d.prop === 'font-family') addFamily(resolveVars(d.value, vars).split(',')[0] ?? '');
-    }
     const parsed = parseSelector(rule.selector);
+    // Framework sheets contribute tag defaults and nothing else: no class
+    // styles (the `.w-*` shims live in framework-classes.ts), no residual CSS,
+    // no font families of their own.
+    if (rule.framework && (parsed.kind !== 'tag' || !UPSTREAM_TAGS.has(parsed.tag ?? ''))) continue;
+    if (!rule.framework) {
+      for (const d of rule.declarations) {
+        if (d.prop === 'font-family') addFamily(resolveVars(d.value, vars).split(',')[0] ?? '');
+      }
+    }
     const bp = breakpointOf(rule);
 
     if (parsed.kind === 'tag') {
@@ -498,7 +541,7 @@ export function buildStyleModel(input: BuildStyleModelInput): WfStyleModel {
           tagCss.push(wrapped);
         }
       }
-      if (!UNDERLAY_TAGS.has(tag) || !statePseudo || !convertible) {
+      if (!rule.framework && (!UNDERLAY_TAGS.has(tag) || !statePseudo || !convertible)) {
         noteResidual(rule, parsed, !convertible ? (bp === 'tiny' ? 'tiny' : 'media') : 'complex');
       }
       continue;
@@ -522,7 +565,7 @@ export function buildStyleModel(input: BuildStyleModelInput): WfStyleModel {
       continue;
     }
 
-    const { classes, boundBackground } = convertBlock(rule.declarations, vars, assetUrl, warn);
+    const { classes, boundBackground } = convertBlock(rule.declarations, vars, assetUrl, warn, parsed.raw);
     const breakpoint: ConvertibleBreakpoint = bp === 'none' ? 'main' : bp;
     let key: string;
     let accum: Map<string, VariantAccumulator>;

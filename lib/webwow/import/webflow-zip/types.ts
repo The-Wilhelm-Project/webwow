@@ -132,6 +132,8 @@ export interface WfNodeMeta {
   siteClasses: string[];
   /** `id` attribute (`w-node-*` ids included). */
   htmlId?: string;
+  /** The residual stylesheet still selects this id, so the layer must keep it. */
+  keepHtmlId?: boolean;
   /** `data-w-id`. */
   wId?: string;
   /** Remaining attributes (`data-*`, `role`, `aria-*`), diagnostics only. */

@@ -318,3 +318,60 @@ test('sample stylesheet: sizes, conversions, residual CSS and class hygiene', { 
   assert.ok(model.classes.get('overflow-hidden')!.ref.classes.includes('overflow-hidden'), 'produced by `overflow: hidden`');
   assert.ok(!model.classes.get('grid')!.ref.classes.includes('grid'), 'the Webflow class `.grid` has no display:grid');
 });
+
+test('a declaration that yields no utility class is counted in a css_dropped warning', () => {
+  const warn = new Warnings();
+  // `background-clip: text` is deliberately skipped by upstream's converter and
+  // `speak` has no Tailwind mapping and no arbitrary fallback worth emitting.
+  const model = buildStyleModel({
+    siteCss: ['.quiet { background-clip: text; color: #111 }'],
+    assetUrl: () => null,
+    warn,
+  });
+  assert.deepEqual(model.classes.get('quiet')!.ref.classes, ['text-[#111]']);
+  const dropped = warn.list.filter((w) => w.code === 'css_dropped');
+  assert.equal(dropped.length, 1);
+  assert.match(dropped[0].message, /background-clip on \.quiet produced no utility class/);
+});
+
+test('a value containing a semicolon does not corrupt the declaration after it', () => {
+  const warn = new Warnings();
+  const model = buildStyleModel({
+    siteCss: ['.d { background-image: url("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="); color: #222 }'],
+    assetUrl: () => null,
+    warn,
+  });
+  const classes = model.classes.get('d')!.ref.classes;
+  assert.ok(classes.includes('text-[#222]'), `colour survived: ${classes.join(' ')}`);
+  assert.equal(warn.count('css_dropped'), 0);
+});
+
+test('framework sheets contribute tag defaults only — no class styles, no residual', () => {
+  const warn = new Warnings();
+  const model = buildStyleModel({
+    frameworkCss: [`
+      h1 { font-size: 38px; line-height: 44px; margin-top: 20px }
+      p { margin-top: 0; margin-bottom: 10px }
+      .w-nav { position: relative; z-index: 1000 }
+      .w-richtext:after { content: ' '; display: table }
+      @media (max-width: 479px) { h1 { font-size: 30px } }
+    `],
+    siteCss: ['h1 { color: #111 } .hero { padding: 10px }'],
+    assetUrl: () => null,
+    warn,
+  });
+
+  const h1 = model.tags.get('h1')!;
+  assert.ok(h1.classes.includes('text-[38px]'), `h1 size: ${h1.classes.join(' ')}`);
+  assert.ok(h1.classes.includes('leading-[44px]'));
+  assert.ok(h1.classes.includes('text-[#111]'), 'the site sheet still overrides the framework default');
+  assert.ok(model.tags.get('p')!.classes.includes('mb-[10px]'));
+
+  // Nothing framework-side leaks into classes or the residual stylesheet.
+  assert.equal(model.classes.has('w-nav'), false);
+  assert.equal(model.classes.has('w-richtext'), false);
+  assert.deepEqual([...model.classes.keys()], ['hero']);
+  assert.equal(model.residual.rules.length, 0);
+  assert.equal(model.residualCss.trim(), '');
+  assert.equal(warn.count('css_residual'), 0);
+});

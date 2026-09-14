@@ -56,8 +56,9 @@ body:
     attributes:
       label: Deployment type
       options:
-        - Self-hosted
-        - Webwow Cloud
+        - Docker (docker compose)
+        - Manual (npm run start)
+        - Development (npm run dev)
     validations:
       required: true
 

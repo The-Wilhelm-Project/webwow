@@ -23,6 +23,31 @@ export async function up(knex: Knex): Promise<void> {
     'CREATE INDEX idx_mcp_tokens_token ON mcp_tokens(token) WHERE is_active = true',
   );
 
+  await knex.schema.raw('ALTER TABLE mcp_tokens ENABLE ROW LEVEL SECURITY');
+
+  await knex.schema.raw(`
+    CREATE POLICY "MCP tokens are viewable by authenticated users"
+      ON mcp_tokens FOR SELECT
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can create MCP tokens"
+      ON mcp_tokens FOR INSERT
+      WITH CHECK ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can update MCP tokens"
+      ON mcp_tokens FOR UPDATE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can delete MCP tokens"
+      ON mcp_tokens FOR DELETE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
 }
 
 export async function down(knex: Knex): Promise<void> {

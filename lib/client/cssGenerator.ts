@@ -9,6 +9,7 @@
 
 import type { Component, Layer } from '@/types';
 import { DEFAULT_TEXT_STYLES } from '@/lib/text-format-utils';
+import { TAILWIND_CUSTOM_VARIANTS } from '@/lib/tailwind-custom-variants';
 
 /**
  * Extract all classes from layers recursively
@@ -132,8 +133,7 @@ export async function generateCSS(layers: Layer[]): Promise<string> {
   <meta charset="UTF-8">
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
   <style type="text/tailwindcss">
-    @custom-variant current (&[aria-current]);
-    @custom-variant disabled (&:is(:disabled, [aria-disabled]));
+    ${TAILWIND_CUSTOM_VARIANTS}
   </style>
 </head>
 <body>
@@ -196,7 +196,7 @@ export async function generateCSS(layers: Layer[]): Promise<string> {
  * Save CSS to settings via API and update the settings store
  */
 export async function saveCSS(css: string, key: 'draft_css' | 'published_css'): Promise<void> {
-  const response = await fetch(`/webwow/api/settings/${key}`, {
+  const response = await fetch(`/ycode/api/settings/${key}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ value: css }),
@@ -219,22 +219,35 @@ async function collectAllLayers(pageLayers: Layer[]): Promise<Layer[]> {
   const { useComponentsStore } = await import('@/stores/useComponentsStore');
   const { components, componentDrafts } = useComponentsStore.getState();
 
-  // Track which components have drafts
+  // `componentDrafts` is keyed by component id then variant id since the
+  // variants refactor (`Record<componentId, Record<variantId, Layer[]>>`).
+  // Track which components have any working draft at all.
   const draftComponentIds = new Set(Object.keys(componentDrafts));
 
   // Collect layers from all components (prefer drafts over saved versions)
   const componentLayers: Layer[] = [];
 
-  // Add component drafts first (these are the latest edits)
-  Object.values(componentDrafts).forEach((layers) => {
-    if (layers && Array.isArray(layers)) {
-      componentLayers.push(...layers);
-    }
+  // Add component drafts first (these are the latest edits). Walk every
+  // variant so classes that only appear in non-primary variants make it into
+  // the compiled stylesheet.
+  Object.values(componentDrafts).forEach((variantMap) => {
+    if (!variantMap || typeof variantMap !== 'object') return;
+    Object.values(variantMap).forEach((variantLayers) => {
+      if (Array.isArray(variantLayers)) {
+        componentLayers.push(...variantLayers);
+      }
+    });
   });
 
-  // Add saved components that don't have drafts
+  // Add saved components that don't have drafts. Same reason as above:
+  // include every variant so e.g. `bg-[#35b7d4]` on Variant 3 is compiled.
   components.forEach((component: Component) => {
-    if (!draftComponentIds.has(component.id) && component.layers && Array.isArray(component.layers)) {
+    if (draftComponentIds.has(component.id)) return;
+    if (component.variants && component.variants.length > 0) {
+      component.variants.forEach((variant) => {
+        if (Array.isArray(variant.layers)) componentLayers.push(...variant.layers);
+      });
+    } else if (Array.isArray(component.layers)) {
       componentLayers.push(...component.layers);
     }
   });

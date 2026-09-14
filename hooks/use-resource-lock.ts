@@ -1,14 +1,23 @@
-// Realtime updates disabled - was using Supabase Realtime
+/**
+ * useResourceLock Hook
+ * 
+ * Generic hook for locking any type of resource (layers, collection items, etc.)
+ * Handles lock acquisition, release, and real-time broadcasting.
+ * 
+ * This is the unified locking system - all collaboration locks run through here.
+ */
 
 'use client';
 
 import { useCallback, useEffect, useRef } from 'react';
 import { useCollaborationPresenceStore, getResourceLockKey } from '@/stores/useCollaborationPresenceStore';
-import { getSessionId } from '@/stores/useCollaborationPresenceStore';
+import { useAuthStore } from '@/stores/useAuthStore';
+import { createClient } from '@/lib/supabase-browser';
+import { createChannelLifecycle } from '@/lib/realtime-channel';
 
 export interface UseResourceLockOptions {
-  resourceType: string;
-  channelName: string;
+  resourceType: string; // e.g., 'layer', 'collection_item'
+  channelName: string; // Supabase channel name for broadcasting
 }
 
 export interface UseResourceLockReturn {
@@ -22,41 +31,225 @@ export interface UseResourceLockReturn {
 
 export function useResourceLock({
   resourceType,
+  channelName,
 }: UseResourceLockOptions): UseResourceLockReturn {
-  const sessionId = getSessionId();
+  const user = useAuthStore((state) => state.user);
+  const currentUserId = useCollaborationPresenceStore((state) => state.currentUserId);
+  const currentUserColor = useCollaborationPresenceStore((state) => state.currentUserColor);
   const storeAcquireLock = useCollaborationPresenceStore((state) => state.acquireResourceLock);
   const storeReleaseLock = useCollaborationPresenceStore((state) => state.releaseResourceLock);
-
+  const updateUser = useCollaborationPresenceStore((state) => state.updateUser);
+  
+  const channelRef = useRef<any>(null);
   const myLocksRef = useRef<Set<string>>(new Set());
+  
+  // Refs to avoid stale closures in channel handlers
+  const currentUserIdRef = useRef(currentUserId);
+  currentUserIdRef.current = currentUserId;
+  const userRef = useRef(user);
+  userRef.current = user;
 
-  // TODO: Replace with polling or WebSocket for broadcasting lock changes
+  // Track if user is available (for effect dependency)
+  const hasUser = !!user;
+  
+  // Initialize Supabase channel for lock broadcasting
+  useEffect(() => {
+    // Use ref for user data but still depend on hasUser for triggering
+    const currentUser = userRef.current;
+    if (!channelName || !currentUser) {
+      return;
+    }
+    
+    const lifecycle = createChannelLifecycle();
+
+    const initializeChannel = async () => {
+      try {
+        const supabase = await createClient();
+        const channel = supabase.channel(channelName);
+        if (!lifecycle.track(channel, supabase)) return;
+
+        // Listen for lock changes from other users
+        channel.on('broadcast', { event: `${resourceType}_lock_acquired` }, (payload) => {
+          const { resourceId, userId, userEmail, userColor } = payload.payload;
+          // Use ref to get latest currentUserId (avoid stale closure)
+          if (userId !== currentUserIdRef.current) {
+            storeAcquireLock(resourceType, resourceId, userId);
+            // Store user info for badge display
+            if (userEmail) {
+              updateUser(userId, {
+                user_id: userId,
+                email: userEmail,
+                color: userColor || '#3b82f6',
+                last_active: Date.now()
+              });
+            }
+          }
+        });
+        
+        channel.on('broadcast', { event: `${resourceType}_lock_released` }, (payload) => {
+          const { resourceId, userId } = payload.payload;
+          // Use ref to get latest currentUserId (avoid stale closure)
+          if (userId !== currentUserIdRef.current) {
+            storeReleaseLock(resourceType, resourceId);
+          }
+        });
+        
+        // Handle lock synchronization requests from newly joined users
+        channel.on('broadcast', { event: `${resourceType}_request_locks` }, async () => {
+          const myUserId = currentUserIdRef.current;
+          if (!myUserId) return;
+          
+          // Respond with my current locks
+          const { resourceLocks, currentUserColor: myColor } = useCollaborationPresenceStore.getState();
+          const myLocks = Object.entries(resourceLocks)
+            .filter(([key, lock]) => 
+              key.startsWith(`${resourceType}:`) && 
+              lock.user_id === myUserId &&
+              Date.now() <= lock.expires_at
+            );
+          
+          for (const [key] of myLocks) {
+            const resourceId = key.replace(`${resourceType}:`, '');
+            await channel.send({
+              type: 'broadcast',
+              event: `${resourceType}_lock_acquired`,
+              payload: {
+                resourceId,
+                userId: myUserId,
+                userEmail: userRef.current?.email,
+                userColor: myColor,
+                timestamp: Date.now()
+              }
+            });
+          }
+        });
+        
+        // Subscribe to the channel
+        channel.subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            const myUserId = currentUserIdRef.current;
+            
+            // Request current locks from all connected users
+            channel.send({
+              type: 'broadcast',
+              event: `${resourceType}_request_locks`,
+              payload: { userId: myUserId }
+            });
+            
+            // Re-broadcast any locks this user currently holds
+            // This handles the race condition where locks were acquired before channel was ready
+            if (myUserId) {
+              const { resourceLocks, currentUserColor: myColor } = useCollaborationPresenceStore.getState();
+              const myLocks = Object.entries(resourceLocks)
+                .filter(([key, lock]) => 
+                  key.startsWith(`${resourceType}:`) && 
+                  lock.user_id === myUserId &&
+                  Date.now() <= lock.expires_at
+                );
+              
+              for (const [key] of myLocks) {
+                const resourceId = key.replace(`${resourceType}:`, '');
+                channel.send({
+                  type: 'broadcast',
+                  event: `${resourceType}_lock_acquired`,
+                  payload: {
+                    resourceId,
+                    userId: myUserId,
+                    userEmail: userRef.current?.email,
+                    userColor: myColor,
+                    timestamp: Date.now()
+                  }
+                });
+              }
+            }
+          }
+        });
+        
+        if (lifecycle.cancelled) return;
+        channelRef.current = channel;
+      } catch (error) {
+        console.error(`Failed to initialize ${resourceType} lock channel:`, error);
+      }
+    };
+
+    initializeChannel();
+
+    return () => {
+      lifecycle.teardown();
+      channelRef.current = null;
+    };
+  // Note: We use hasUser (boolean) instead of user (object) to avoid reinit on object reference changes.
+  // The handlers use refs to get the latest values.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channelName, hasUser, resourceType]);
+
+  // Broadcast lock change
+  const broadcastLockChange = useCallback(async (action: 'acquire' | 'release', resourceId: string) => {
+    if (!channelRef.current || !currentUserId) {
+      return;
+    }
+    
+    try {
+      await channelRef.current.send({
+        type: 'broadcast',
+        event: action === 'acquire' ? `${resourceType}_lock_acquired` : `${resourceType}_lock_released`,
+        payload: {
+          resourceId,
+          userId: currentUserId,
+          userEmail: user?.email,
+          userColor: currentUserColor,
+          timestamp: Date.now()
+        }
+      });
+    } catch (error) {
+      console.error(`Failed to broadcast ${resourceType} lock change:`, error);
+    }
+  }, [currentUserId, user?.email, currentUserColor, resourceType]);
 
   const acquireLock = useCallback(async (resourceId: string): Promise<boolean> => {
+    if (!currentUserId) {
+      return false;
+    }
+    
+    // Check if already locked by another user
     const { resourceLocks } = useCollaborationPresenceStore.getState();
     const key = getResourceLockKey(resourceType, resourceId);
     const existingLock = resourceLocks[key];
-
-    if (existingLock && existingLock.user_id !== sessionId && Date.now() <= existingLock.expires_at) {
-      return false;
+    
+    if (existingLock && existingLock.user_id !== currentUserId && Date.now() <= existingLock.expires_at) {
+      return false; // Cannot acquire - locked by another user
     }
-
-    storeAcquireLock(resourceType, resourceId, sessionId);
+    
+    // Acquire the lock
+    storeAcquireLock(resourceType, resourceId, currentUserId);
     myLocksRef.current.add(resourceId);
-
+    
+    // Broadcast to other users
+    await broadcastLockChange('acquire', resourceId);
+    
     return true;
-  }, [sessionId, resourceType, storeAcquireLock]);
+  }, [currentUserId, resourceType, storeAcquireLock, broadcastLockChange]);
 
   const releaseLock = useCallback(async (resourceId: string) => {
+    if (!currentUserId) {
+      return;
+    }
+    
     storeReleaseLock(resourceType, resourceId);
     myLocksRef.current.delete(resourceId);
-  }, [resourceType, storeReleaseLock]);
+    
+    // Broadcast to other users
+    await broadcastLockChange('release', resourceId);
+  }, [currentUserId, resourceType, storeReleaseLock, broadcastLockChange]);
 
   const releaseAllLocks = useCallback(async () => {
+    if (!currentUserId) return;
+    
     const locks = Array.from(myLocksRef.current);
     for (const resourceId of locks) {
       await releaseLock(resourceId);
     }
-  }, [releaseLock]);
+  }, [currentUserId, releaseLock]);
 
   const isLocked = useCallback((resourceId: string): boolean => {
     const { resourceLocks } = useCollaborationPresenceStore.getState();
@@ -66,14 +259,17 @@ export function useResourceLock({
   }, [resourceType]);
 
   const isLockedByOther = useCallback((resourceId: string): boolean => {
-    return useCollaborationPresenceStore.getState().isResourceLockedByOther(resourceType, resourceId, sessionId);
-  }, [resourceType, sessionId]);
+    if (!currentUserId) return false;
+    return useCollaborationPresenceStore.getState().isResourceLockedByOther(resourceType, resourceId, currentUserId);
+  }, [resourceType, currentUserId]);
 
   const getLockOwner = useCallback((resourceId: string): string | null => {
     const lock = useCollaborationPresenceStore.getState().getResourceLock(resourceType, resourceId);
     return lock?.user_id || null;
   }, [resourceType]);
 
+  // Cleanup on page unload only (not on component remount)
+  // This ensures locks are released when user actually leaves the page
   useEffect(() => {
     const handleBeforeUnload = () => {
       const locks = Array.from(myLocksRef.current);
@@ -83,7 +279,7 @@ export function useResourceLock({
         });
       }
     };
-
+    
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);

@@ -1,14 +1,14 @@
 {
-  "name": "Website Builder",
-  "short_name": "Website",
+  "name": "Webwow",
+  "short_name": "Webwow",
   "icons": [
     {
-      "src": "favicon.svg",
+      "src": "/favicon.svg",
       "sizes": "any",
       "type": "image/svg+xml"
     },
     {
-      "src": "apple-touch-icon.png",
+      "src": "/apple-touch-icon.png",
       "sizes": "180x180",
       "type": "image/png"
     }
@@ -16,5 +16,5 @@
   "theme_color": "#0369FF",
   "background_color": "#0a0a0a",
   "display": "standalone",
-  "start_url": "./"
+  "start_url": "/ycode"
 }

@@ -134,13 +134,11 @@ export function buildGoogleFontUrl(font: Font): string {
 
   const sortedWeights = [...new Set(weights)].sort();
 
-  // Heuristic: contiguous weight range likely means variable font without axes data
-  const weightRange = getContiguousWeightRange(sortedWeights);
-  if (weightRange) {
-    return buildVariableFontUrl(family, weightRange, hasItalic, font.axes);
-  }
-
-  // Static font: list individual weights
+  // No variable `axes` data → treat as static and list discrete weights.
+  // Discrete `wght@` syntax works for both static and variable families, while
+  // the range syntax (`wght@200..800`) is rejected by Google Fonts for static
+  // families (e.g. Spectral) — the stylesheet then fails and text silently
+  // falls back to a system serif (Times).
   if (hasItalic) {
     const tuples: string[] = [];
     for (const w of sortedWeights) tuples.push(`0,${w}`);
@@ -208,34 +206,6 @@ function extractWeightsFromVariants(variants: string[]): string[] {
 }
 
 /**
- * Check if sorted weights form a contiguous range in steps of 100
- * (e.g. 100,200,...,900). Returns the range bounds or null for non-contiguous sets.
- * Variable fonts on Google Fonts expose a full contiguous range, while static
- * fonts typically list only a few discrete weights.
- */
-function getContiguousWeightRange(
-  sortedWeights: string[]
-): { min: number; max: number } | null {
-  const nums = sortedWeights
-    .map(Number)
-    .filter(n => !isNaN(n) && n >= 100 && n <= 900);
-
-  if (nums.length < 3) return null;
-
-  const min = nums[0];
-  const max = nums[nums.length - 1];
-  const expectedCount = (max - min) / 100 + 1;
-
-  if (nums.length !== expectedCount) return null;
-
-  for (let i = 1; i < nums.length; i++) {
-    if (nums[i] - nums[i - 1] !== 100) return null;
-  }
-
-  return { min, max };
-}
-
-/**
  * Get available Tailwind weights for a font.
  * Variable fonts derive weights from the wght axis range.
  */
@@ -270,6 +240,43 @@ export function mapExtensionToFontFormat(extension: string): string | null {
   }
 }
 
+/** Map a CSS @font-face format string to the MIME type used on `<link>` preloads */
+export function mapFontFormatToMimeType(format: string | null | undefined): string {
+  switch ((format || 'woff2').toLowerCase()) {
+    case 'woff2': return 'font/woff2';
+    case 'woff': return 'font/woff';
+    case 'truetype': return 'font/ttf';
+    case 'opentype': return 'font/otf';
+    case 'embedded-opentype': return 'application/vnd.ms-fontobject';
+    default: return 'font/woff2';
+  }
+}
+
+/** A font file to hint the browser to fetch early via `<link rel="preload" as="font">` */
+export interface FontPreload {
+  href: string;
+  type: string;
+}
+
+/**
+ * Build preload descriptors for uploaded custom fonts so the browser starts
+ * fetching the binaries from <head> instead of after CSS parsing — reducing the
+ * font swap window (CLS/LCP). Google fonts are excluded: they ship many
+ * unicode-range subsets, and preloading all of them wastes bandwidth.
+ */
+export function getCustomFontPreloads(fonts: Font[]): FontPreload[] {
+  const seen = new Set<string>();
+  const preloads: FontPreload[] = [];
+
+  for (const font of fonts) {
+    if (font.type !== 'custom' || !font.url || seen.has(font.url)) continue;
+    seen.add(font.url);
+    preloads.push({ href: font.url, type: mapFontFormatToMimeType(font.kind) });
+  }
+
+  return preloads;
+}
+
 /**
  * Build CSS for loading all installed fonts.
  * Generates @import rules for Google fonts and @font-face for custom fonts.
@@ -298,6 +305,46 @@ export function getGoogleFontLinks(fonts: Font[]): string[] {
   return fonts
     .filter(f => f.type === 'google')
     .map(f => buildGoogleFontUrl(f));
+}
+
+/**
+ * Modern Chrome User-Agent. Google Fonts varies its CSS response by UA —
+ * sending a recent Chrome UA reliably returns woff2 with `unicode-range`
+ * subset rules, which is what we want to inline.
+ */
+const MODERN_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/**
+ * Fetch the resolved @font-face rules for the given Google Fonts CSS URLs and
+ * return them as a single CSS string suitable for inlining in <style>.
+ *
+ * Inlining the CSS skips the round-trip to fonts.googleapis.com — the browser
+ * can start fetching the woff2 binaries directly while parsing the document.
+ *
+ * Returns an empty string if any URL fails to fetch so the caller can fall
+ * back to <link rel="stylesheet"> without partially breaking font loading.
+ */
+export async function fetchGoogleFontsCss(urls: string[]): Promise<string> {
+  if (urls.length === 0) return '';
+
+  try {
+    const responses = await Promise.all(
+      urls.map((url) =>
+        fetch(url, {
+          headers: { 'User-Agent': MODERN_UA },
+          signal: AbortSignal.timeout(5000),
+        }),
+      ),
+    );
+
+    if (responses.some((r) => !r.ok)) return '';
+
+    const cssBlocks = await Promise.all(responses.map((r) => r.text()));
+    return cssBlocks.join('\n');
+  } catch {
+    return '';
+  }
 }
 
 /** Build CSS for custom fonts only (@font-face rules, no @import) */

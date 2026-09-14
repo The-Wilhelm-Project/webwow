@@ -14,12 +14,11 @@ interface MigrationCheckerProps {
   onComplete: () => void;
 }
 
-interface SetupStatusResponse {
-  is_configured: boolean;
-  is_setup_complete: boolean;
-}
-
-async function parseResponseSafely(response: Response): Promise<any> {
+/**
+ * Webwow: read a response without assuming JSON. A proxy or a 500 HTML error page
+ * would otherwise blow up on `response.json()` with `Unexpected token '<'`.
+ */
+async function parseResponseSafely(response: Response): Promise<Record<string, unknown>> {
   const contentType = response.headers.get('content-type') || '';
   const rawText = await response.text();
 
@@ -45,29 +44,11 @@ export default function MigrationChecker({ onComplete }: MigrationCheckerProps) 
   const checkAndRunMigrations = useCallback(async () => {
     try {
       setIsChecking(true);
-      setProgress('Checking database status...');
+      setProgress('Checking and running migrations...');
       setError(null);
 
-      const statusResponse = await fetch('/webwow/api/setup/status', {
-        method: 'GET',
-      });
-      const statusResult = await parseResponseSafely(statusResponse) as SetupStatusResponse & { error?: string };
-
-      if (!statusResponse.ok) {
-        console.error('Setup status request failed', statusResult);
-        onComplete(); // Do not block builder on status check failure
-        return;
-      }
-
-      if (statusResult.is_setup_complete) {
-        onComplete();
-        return;
-      }
-
-      setProgress('Running database migrations...');
-
-      // Setup is incomplete - run migrations once.
-      const response = await fetch('/webwow/api/setup/migrate', {
+      // Single API call: checks AND runs migrations if needed
+      const response = await fetch('/ycode/api/setup/migrate', {
         method: 'POST',
       });
       const result = await parseResponseSafely(response);
@@ -80,7 +61,7 @@ export default function MigrationChecker({ onComplete }: MigrationCheckerProps) 
       }
 
       if (result.error) {
-        setError(result.error);
+        setError(String(result.error));
         setIsChecking(false);
         return;
       }

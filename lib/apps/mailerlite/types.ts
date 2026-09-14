@@ -60,7 +60,7 @@ export interface MailerLitePaginatedResponse<T> {
 // =============================================================================
 
 export interface MailerLiteFieldMapping {
-  /** The form field key (from Webwow form payload) */
+  /** The form field key (from Ycode form payload) */
   formField: string;
   /** The MailerLite subscriber field key */
   mailerliteField: string;

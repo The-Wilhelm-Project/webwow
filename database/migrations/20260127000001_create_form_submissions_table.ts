@@ -45,9 +45,44 @@ export async function up(knex: Knex): Promise<void> {
     ON form_submissions(status)
   `);
 
+  // Enable Row Level Security
+  await knex.schema.raw('ALTER TABLE form_submissions ENABLE ROW LEVEL SECURITY');
+
+  // RLS policies - submissions can be created by anyone (public forms)
+  // but only viewed/managed by authenticated users
+  // INSERT policy requires status = 'new' to prevent abuse
+  await knex.schema.raw(`
+    CREATE POLICY "Anyone can create form submissions"
+      ON form_submissions FOR INSERT
+      WITH CHECK (status = 'new')
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can view form submissions"
+      ON form_submissions FOR SELECT
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can update form submissions"
+      ON form_submissions FOR UPDATE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can delete form submissions"
+      ON form_submissions FOR DELETE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
 }
 
 export async function down(knex: Knex): Promise<void> {
+  // Drop policies
+  await knex.schema.raw('DROP POLICY IF EXISTS "Anyone can create form submissions" ON form_submissions');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can view form submissions" ON form_submissions');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can update form submissions" ON form_submissions');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can delete form submissions" ON form_submissions');
+
   // Drop table
   await knex.schema.dropTableIfExists('form_submissions');
 }

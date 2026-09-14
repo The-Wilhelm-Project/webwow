@@ -1,3 +1,7 @@
+# Webwow – local / small-server deployment: PostgreSQL + the app.
+#
+# The defaults below are meant for LOCAL use. Before exposing Webwow to the
+# internet change at least ADMIN_PASSWORD and PAGE_AUTH_SECRET (and the DB password).
 services:
   db:
     image: postgres:16-alpine
@@ -8,29 +12,82 @@ services:
       POSTGRES_PASSWORD: webwow_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Only reachable from the host itself (psql / GUI clients). Drop the whole
+    # `ports:` block if you do not need host access - the app talks to `db` internally.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U webwow"]
+      test: ["CMD-SHELL", "pg_isready -U webwow -d webwow"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   app:
-    build: .
+    build:
+      context: .
+      args:
+        # Multi-site mode (docs/MULTISITE.md) is baked into the build: "1" makes the
+        # published pages render per request so several sites can share this app.
+        # Keep the build arg and the WEBWOW_MULTI_SITE environment value below identical.
+        WEBWOW_MULTI_SITE: "0"
     restart: unless-stopped
     ports:
       - "3002:3002"
     environment:
+      # --- Required ---
       DATABASE_URL: postgresql://webwow:webwow_password@db:5432/webwow
+      # Owner account. Created on first start when no user exists; the env password
+      # is always accepted for this account (recovery). Log in at /ycode with these.
+      ADMIN_EMAIL: admin@webwow.local
       ADMIN_PASSWORD: changeme
+      # !!! PLACEHOLDER - REPLACE BEFORE GOING LIVE !!!
+      # Signs session and page-auth cookies. Generate a real value with:
+      #     openssl rand -hex 32
+      # Anyone who knows this string can forge a login cookie.
       PAGE_AUTH_SECRET: bitte-aendern-mit-openssl-rand-hex-32
+      # --- Multi-site (docs/MULTISITE.md) ---
+      # "1" enables several websites (one PostgreSQL database per site, dashboard at /webwow).
+      # Must match the build arg above; PAGE_AUTH_SECRET becomes mandatory and the DB role
+      # needs CREATEDB (the compose db user is a superuser, so nothing else to do).
+      WEBWOW_MULTI_SITE: "0"
+      # Host suffix for site previews (<slug>.<base>); unset = <slug>.localhost only.
+      # WEBWOW_SITES_BASE_DOMAIN: sites.example.com
+      # Set to "1" ONLY behind a reverse proxy that overwrites x-forwarded-host.
+      # WEBWOW_TRUSTED_PROXY: "0"
+      # --- Storage / network ---
       UPLOAD_DIR: /app/uploads
+      PORT: "3002"
+      # Public URL of the site, used for absolute links (sitemap, OG tags). Optional.
+      # NEXT_PUBLIC_SITE_URL: https://www.example.com
+      # Session cookie Secure flag: auto by request protocol; force "true" behind an https proxy that does not send x-forwarded-proto.
+      # WEBWOW_SECURE_COOKIES: "true"
+      # Set to "true" when DATABASE_URL points to a managed Postgres that requires TLS.
+      # DATABASE_SSL: "false"
+      # --- Optional: AI builder (bring your own key; can also be set in Settings -> Agent) ---
+      # ANTHROPIC_API_KEY: ""
+      # OPENAI_API_KEY: ""
+      # GEMINI_API_KEY: ""
+      # ANTHROPIC_MODEL: ""
+      # --- Optional: Templates API / maps ---
+      # TEMPLATE_API_URL: ""
+      # NEXT_PUBLIC_TEMPLATE_API_URL: ""
+      # TEMPLATE_UPLOAD_API_KEY: ""
+      # MAPBOX_ACCESS_TOKEN: ""
+      # GOOGLE_MAPS_EMBED_API_KEY: ""
     volumes:
+      # Must match UPLOAD_DIR above. Assets survive rebuilds and image updates.
       - uploads:/app/uploads
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      # Public (unauthenticated) route that also touches the database.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3002/ycode/api/setup/status || exit 1"]
+      interval: 30s
+      timeout: 5s
+      # Migrations + Next startup can take a while on first boot.
+      start_period: 60s
+      retries: 5
 
 volumes:
   postgres_data:

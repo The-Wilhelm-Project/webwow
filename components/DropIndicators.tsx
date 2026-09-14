@@ -34,7 +34,7 @@ export function DropLineIndicator({
       className={cn(
         'absolute left-0 right-0 h-[1.5px] z-50 bg-primary',
         'animate-in fade-in duration-100',
-        position === 'above' ? 'top-0' : 'bottom-0',
+        position === 'above' ? '-top-[0.75px]' : '-bottom-[0.75px]',
         className
       )}
       style={{ marginLeft: `${offsetLeft}px` }}

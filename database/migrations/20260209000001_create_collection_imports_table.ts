@@ -25,8 +25,41 @@ export async function up(knex: Knex): Promise<void> {
     table.index('status');
   });
 
+  // Enable Row Level Security
+  await knex.schema.raw('ALTER TABLE collection_imports ENABLE ROW LEVEL SECURITY');
+
+  // Create RLS policies - only authenticated users can access
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can view collection imports"
+      ON collection_imports FOR SELECT
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can create collection imports"
+      ON collection_imports FOR INSERT
+      WITH CHECK ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can update collection imports"
+      ON collection_imports FOR UPDATE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can delete collection imports"
+      ON collection_imports FOR DELETE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
 }
 
 export async function down(knex: Knex): Promise<void> {
+  // Drop policies
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can view collection imports" ON collection_imports');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can create collection imports" ON collection_imports');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can update collection imports" ON collection_imports');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can delete collection imports" ON collection_imports');
+
   await knex.schema.dropTableIfExists('collection_imports');
 }

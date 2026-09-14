@@ -2,7 +2,9 @@
 
 ## 🎯 Project Context
 
-**Webwow** is a self-hosted visual website builder built with Next.js 15, TypeScript, Tailwind CSS, and Supabase. This is a **fast-moving team project** where multiple developers use Cursor simultaneously. Code consistency and abstraction are critical.
+**Webwow** is a white-label fork of [ycode](https://github.com/ycode/ycode): a self-hosted visual website builder built with Next.js, TypeScript and Tailwind CSS. Upstream talks to Supabase; Webwow keeps every upstream file byte-identical and swaps the Supabase seams for a PostgreSQL + local-disk compatibility layer under `lib/webwow/**` (see [docs/UPSTREAM-SYNC.md](docs/UPSTREAM-SYNC.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)). Code consistency and abstraction are critical.
+
+**Before changing an upstream file:** check `scripts/sync-lists.sh`. Anything not listed there must stay byte-identical to upstream — put fork-specific code under `lib/webwow/**` instead. `bash scripts/check-upstream-identity.sh` enforces this.
 
 ---
 
@@ -334,7 +336,7 @@ export default async function Page({ params }: { params: { slug: string } }) {
 }
 
 // ✅ Client Component (with directive)
-// app/webwow/components/LayersTree.tsx
+// app/ycode/components/LayersTree.tsx
 'use client';
 
 import { useState } from 'react';

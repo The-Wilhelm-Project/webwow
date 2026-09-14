@@ -1,11 +1,54 @@
-node_modules
-.next
+# Webwow – files that must never end up in the Docker build context / image.
+# Keep this in sync with the Dockerfile's COPY list (only .next, public, storage,
+# node_modules, database, lib, types, knexfile.ts, next.config.ts, tsconfig.json,
+# package.json and docker-entrypoint.sh are copied into the runner stage).
+
+# VCS
 .git
 .gitignore
+.gitattributes
+.github
+.husky
+
+# Dependencies / build output (rebuilt inside the image)
+node_modules
+.next
+out
+build
+dist
+*.tsbuildinfo
+coverage
+
+# Local secrets and env files
 .env
 .env.*
+!.env.example
+*.credentials.json
+
+# Runtime data (mounted as volumes, never baked into the image)
 uploads
+
+# Sample import data (~100 MB), dev tooling and documentation
+import
+tools
+docs
 *.md
+CHANGELOG.md
+LICENSE
+
+# Editor / IDE / AI assistant config
 .cursor
+.cursorrules
 .vscode
 .idea
+.editorconfig
+.DS_Store
+Thumbs.db
+
+# Vercel (not used by Webwow)
+.vercel
+vercel.json
+
+# Scratch / test databases
+*.sqlite
+*.sqlite3

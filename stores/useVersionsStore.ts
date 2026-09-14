@@ -13,6 +13,59 @@ import type { Version, VersionEntityType, VersionHistoryItem } from '@/types';
 // Entity key for tracking (combines type and id)
 type EntityKey = `${VersionEntityType}:${string}`;
 
+// Hard cap on cached version payloads. Each version carries layer/style/etc.
+// snapshots, so an unbounded cache grows quickly with every save during a
+// session.
+const MAX_VERSION_CACHE_SIZE = 200;
+
+/**
+ * Drop versions not referenced by any entity stack. Falls back to oldest-first
+ * eviction when everything is still referenced and the cap is exceeded.
+ */
+function pruneVersionCacheForced(
+  versionCache: Record<string, Version>,
+  entityStates: Record<EntityKey, UndoRedoState>
+): Record<string, Version> {
+  const referenced = new Set<string>();
+  for (const state of Object.values(entityStates)) {
+    for (const id of state.undoStack) referenced.add(id);
+    for (const id of state.redoStack) referenced.add(id);
+  }
+
+  const kept: Record<string, Version> = {};
+  let droppedAny = false;
+  for (const key of Object.keys(versionCache)) {
+    if (referenced.has(key)) {
+      kept[key] = versionCache[key];
+    } else {
+      droppedAny = true;
+    }
+  }
+
+  const keptKeys = Object.keys(kept);
+  if (keptKeys.length <= MAX_VERSION_CACHE_SIZE) {
+    return droppedAny ? kept : versionCache;
+  }
+
+  const trimmed: Record<string, Version> = {};
+  const startIdx = keptKeys.length - MAX_VERSION_CACHE_SIZE;
+  for (let i = startIdx; i < keptKeys.length; i++) {
+    trimmed[keptKeys[i]] = kept[keptKeys[i]];
+  }
+  return trimmed;
+}
+
+/** Skip pruning when the cache is below the cap. */
+function pruneVersionCache(
+  versionCache: Record<string, Version>,
+  entityStates: Record<EntityKey, UndoRedoState>
+): Record<string, Version> {
+  if (Object.keys(versionCache).length <= MAX_VERSION_CACHE_SIZE) {
+    return versionCache;
+  }
+  return pruneVersionCacheForced(versionCache, entityStates);
+}
+
 interface UndoRedoState {
   // Stack of version IDs we can undo (most recent at end)
   undoStack: string[];
@@ -164,7 +217,7 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
 
     try {
       const response = await fetch(
-        `/webwow/api/versions?entityType=${entityType}&entityId=${entityId}&limit=100`
+        `/ycode/api/versions?entityType=${entityType}&entityId=${entityId}&limit=100`
       );
       const result = await response.json();
 
@@ -232,9 +285,8 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
       const canUndo = undoStack.length > 0;
       const canRedo = redoStack.length > 0;
 
-      set((state) => ({
-        versionCache: { ...state.versionCache, ...newCache },
-        entityStates: {
+      set((state) => {
+        const nextEntityStates = {
           ...state.entityStates,
           [key]: {
             undoStack,
@@ -243,17 +295,24 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
             canRedo,
             isLoading: false,
           },
-        },
-        historySummaries: {
-          ...state.historySummaries,
-          [key]: versions.map((v) => ({
-            id: v.id,
-            action_type: v.action_type,
-            description: v.description,
-            created_at: v.created_at,
-          })),
-        },
-      }));
+        };
+        return {
+          versionCache: pruneVersionCache(
+            { ...state.versionCache, ...newCache },
+            nextEntityStates
+          ),
+          entityStates: nextEntityStates,
+          historySummaries: {
+            ...state.historySummaries,
+            [key]: versions.map((v) => ({
+              id: v.id,
+              action_type: v.action_type,
+              description: v.description,
+              created_at: v.created_at,
+            })),
+          },
+        };
+      });
     } catch (error) {
       console.error('Failed to load version history:', error);
       set({ error: 'Failed to load version history' });
@@ -298,18 +357,23 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
     // 2. Clear redo stack (we've made a new change, any redo history is now invalid)
     const newUndoStack = [...entityState.undoStack, version.id];
 
-    set({
-      versionCache: { ...versionCache, [version.id]: version },
-      entityStates: {
-        ...entityStates,
-        [key]: {
-          ...entityState,
-          undoStack: newUndoStack,
-          redoStack: [], // Clear redo stack
-          canUndo: true,
-          canRedo: false,
-        },
+    const nextEntityStates = {
+      ...entityStates,
+      [key]: {
+        ...entityState,
+        undoStack: newUndoStack,
+        redoStack: [], // Clear redo stack
+        canUndo: true,
+        canRedo: false,
       },
+    };
+
+    set({
+      versionCache: pruneVersionCache(
+        { ...versionCache, [version.id]: version },
+        nextEntityStates
+      ),
+      entityStates: nextEntityStates,
     });
   },
 
@@ -330,7 +394,7 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
     // Fetch if not cached
     if (!version) {
       try {
-        const response = await fetch(`/webwow/api/versions/${versionId}`);
+        const response = await fetch(`/ycode/api/versions/${versionId}`);
         const result = await response.json();
         if (result.data) {
           version = result.data;
@@ -361,7 +425,7 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
       // Fetch if not cached
       if (!previousVersion) {
         try {
-          const response = await fetch(`/webwow/api/versions/${previousVersionId}`);
+          const response = await fetch(`/ycode/api/versions/${previousVersionId}`);
           const result = await response.json();
           if (result.data) {
             previousVersion = result.data;
@@ -416,7 +480,7 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
     // Fetch if not cached
     if (!version) {
       try {
-        const response = await fetch(`/webwow/api/versions/${versionId}`);
+        const response = await fetch(`/ycode/api/versions/${versionId}`);
         const result = await response.json();
         if (result.data) {
           version = result.data;
@@ -490,7 +554,7 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
 
     if (!version) {
       try {
-        const response = await fetch(`/webwow/api/versions/${versionId}`);
+        const response = await fetch(`/ycode/api/versions/${versionId}`);
         const result = await response.json();
         if (result.data) {
           version = result.data;
@@ -518,9 +582,15 @@ export const useVersionsStore = create<VersionsStore>((set, get) => ({
       const newHistorySummaries = { ...state.historySummaries };
       delete newHistorySummaries[key];
 
+      // Drop versions that were only referenced by the cleared entity.
+      // Temporarily fill above the cap so pruneVersionCache runs the orphan
+      // sweep regardless of current cache size.
+      const versionCache = pruneVersionCacheForced(state.versionCache, newEntityStates);
+
       return {
         entityStates: newEntityStates,
         historySummaries: newHistorySummaries,
+        versionCache,
       };
     });
   },

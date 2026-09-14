@@ -2,48 +2,17 @@
  * Utility Elements Templates
  */
 
-import { BlockTemplate, SliderSettings, LightboxSettings, Layer } from '@/types';
+import { BlockTemplate, Layer } from '@/types';
 import { getTemplateRef, getLayerFromTemplate } from './blocks';
+import { DEFAULT_MAP_SETTINGS } from '@/lib/map-utils';
+import { DEFAULT_SLIDER_SETTINGS, DEFAULT_LIGHTBOX_SETTINGS } from '@/lib/slider-constants';
 
-/** Default slider settings applied when creating a new slider */
-export const DEFAULT_SLIDER_SETTINGS: SliderSettings = {
-  navigation: true,
-  groupSlide: 1,
-  slidesPerGroup: 1,
-  loop: 'none',
-  centered: false,
-  touchEvents: false,
-  slideToClicked: false,
-  mousewheel: false,
-
-  pagination: true,
-  paginationType: 'bullets',
-  paginationClickable: true,
-  autoplay: false,
-  pauseOnHover: true,
-  delay: '3',
-  animationEffect: 'slide',
-  easing: 'ease-in-out',
-  duration: '0.5',
-};
-
-/** Default lightbox settings applied when creating a new lightbox */
-export const DEFAULT_LIGHTBOX_SETTINGS: LightboxSettings = {
-  files: [],
-  filesSource: 'files',
-  filesField: null,
-  thumbnails: true,
-  navigation: true,
-  pagination: true,
-  zoom: false,
-  doubleTapZoom: false,
-  mousewheel: false,
-  overlay: 'light',
-  groupId: '',
-  animationEffect: 'slide',
-  easing: 'ease-in-out',
-  duration: '0.5',
-};
+// Slider/lightbox constants and `isSliderLayerName` were moved to
+// `lib/slider-constants.ts` so consumers (incl. the public renderer) can
+// import them without dragging the full template tree into their bundle.
+// Re-exported here for backwards compatibility with builder-only callers.
+export { DEFAULT_SLIDER_SETTINGS, DEFAULT_LIGHTBOX_SETTINGS, SLIDER_LAYER_NAMES, isSliderLayerName, SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
+export type { SliderLayerName } from '@/lib/slider-constants';
 
 /** Base design properties shared by all slide layers */
 const SLIDE_BASE_DESIGN = {
@@ -108,47 +77,27 @@ export function createSlideLayer(title: string, imageUrl: string): Layer | null 
   return slide;
 }
 
-/** All layer names that are part of the slider element */
-export const SLIDER_LAYER_NAMES = [
-  'slider', 'slides', 'slide',
-  'slideNavigationWrapper', 'slideButtonPrev', 'slideButtonNext',
-  'slidePaginationWrapper', 'slideBullets', 'slideFraction', 'slideBullet',
-] as const;
-
-export type SliderLayerName = typeof SLIDER_LAYER_NAMES[number];
-
-/** Check if a layer name belongs to the slider element family */
-export function isSliderLayerName(name: string): name is SliderLayerName {
-  return (SLIDER_LAYER_NAMES as readonly string[]).includes(name);
-}
-
-/** Swiper CSS classes needed for core layout (used on canvas + production) */
-export const SWIPER_CLASS_MAP: Record<string, string> = {
-  slider: 'swiper',
-  slides: 'swiper-wrapper',
-  slide: 'swiper-slide',
-};
-
-/** Data attributes added to slider nav/pagination elements on production for Swiper targeting */
-export const SWIPER_DATA_ATTR_MAP: Record<string, string> = {
-  slideButtonPrev: 'data-slider-prev',
-  slideButtonNext: 'data-slider-next',
-  slideBullets: 'data-slider-pagination',
-  slideFraction: 'data-slider-fraction',
-};
-
 const CHEVRON_LEFT_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clip-rule="evenodd"></path></svg>';
 const CHEVRON_RIGHT_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"></path></svg>';
 
 export const utilityTemplates: Record<string, BlockTemplate> = {
   map: {
-    icon: 'block',
+    icon: 'map',
     name: 'Map',
     template: {
       name: 'map',
-      classes: ['w-full', 'h-full'],
-      children: [],
-    },
+      classes: ['w-full', 'h-[400px]', 'overflow-hidden'],
+      design: {
+        sizing: {
+          isActive: true,
+          width: '100%',
+          height: '400px',
+        }
+      },
+      settings: {
+        map: { ...DEFAULT_MAP_SETTINGS }
+      }
+    }
   },
 
   lightbox: {
@@ -198,11 +147,11 @@ export const utilityTemplates: Record<string, BlockTemplate> = {
       classes: ['shrink-0', 'w-full', 'h-full', 'flex', 'flex-col', 'items-center', 'justify-center', 'relative', 'gap-[5px]', 'bg-cover', 'bg-center', 'bg-no-repeat', 'bg-[image:var(--bg-img)]'],
       design: {
         ...SLIDE_BASE_DESIGN,
-        backgrounds: { isActive: true, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat', backgroundImage: '--bg-img', bgImageVars: { '--bg-img': 'url(/webwow/layouts/assets/placeholder-2.webp)' } },
+        backgrounds: { isActive: true, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat', backgroundImage: '--bg-img', bgImageVars: { '--bg-img': 'url(/ycode/layouts/assets/placeholder-2.webp)' } },
       },
       restrictions: { ancestor: 'slides' },
       variables: {
-        backgroundImage: { src: { type: 'dynamic_text', data: { content: '/webwow/layouts/assets/placeholder-2.webp' } } },
+        backgroundImage: { src: { type: 'dynamic_text', data: { content: '/ycode/layouts/assets/placeholder-2.webp' } } },
       },
       children: [
         {
@@ -429,9 +378,9 @@ export const utilityTemplates: Record<string, BlockTemplate> = {
           restrictions: { copy: false, delete: false, ancestor: 'slider' },
           open: true,
           children: [
-            createSlideRef('Slide 1', '/webwow/layouts/assets/placeholder-2.webp'),
-            createSlideRef('Slide 2', '/webwow/layouts/assets/placeholder-3.webp'),
-            createSlideRef('Slide 3', '/webwow/layouts/assets/placeholder-7.webp'),
+            createSlideRef('Slide 1', '/ycode/layouts/assets/placeholder-2.webp'),
+            createSlideRef('Slide 2', '/ycode/layouts/assets/placeholder-3.webp'),
+            createSlideRef('Slide 3', '/ycode/layouts/assets/placeholder-7.webp'),
           ],
         },
         // Navigation (prev/next buttons)

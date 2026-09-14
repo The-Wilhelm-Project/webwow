@@ -3,6 +3,7 @@
  */
 
 import type { CollectionField } from '@/types';
+import { isDateFieldType } from '@/lib/collection-field-utils';
 
 /**
  * Format a UTC date in the specified timezone
@@ -139,31 +140,65 @@ export function localDatetimeToUTC(
 
 /**
  * Format date field values in collection item data
- * Converts UTC ISO strings to formatted timezone-aware display strings
+ * Converts UTC ISO strings to formatted timezone-aware display strings.
+ * date_only fields are formatted without time/timezone conversion.
  */
 export function formatDateFieldsInItemValues(
   itemValues: Record<string, string>,
   collectionFields: CollectionField[],
   timezone: string = 'UTC'
 ): Record<string, string> {
-  // Build a set of date field IDs for quick lookup
-  const dateFieldIds = new Set(
-    collectionFields.filter(f => f.type === 'date').map(f => f.id)
-  );
+  const dateFields = collectionFields.filter(f => isDateFieldType(f.type));
 
-  // If no date fields, return original values
-  if (dateFieldIds.size === 0) {
+  if (dateFields.length === 0) {
     return itemValues;
   }
 
-  // Format date values
   const formattedValues = { ...itemValues };
-  for (const fieldId of dateFieldIds) {
-    const value = itemValues[fieldId];
+  for (const field of dateFields) {
+    const value = itemValues[field.id];
     if (value) {
-      formattedValues[fieldId] = formatDateInTimezone(value, timezone, 'display');
+      formattedValues[field.id] = field.type === 'date_only'
+        ? formatDateOnly(value)
+        : formatDateInTimezone(value, timezone, 'display');
     }
   }
 
   return formattedValues;
+}
+
+/** Clamp date input values to valid ranges (4-digit year, month 1-12, day 1-31) */
+export function clampDateInputValue(value: string): string {
+  if (!value) return value;
+  const timeSuffix = value.includes('T') ? value.slice(value.indexOf('T')) : '';
+  const datePart = value.includes('T') ? value.slice(0, value.indexOf('T')) : value;
+  const parts = datePart.split('-');
+  if (parts.length < 3) return value;
+
+  let [yearStr] = parts;
+  const [, monthStr, dayStr] = parts;
+
+  if (yearStr.length > 4) {
+    yearStr = `000${yearStr.slice(-1)}`.slice(-4);
+  }
+
+  const month = Math.min(Math.max(parseInt(monthStr, 10) || 1, 1), 12);
+  const maxDay = new Date(parseInt(yearStr, 10) || 1, month, 0).getDate();
+  const day = Math.min(Math.max(parseInt(dayStr, 10) || 1, 1), maxDay);
+
+  const clamped = `${yearStr}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  return clamped + timeSuffix;
+}
+
+/** Format a date_only value for display (no time, no timezone) */
+export function formatDateOnly(value: string): string {
+  const dateStr = value.slice(0, 10);
+  const [year, month, day] = dateStr.split('-').map(Number);
+  if (!year || !month || !day) return value;
+  const date = new Date(year, month - 1, day);
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date);
 }

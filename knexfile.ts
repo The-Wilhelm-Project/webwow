@@ -1,10 +1,13 @@
 import type { Knex } from 'knex';
 import path from 'path';
+import { WebwowPgClient } from './lib/webwow/sites/pg-client';
 
 /**
- * Knex Configuration for Webwow Migrations
+ * Knex Configuration for Webwow
  *
- * Connects directly to PostgreSQL via DATABASE_URL environment variable.
+ * Webwow runs against a plain PostgreSQL database (no Supabase). The connection
+ * comes from `DATABASE_URL`; migrations live in `database/migrations` and are the
+ * unmodified upstream ycode migrations plus the Webwow bootstrap/defaults ones.
  */
 
 function getPoolNumber(envKey: string, fallback: number): number {
@@ -14,9 +17,26 @@ function getPoolNumber(envKey: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function getConnection(): Knex.PgConnectionConfig {
+  const url = process.env.DATABASE_URL;
+
+  if (!url) {
+    throw new Error('DATABASE_URL is not set. Copy .env.example to .env and configure the PostgreSQL connection.');
+  }
+
+  const ssl = process.env.DATABASE_SSL;
+  if (ssl === 'true' || ssl === '1' || ssl === 'require') {
+    return { connectionString: url, ssl: { rejectUnauthorized: false } };
+  }
+
+  return { connectionString: url };
+}
+
 const createConfig = (): Knex.Config => ({
-  client: 'pg',
-  connection: process.env.DATABASE_URL,
+  // Webwow: site-aware client, see docs/MULTISITE.md
+  client: WebwowPgClient,
+  // Resolved lazily so importing this file (e.g. from Next.js) never throws.
+  connection: async () => getConnection(),
   migrations: {
     directory: path.join(process.cwd(), 'database/migrations'),
     extension: 'ts',
@@ -36,6 +56,7 @@ const createConfig = (): Knex.Config => ({
 const config: { [key: string]: Knex.Config } = {
   development: createConfig(),
   production: createConfig(),
+  test: createConfig(),
 };
 
 export default config;

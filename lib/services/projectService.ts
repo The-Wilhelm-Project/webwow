@@ -1,16 +1,17 @@
 /**
  * Project Service
  *
- * Handles exporting and importing project data as portable .webwow dumps.
+ * Handles exporting and importing project data as portable .ycode dumps.
  */
 
 import { scryptSync, randomBytes, createCipheriv, createDecipheriv } from 'crypto';
 import { gzipSync, gunzipSync } from 'zlib';
 import type { Knex } from 'knex';
 import { getKnexClient, closeKnexClient, testKnexConnection } from '../knex-client';
-import { STORAGE_FOLDERS } from '@/lib/asset-constants';
-import { readFile, uploadFile, getPublicUrl } from '@/lib/local-storage';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { STORAGE_BUCKET, STORAGE_FOLDERS } from '@/lib/asset-constants';
 import { migrations } from '../migrations-loader';
+import { guardKnexForMigrationReplay } from '@/lib/migration-replay-guard';
 
 /**
  * Tables in FK-safe order (parents before children).
@@ -40,12 +41,16 @@ export const CONTENT_TABLES = [
   'app_settings',
   'form_submissions',
   'color_variables',
+  'global_variables',
+  'ai_chats',
 ];
 
 /**
  * Tables to truncate before import (children first for FK safety).
  */
 export const TABLES_TO_TRUNCATE = [
+  'ai_chats',
+  'global_variables',
   'color_variables',
   'webhook_deliveries',
   'form_submissions',
@@ -140,7 +145,7 @@ const SALT_LENGTH = 16;
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
-/** 4-byte magic header to identify encrypted .webwow files. */
+/** 4-byte magic header to identify encrypted .ycode files. */
 const ENCRYPTED_MAGIC = Buffer.from('YCEN');
 
 /** Encrypt a buffer with a password using AES-256-GCM. */
@@ -182,17 +187,239 @@ export function isEncrypted(data: Buffer): boolean {
 }
 
 /**
- * Pack export data into a .webwow file buffer.
- * Gzip-compresses the JSON; optionally encrypts with a password.
+ * Serialize export data to a UTF-8 Buffer without ever holding the whole
+ * document as a single JS string. Rows and asset files are stringified one at
+ * a time and concatenated as Buffers, so the payload can exceed V8's max string
+ * length (~512MB) that `JSON.stringify` on the full object would hit. Output is
+ * byte-identical to `JSON.stringify(exportData)`.
  */
-export function packExport(exportData: ProjectExportData, password?: string): Buffer {
-  const json = JSON.stringify(exportData);
-  const compressed = gzipSync(Buffer.from(json, 'utf-8'));
-  return password ? encryptBuffer(compressed, password) : compressed;
+function serializeExportToBuffer(exportData: ProjectExportData): Buffer {
+  const chunks: Buffer[] = [];
+  const push = (str: string) => chunks.push(Buffer.from(str, 'utf-8'));
+
+  push('{"manifest":');
+  push(JSON.stringify(exportData.manifest));
+
+  push(',"data":{');
+  const tables = Object.keys(exportData.data);
+  tables.forEach((table, tableIndex) => {
+    if (tableIndex > 0) push(',');
+    push(`${JSON.stringify(table)}:[`);
+    const rows = exportData.data[table];
+    rows.forEach((row, rowIndex) => {
+      if (rowIndex > 0) push(',');
+      push(JSON.stringify(row));
+    });
+    push(']');
+  });
+  push('}');
+
+  if (exportData.files) {
+    push(',"files":[');
+    exportData.files.forEach((file, fileIndex) => {
+      if (fileIndex > 0) push(',');
+      push(JSON.stringify(file));
+    });
+    push(']');
+  }
+  push('}');
+
+  return Buffer.concat(chunks);
 }
 
 /**
- * Unpack a .webwow file buffer into export data.
+ * Pack export data into a .ycode file buffer.
+ * Gzip-compresses the JSON; optionally encrypts with a password.
+ */
+export function packExport(exportData: ProjectExportData, password?: string): Buffer {
+  const compressed = gzipSync(serializeExportToBuffer(exportData));
+  return password ? encryptBuffer(compressed, password) : compressed;
+}
+
+/** Chunk size used when streaming the packed export (256 KB). */
+const EXPORT_STREAM_CHUNK_SIZE = 256 * 1024;
+
+/**
+ * Pack the export and expose it as a chunked ReadableStream.
+ * Streaming the response avoids platform buffered-response size caps
+ * (e.g. Vercel's 4.5MB limit) that break downloads of large backups.
+ */
+export function packExportToStream(
+  exportData: ProjectExportData,
+  password?: string,
+  chunkSize: number = EXPORT_STREAM_CHUNK_SIZE
+): { stream: ReadableStream<Uint8Array>; size: number } {
+  const buffer = packExport(exportData, password);
+  const size = buffer.length;
+  let offset = 0;
+
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset >= size) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(offset + chunkSize, size);
+      controller.enqueue(new Uint8Array(buffer.subarray(offset, end)));
+      offset = end;
+    },
+  });
+
+  return { stream, size };
+}
+
+// JSON structural byte codes (all ASCII, safe to scan over UTF-8 content).
+const CH_QUOTE = 0x22;
+const CH_BACKSLASH = 0x5c;
+const CH_OPEN_BRACE = 0x7b;
+const CH_CLOSE_BRACE = 0x7d;
+const CH_OPEN_BRACKET = 0x5b;
+const CH_CLOSE_BRACKET = 0x5d;
+const CH_COLON = 0x3a;
+const CH_COMMA = 0x2c;
+
+/** Advance past JSON whitespace, returning the next significant byte index. */
+function skipWhitespace(buf: Buffer, i: number): number {
+  while (i < buf.length) {
+    const c = buf[i];
+    if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) i++;
+    else break;
+  }
+  return i;
+}
+
+/** Given a `"` at index `i`, return the index just past the closing quote. */
+function skipString(buf: Buffer, i: number): number {
+  let j = i + 1;
+  while (j < buf.length) {
+    const c = buf[j];
+    if (c === CH_BACKSLASH) j += 2;
+    else if (c === CH_QUOTE) return j + 1;
+    else j++;
+  }
+  throw new Error('Unterminated string in backup JSON');
+}
+
+/** Return the index just past the JSON value starting at `i` (first non-ws byte). */
+function skipValue(buf: Buffer, i: number): number {
+  const c = buf[i];
+  if (c === CH_QUOTE) return skipString(buf, i);
+  if (c === CH_OPEN_BRACE || c === CH_OPEN_BRACKET) {
+    let depth = 0;
+    let j = i;
+    while (j < buf.length) {
+      const ch = buf[j];
+      if (ch === CH_QUOTE) {
+        j = skipString(buf, j);
+      } else if (ch === CH_OPEN_BRACE || ch === CH_OPEN_BRACKET) {
+        depth++;
+        j++;
+      } else if (ch === CH_CLOSE_BRACE || ch === CH_CLOSE_BRACKET) {
+        depth--;
+        j++;
+        if (depth === 0) return j;
+      } else {
+        j++;
+      }
+    }
+    throw new Error('Unterminated container in backup JSON');
+  }
+  // Primitive (number/true/false/null): read until a structural delimiter.
+  let j = i;
+  while (j < buf.length) {
+    const ch = buf[j];
+    if (ch === CH_COMMA || ch === CH_CLOSE_BRACE || ch === CH_CLOSE_BRACKET ||
+      ch === 0x20 || ch === 0x09 || ch === 0x0a || ch === 0x0d) break;
+    j++;
+  }
+  return j;
+}
+
+/** JSON.parse a single value slice — kept small so it never hits the string cap. */
+function parseSlice(buf: Buffer, start: number, end: number): unknown {
+  return JSON.parse(buf.toString('utf-8', start, end));
+}
+
+/**
+ * Parse a project export from its decompressed JSON buffer without ever
+ * materializing the whole document as one JS string. The manifest, each table
+ * row, and each asset file are parsed from their own small slices, so payloads
+ * larger than V8's max string length (~512MB) — which `JSON.parse` on the full
+ * text would reject — are handled. Accepts any standard JSON produced by
+ * `JSON.stringify(exportData)`, regardless of key order or whitespace.
+ */
+function parseExportFromBuffer(buf: Buffer): ProjectExportData {
+  const data: Record<string, Record<string, unknown>[]> = {};
+  let manifest: ProjectManifest | undefined;
+  let files: ExportFile[] | undefined;
+
+  let i = skipWhitespace(buf, 0);
+  if (buf[i] !== CH_OPEN_BRACE) throw new Error('Expected object at root');
+  i++;
+
+  while (true) {
+    i = skipWhitespace(buf, i);
+    if (buf[i] === CH_CLOSE_BRACE) break;
+
+    if (buf[i] !== CH_QUOTE) throw new Error('Expected object key');
+    const keyEnd = skipString(buf, i);
+    const key = JSON.parse(buf.toString('utf-8', i, keyEnd)) as string;
+    i = skipWhitespace(buf, keyEnd);
+    if (buf[i] !== CH_COLON) throw new Error('Expected colon after key');
+    i = skipWhitespace(buf, i + 1);
+
+    if (key === 'data') {
+      if (buf[i] !== CH_OPEN_BRACE) throw new Error('Expected object for "data"');
+      i = skipWhitespace(buf, i + 1);
+      while (buf[i] !== CH_CLOSE_BRACE) {
+        const tableKeyEnd = skipString(buf, i);
+        const table = JSON.parse(buf.toString('utf-8', i, tableKeyEnd)) as string;
+        i = skipWhitespace(buf, tableKeyEnd);
+        if (buf[i] !== CH_COLON) throw new Error('Expected colon after table name');
+        i = skipWhitespace(buf, i + 1);
+        if (buf[i] !== CH_OPEN_BRACKET) throw new Error('Expected array for table rows');
+        i = skipWhitespace(buf, i + 1);
+        const rows: Record<string, unknown>[] = [];
+        while (buf[i] !== CH_CLOSE_BRACKET) {
+          const rowEnd = skipValue(buf, i);
+          rows.push(parseSlice(buf, i, rowEnd) as Record<string, unknown>);
+          i = skipWhitespace(buf, rowEnd);
+          if (buf[i] === CH_COMMA) i = skipWhitespace(buf, i + 1);
+        }
+        data[table] = rows;
+        i = skipWhitespace(buf, i + 1);
+        if (buf[i] === CH_COMMA) i = skipWhitespace(buf, i + 1);
+      }
+      i++;
+    } else if (key === 'files') {
+      if (buf[i] !== CH_OPEN_BRACKET) throw new Error('Expected array for "files"');
+      i = skipWhitespace(buf, i + 1);
+      const collected: ExportFile[] = [];
+      while (buf[i] !== CH_CLOSE_BRACKET) {
+        const fileEnd = skipValue(buf, i);
+        collected.push(parseSlice(buf, i, fileEnd) as ExportFile);
+        i = skipWhitespace(buf, fileEnd);
+        if (buf[i] === CH_COMMA) i = skipWhitespace(buf, i + 1);
+      }
+      files = collected;
+      i++;
+    } else {
+      const valueEnd = skipValue(buf, i);
+      const value = parseSlice(buf, i, valueEnd);
+      if (key === 'manifest') manifest = value as ProjectManifest;
+      i = valueEnd;
+    }
+
+    i = skipWhitespace(buf, i);
+    if (buf[i] === CH_COMMA) i++;
+  }
+
+  if (!manifest) throw new Error('Missing manifest');
+  return files ? { manifest, data, files } : { manifest, data };
+}
+
+/**
+ * Unpack a .ycode file buffer into export data.
  * Handles both encrypted and plain gzipped files.
  */
 export function unpackImport(
@@ -215,14 +442,20 @@ export function unpackImport(
     compressed = buffer;
   }
 
-  const jsonString = gunzipSync(compressed).toString('utf-8');
-  const parsed = JSON.parse(jsonString);
+  const decompressed = gunzipSync(compressed);
+
+  let parsed: ProjectExportData;
+  try {
+    parsed = parseExportFromBuffer(decompressed);
+  } catch {
+    throw new ToastError('Invalid backup file', 'The backup file structure is not valid');
+  }
 
   if (!parsed.manifest || !parsed.data) {
     throw new ToastError('Invalid backup file', 'The backup file structure is not valid');
   }
 
-  return parsed as ProjectExportData;
+  return parsed;
 }
 
 // ─── Schema Cache ───────────────────────────────────────────────────
@@ -273,7 +506,7 @@ export async function loadSchemaInfo(
 
 // ─── Shared Helpers ──────────────────────────────────────────────────
 
-const DEFAULT_PROJECT_NAME = 'webwow-app';
+const DEFAULT_PROJECT_NAME = 'ycode-app';
 
 export async function getProjectName(
   knex: Awaited<ReturnType<typeof getKnexClient>>
@@ -362,11 +595,11 @@ export function sanitizeProjectNameSlug(value: string): string {
   return slug || DEFAULT_PROJECT_NAME;
 }
 
-/** Generate a filename for a .webwow export from the manifest. */
+/** Generate a filename for a .ycode export from the manifest. */
 export function getExportFilename(manifest: ProjectManifest): string {
   const name = sanitizeProjectNameSlug(manifest.projectName || DEFAULT_PROJECT_NAME);
   const ts = new Date(manifest.exportedAt).toISOString().slice(0, 19).replace('T', '-').replace(/:/g, '-');
-  return `${name}-${ts}.webwow`;
+  return `${name}-${ts}.ycode`;
 }
 
 // ─── Concurrency Helper ─────────────────────────────────────────────
@@ -405,10 +638,13 @@ export function generateStoragePath(originalPath: string): string {
 
 // ─── Asset File Helpers ──────────────────────────────────────────────
 
-/** Collect asset files from local storage as base64 (parallel). */
+/** Collect asset files from Supabase Storage as base64 (parallel). */
 export async function collectAssetFiles(
   assetRows: Record<string, unknown>[]
 ): Promise<ExportFile[]> {
+  const client = await getSupabaseAdmin();
+  if (!client) return [];
+
   const storagePaths = assetRows
     .map(r => r.storage_path as string | null)
     .filter((p): p is string => !!p);
@@ -418,17 +654,20 @@ export async function collectAssetFiles(
 
   return processInParallel(uniquePaths, async (storagePath): Promise<ExportFile | null> => {
     try {
-      const buffer = await readFile(storagePath);
+      const { data, error } = await client.storage
+        .from(STORAGE_BUCKET)
+        .download(storagePath);
 
-      if (!buffer) {
-        console.warn(`[collectAssetFiles] Failed to read ${storagePath}`);
+      if (error || !data) {
+        console.warn(`[collectAssetFiles] Failed to download ${storagePath}:`, error);
         return null;
       }
 
+      const buffer = await data.arrayBuffer();
       return {
         storagePath,
-        base64: buffer.toString('base64'),
-        mimeType: 'application/octet-stream',
+        base64: Buffer.from(buffer).toString('base64'),
+        mimeType: data.type || 'application/octet-stream',
       };
     } catch (err) {
       console.warn(`[collectAssetFiles] Error processing ${storagePath}:`, err);
@@ -437,22 +676,37 @@ export async function collectAssetFiles(
   });
 }
 
-/** Upload asset files to local storage and batch-update DB records. */
+/** Upload asset files to Supabase Storage and batch-update DB records. */
 export async function restoreAssetFiles(
   files: ExportFile[],
   db: Knex
 ): Promise<void> {
-  if (files.length === 0) return;
+  const client = await getSupabaseAdmin();
+  if (!client || files.length === 0) return;
 
   const pathUpdates = await processInParallel(files, async (file): Promise<{ oldPath: string; newPath: string; publicUrl: string } | null> => {
     try {
       const buffer = Buffer.from(file.base64, 'base64');
       const newPath = generateStoragePath(file.storagePath);
 
-      await uploadFile(newPath, buffer);
-      const publicUrl = getPublicUrl(newPath);
+      const { data, error } = await client.storage
+        .from(STORAGE_BUCKET)
+        .upload(newPath, buffer, {
+          contentType: file.mimeType,
+          cacheControl: '3600',
+          upsert: false,
+        });
 
-      return { oldPath: file.storagePath, newPath, publicUrl };
+      if (error || !data) {
+        console.warn(`[restoreAssetFiles] Failed to upload ${file.storagePath}:`, error);
+        return null;
+      }
+
+      const { data: urlData } = client.storage
+        .from(STORAGE_BUCKET)
+        .getPublicUrl(data.path);
+
+      return { oldPath: file.storagePath, newPath: data.path, publicUrl: urlData.publicUrl };
     } catch (err) {
       console.warn(`[restoreAssetFiles] Error uploading ${file.storagePath}:`, err);
       return null;
@@ -461,8 +715,9 @@ export async function restoreAssetFiles(
 
   if (pathUpdates.length === 0) return;
 
-  const whenStorage = pathUpdates.map(() => `WHEN ? THEN ?`).join(' ');
-  const whenUrl = pathUpdates.map(() => `WHEN ? THEN ?`).join(' ');
+  // Batch DB updates using a single raw query with CASE expressions
+  const whenStorage = pathUpdates.map((_, i) => `WHEN ? THEN ?`).join(' ');
+  const whenUrl = pathUpdates.map((_, i) => `WHEN ? THEN ?`).join(' ');
   const oldPaths = pathUpdates.map(u => u.oldPath);
   const storageBindings = pathUpdates.flatMap(u => [u.oldPath, u.newPath]);
   const urlBindings = pathUpdates.flatMap(u => [u.oldPath, u.publicUrl]);
@@ -633,10 +888,12 @@ export async function importProject(
       await restoreAssetFiles(files, knex);
     }
 
+    // Destructive DDL is blocked: these up()s replay against live data.
+    const guardedKnex = guardKnexForMigrationReplay(knex);
     const pending = getPendingMigrations(manifest.lastMigration);
     for (const migration of pending) {
       try {
-        await migration.up(knex);
+        await migration.up(guardedKnex);
       } catch (error) {
         console.warn(
           `[importProject] Migration ${migration.name} failed (may be expected for schema-only):`,

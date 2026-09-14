@@ -7,9 +7,11 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
+import { escapeHtml } from '@/lib/escape-html';
 
 export interface EmailSettings {
   enabled: boolean;
+  mode?: 'ycode' | 'custom';
   provider: string;
   smtpHost: string;
   smtpPort: string;
@@ -87,7 +89,7 @@ export async function testSmtpConnection(settings: EmailSettings): Promise<{ suc
 /**
  * Generate HTML email body for form submission notification
  */
-function generateEmailHtml(data: FormSubmissionEmailData): string {
+export function generateEmailHtml(data: FormSubmissionEmailData): string {
   const fields = Object.entries(data.payload)
     .map(
       ([key, value]) =>
@@ -119,24 +121,10 @@ function generateEmailHtml(data: FormSubmissionEmailData): string {
 /**
  * Generate plain text email body for form submission notification
  */
-function generateEmailText(data: FormSubmissionEmailData): string {
+export function generateEmailText(data: FormSubmissionEmailData): string {
   return Object.entries(data.payload)
     .map(([key, value]) => `${key}: ${String(value ?? '')}`)
     .join('\n');
-}
-
-/**
- * Escape HTML special characters to prevent XSS
- */
-function escapeHtml(text: string): string {
-  const htmlEntities: Record<string, string> = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  };
-  return text.replace(/[&<>"']/g, (char) => htmlEntities[char]);
 }
 
 /**

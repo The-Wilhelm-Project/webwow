@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# Cursor's IDE agent auto-injects a "Co-authored-by: Cursor" trailer via
+# --trailer when it runs git commit. Strip it so our history stays free of
+# AI attribution (per project conventions in .cursor/rules/commit-messages.mdc).
+# Safe no-op for human commits since the pattern only matches Cursor's exact line.
+
+MSG_FILE="$1"
+
+sed -i.bak -E '/^Co-authored-by:[[:space:]]*Cursor[[:space:]]*<[^>]*>[[:space:]]*$/d' "$MSG_FILE"
+rm -f "$MSG_FILE.bak"

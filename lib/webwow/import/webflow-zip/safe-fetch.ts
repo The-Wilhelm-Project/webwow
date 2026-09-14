@@ -218,10 +218,19 @@ function combineSignals(abort: AbortController, timeoutMs: number): AbortSignal 
   return abort.signal;
 }
 
-async function validateUrl(
+/**
+ * The URL half of `safeFetch`'s safety rules, without the download: https only,
+ * no credentials in the URL, host on the allowlist, and every address the host
+ * resolves to public. Returns the reason a URL is refused, or null when it
+ * passes. Exported so callers that speak a protocol of their own — the Webflow
+ * Data API client (`data-api.ts`) sends an `Authorization` header and reads
+ * JSON, which `safeFetch` deliberately cannot do — run through the same guard
+ * instead of reaching for a bare `fetch`.
+ */
+export async function checkUrlSafety(
   url: URL,
   allow: RegExp[],
-  lookup: NonNullable<SafeFetchOptions['lookupImpl']>,
+  lookup: NonNullable<SafeFetchOptions['lookupImpl']> = async (host: string) => dns.lookup(host, { all: true }),
 ): Promise<string | null> {
   if (url.protocol !== 'https:') return `only https URLs are allowed (${url.protocol})`;
   if (url.username || url.password) return 'URLs with credentials are not allowed';
@@ -267,7 +276,7 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
     let response: Response | null = null;
     const abort = new AbortController();
     for (let hop = 0; hop <= maxRedirects; hop++) {
-      const problem = await validateUrl(current, allow, lookup);
+      const problem = await checkUrlSafety(current, allow, lookup);
       if (problem) return { ok: false, error: problem };
       const res = await fetchImpl(current.toString(), {
         redirect: 'manual',

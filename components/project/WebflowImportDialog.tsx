@@ -71,6 +71,8 @@ interface ImportResult {
   warnings: WfWarning[];
   errors: string[];
   durationMs?: number;
+  cmsSource?: 'csv' | 'api' | 'mixed';
+  webflowSiteId?: string;
 }
 
 /** Warnungen nach Ursache gruppiert — jede Gruppe sagt, was der Hinweis bedeutet. */
@@ -111,6 +113,12 @@ const WARNING_GROUPS: { id: string; title: string; hint: string; codes: string[]
     title: 'Animationen',
     hint: 'Webflow-Interaktionen ohne Gegenstück in den ycode-Animationen.',
     codes: ['ix2_unsupported_event', 'ix2_unsupported_action', 'ix2_no_targets', 'ix2_ease_approximated'],
+  },
+  {
+    id: 'api',
+    title: 'Webflow-API',
+    hint: 'Meldungen zur optionalen CMS-Quelle „Webflow Data API“ — welche Collections zusätzlich kamen und welche Felder nicht 1:1 abbildbar waren.',
+    codes: ['cms_api_extra', 'cms_api_partial'],
   },
   {
     id: 'other',
@@ -175,6 +183,9 @@ export function WebflowImportDialog({
   const [csvFiles, setCsvFiles] = useState<File[]>([]);
   const [downloadRemoteAssets, setDownloadRemoteAssets] = useState(true);
   const [suffixSlugConflicts, setSuffixSlugConflicts] = useState(false);
+  const [useDataApi, setUseDataApi] = useState(false);
+  const [apiToken, setApiToken] = useState('');
+  const [apiSiteId, setApiSiteId] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -198,6 +209,9 @@ export function WebflowImportDialog({
     setCsvFiles([]);
     setDownloadRemoteAssets(true);
     setSuffixSlugConflicts(false);
+    setUseDataApi(false);
+    setApiToken('');
+    setApiSiteId('');
     setLoading(false);
     setResult(null);
     setError(null);
@@ -228,6 +242,10 @@ export function WebflowImportDialog({
       csvFiles.forEach((csvFile) => formData.append('csvFiles', csvFile));
       formData.append('remoteAssets', downloadRemoteAssets ? 'download' : 'skip');
       formData.append('pageSlugConflict', suffixSlugConflicts ? 'suffix' : 'fail');
+      if (useDataApi && apiToken.trim()) {
+        formData.append('webflowApiToken', apiToken.trim());
+        if (apiSiteId.trim()) formData.append('webflowSiteId', apiSiteId.trim());
+      }
 
       const response = await fetch(IMPORT_ENDPOINT, {
         method: 'POST',
@@ -238,6 +256,11 @@ export function WebflowImportDialog({
       const data = await parseResponseSafely(response);
 
       if (!response.ok) {
+        if (typeof data?.code === 'string' && data.code.startsWith('webflow_api_')) {
+          throw new Error(
+            `${data.error} — oder das Häkchen „CMS-Inhalte über die Webflow-API laden“ entfernen und mit den CSVs importieren.`,
+          );
+        }
         if (data?.code === 'slug_conflict') {
           throw new Error(
             `${data.error} — Import erneut starten und „Seiten mit belegtem Slug umbenennen“ anhaken, oder die bestehenden Seiten vorher löschen.`,
@@ -253,6 +276,8 @@ export function WebflowImportDialog({
         warnings: data.data?.warnings ?? [],
         errors: data.data?.errors ?? [],
         durationMs: data.data?.durationMs,
+        cmsSource: data.data?.cmsSource,
+        webflowSiteId: data.data?.webflowSiteId,
       });
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return;
@@ -309,6 +334,71 @@ export function WebflowImportDialog({
               <p className="text-xs text-muted-foreground">
                 Optional mehrere CSVs aus dem Webflow CMS Export. Ohne sie bleiben Collection-Listen leer.
               </p>
+            </div>
+
+            <div className="space-y-2 rounded-md border border-border/60 p-2">
+              <div className="flex items-start gap-2">
+                <Checkbox
+                  id="webflow-use-api"
+                  className="mt-0.5"
+                  checked={useDataApi}
+                  onCheckedChange={(checked) => setUseDataApi(checked === true)}
+                />
+                <Label htmlFor="webflow-use-api" className="text-xs font-normal leading-snug">
+                  <span className="block">
+                    CMS-Inhalte über die Webflow-API laden (optional)
+                    <span className="block text-muted-foreground">
+                      Genauer als die CSVs: Webflow liefert jedes Feld mit seinem echten Typ
+                      (Mehrfachbilder, Referenzen, Auswahllisten mit allen Optionen, Datum, Zahl,
+                      Schalter) statt als Text, den der Import erraten muss — und echte Bild-URLs.
+                      Ohne Häkchen ändert sich nichts, dann kommen die Inhalte wie bisher aus den CSVs.
+                    </span>
+                  </span>
+                </Label>
+              </div>
+
+              {useDataApi && (
+                <div className="space-y-2 pl-6">
+                  <div className="space-y-1">
+                    <Label htmlFor="webflow-api-token">Webflow API-Token</Label>
+                    <Input
+                      id="webflow-api-token"
+                      type="password"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="Site-Token aus Webflow"
+                      value={apiToken}
+                      onChange={(event) => setApiToken(event.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      In Webflow unter <span className="font-mono">Site settings → Apps &amp; integrations → API access</span>{' '}
+                      erzeugen. Benötigte Rechte: <span className="font-mono">CMS: read</span> und{' '}
+                      <span className="font-mono">Sites: read</span> — mehr nicht, der Import liest ausschließlich.
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Der Token wird <strong>nicht gespeichert</strong>: er gilt nur für diesen einen
+                      Import, steht in keiner Datenbank, in keinem Log und in keiner Antwort. Nach dem
+                      Import ist er hier wieder weg — für einen erneuten Import erneut einfügen.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label htmlFor="webflow-api-site">Site-ID (optional)</Label>
+                    <Input
+                      id="webflow-api-site"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="wird aus dem Export gelesen"
+                      value={apiSiteId}
+                      onChange={(event) => setApiSiteId(event.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Leer lassen — die Site-ID steht im Export (<span className="font-mono">data-wf-site</span>).
+                      Nur nötig, wenn der Token auf eine andere Site zeigt.
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -392,6 +482,11 @@ export function WebflowImportDialog({
                 <dt className="text-muted-foreground">Collections</dt>
                 <dd>
                   {counts.collections} mit {counts.fields} Feldern, {counts.items} Einträgen
+                  {result?.cmsSource === 'api'
+                    ? ' — aus der Webflow-API'
+                    : result?.cmsSource === 'mixed'
+                      ? ' — aus Webflow-API und CSVs'
+                      : ''}
                 </dd>
 
                 <dt className="text-muted-foreground">Layer-Styles</dt>

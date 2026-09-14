@@ -25,7 +25,7 @@ import { findAssetsByFilenames } from '@/lib/repositories/assetRepository';
 import { convertValueForFieldType, extractRichTextImageUrls, parseCSVText, replaceRichTextImageUrls } from '@/lib/csv-utils';
 import { generateUniqueSlug } from '@/lib/collection-utils';
 import { generateCollectionItemContentHash } from '@/lib/hash-utils';
-import type { CollectionFieldType } from '@/types';
+import type { CollectionFieldData, CollectionFieldType } from '@/types';
 import { BOUND_IMG_PLACEHOLDER } from './css';
 import { filenameFromUrl } from './safe-fetch';
 import type { WfMaterializerLike, WfRemoteAssets } from './types';
@@ -54,6 +54,12 @@ export interface WfFieldPlan {
   referenceTargetWebflowId?: string | null;
   /** Target collection by CSV name (used when the target CSV has no Webflow id). */
   referenceTargetName?: string;
+  /**
+   * Option choices (`data.options`). Only the Data API source sets this: a CSV
+   * column carries no enumeration, so `inferSchema` never produces an `option`
+   * field.
+   */
+  options?: { id: string; name: string }[];
   /** Built-in (Name / Slug). */
   system: boolean;
   /** Type decided by the header name alone (empty column). */
@@ -235,7 +241,7 @@ function inferColumn(header: string, values: string[], self: WfCsvCollection, ot
 }
 
 export function inferSchema(collections: WfCsvCollection[], warn?: Warnings): WfCollectionPlan[] {
-  return collections.map((csv) => {
+  const plans = collections.map((csv) => {
     const others = collections.filter((c) => c !== csv);
     const fields: WfFieldPlan[] = [];
     for (const header of csv.headers) {
@@ -257,11 +263,27 @@ export function inferSchema(collections: WfCsvCollection[], warn?: Warnings): Wf
         plan.referenceTargetWebflowId = inferred.referenceTarget.webflowId;
         plan.referenceTargetName = inferred.referenceTarget.name;
       }
-      if (inferred.guessed) warn?.add('csv_type_guess', `${csv.name}.${trimmed}: type ${inferred.type} guessed (${inferred.reason})`);
       fields.push(plan);
     }
     return { csv, fields };
   });
+  if (warn) reportGuessedFields(plans, warn);
+  return plans;
+}
+
+/**
+ * Report every field whose type had to be inferred from the column values.
+ * Separate from `inferSchema` so the caller can defer it: when the Webflow Data
+ * API supplies a collection (`data-api.ts`), the CSV plan for it is discarded
+ * and its guesses were never used — reporting them would send the user looking
+ * for a problem that no longer exists.
+ */
+export function reportGuessedFields(plans: WfCollectionPlan[], warn: Warnings): void {
+  for (const plan of plans) {
+    for (const field of plan.fields) {
+      if (field.guessed) warn.add('csv_type_guess', `${plan.csv.name}.${field.name}: type ${field.type} guessed (${field.reason})`);
+    }
+  }
 }
 
 // ─── Value helpers ────────────────────────────────────────────────────────────
@@ -430,7 +452,10 @@ export async function importCms(plans: WfCollectionPlan[], deps: ImportCmsDeps):
   // 2. Fields.
   for (const s of scaffolds) {
     let fieldOrder = 0;
-    const add = async (data: { name: string; key: string | null; type: CollectionFieldType; fillable: boolean; is_computed: boolean; header: string | null; multiple?: boolean; referenceCollectionId?: string | null }) => {
+    const add = async (data: { name: string; key: string | null; type: CollectionFieldType; fillable: boolean; is_computed: boolean; header: string | null; multiple?: boolean; referenceCollectionId?: string | null; options?: { id: string; name: string }[] }) => {
+      const fieldData: CollectionFieldData = {};
+      if (data.multiple) fieldData.multiple = true;
+      if (data.options && data.options.length > 0) fieldData.options = data.options;
       const field = await createField({
         name: data.name,
         key: data.key,
@@ -441,7 +466,7 @@ export async function importCms(plans: WfCollectionPlan[], deps: ImportCmsDeps):
         order: fieldOrder++,
         collection_id: s.info.id,
         reference_collection_id: data.referenceCollectionId ?? null,
-        data: data.multiple ? { multiple: true } : {},
+        data: fieldData,
         is_published: false,
       });
       counts.fields++;
@@ -461,7 +486,7 @@ export async function importCms(plans: WfCollectionPlan[], deps: ImportCmsDeps):
         warn.add('reference_unresolved', `${s.info.name}.${plan.name}: reference target collection not found; field created as text`);
       }
       const type: CollectionFieldType = target ? plan.type : plan.type === 'reference' || plan.type === 'multi_reference' ? 'text' : plan.type;
-      const fieldId = await add({ name: plan.name, key: null, type, fillable: true, is_computed: false, header: plan.header, multiple: plan.multiple, referenceCollectionId: target?.info.id ?? null });
+      const fieldId = await add({ name: plan.name, key: null, type, fillable: true, is_computed: false, header: plan.header, multiple: plan.multiple, referenceCollectionId: target?.info.id ?? null, options: plan.options });
       const raw = s.plan.csv.rows.map((r) => r[plan.header] ?? '');
       s.info.fillCountByField[fieldId] = raw.filter((v) => v.trim()).length;
       if (type === 'date' || type === 'date_only') s.info.dateFormatByField[fieldId] = dateFormatFor(raw);

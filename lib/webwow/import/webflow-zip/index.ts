@@ -23,9 +23,10 @@ import { clearAllCache } from '@/lib/services/cacheService';
 import { guessMimeType } from '@/lib/webwow/storage';
 
 import { bindPages, chooseCollection } from './binding';
-import { importCms, inferSchema, parseCsvFiles } from './cms';
+import { importCms, inferSchema, parseCsvFiles, reportGuessedFields } from './cms';
 import { extractCrossPageComponents } from './components';
-import { applyNodeLayerPostProcessing, convertPage, pinBackgroundBindingClasses, resolveShadowedChipClasses } from './convert-bridge';
+import { fetchCmsFromApi, mergeCmsPlans } from './data-api';
+import { applyNodeLayerPostProcessing, convertPage, pinBackgroundBindingClasses, resolveShadowedChipClasses, walkLayers } from './convert-bridge';
 import { buildStyleModel } from './css';
 import { installFonts } from './fonts';
 import { loadSvgIcons, parsePage } from './html';
@@ -37,9 +38,11 @@ import { ServerMaterializer } from './server-materializer';
 import { DEFAULT_IMPORT_OPTIONS } from './types';
 import { Warnings } from './warnings';
 import { generateWidgetInteractions } from './widgets';
+import { parseLightboxPayload } from './widgets-native';
 import { openWebflowZip } from './zip';
 
 import type { WfCmsResult, WfCollectionInfo, WfCollectionPlan } from './cms';
+import type { WfCmsSource } from './data-api';
 import type { PageLayers, RegionHint } from './components';
 import type { PagePlan } from './pages';
 import type { WfImportCounts, WfImportOptions, WfImportResult, WfNode, WfPage } from './types';
@@ -88,6 +91,29 @@ function collectCssAssetKeys(css: string, zip: WfZipBundle, out: Set<string>): v
   }
 }
 
+/**
+ * Lightbox galleries reference their full-size images only from the JSON payload
+ * Webflow writes inside `<script class="w-json">` — never from an `src`/`href`,
+ * so `collectHtmlAssetKeys` cannot see them. Their urls point at Webflow's CDN;
+ * `ServerMaterializer.uploadAsset` re-hosts an https key like any other, so
+ * adding them here is what turns `settings.lightbox.files` into real asset ids
+ * instead of links to someone else's CDN.
+ */
+const W_JSON_RE = /<script[^>]*class="[^"]*\bw-json\b[^"]*"[^>]*>([\s\S]*?)<\/script>/gi;
+
+function collectLightboxAssetKeys(html: string, zip: WfZipBundle, out: Set<string>): void {
+  for (const match of html.matchAll(W_JSON_RE)) {
+    for (const url of parseLightboxPayload(match[1]).urls) {
+      if (/^https?:\/\//i.test(url)) {
+        out.add(url);
+        continue;
+      }
+      const key = toZipKey(url);
+      if (key && zip.files.has(key)) out.add(key);
+    }
+  }
+}
+
 function collectHtmlAssetKeys(html: string, zip: WfZipBundle, out: Set<string>): void {
   for (const match of html.matchAll(HTML_REF_RE)) {
     for (const part of match[1].split(',')) {
@@ -95,6 +121,22 @@ function collectHtmlAssetKeys(html: string, zip: WfZipBundle, out: Set<string>):
       if (key && zip.files.has(key)) out.add(key);
     }
   }
+}
+
+/** A `slides` layer whose children were lifted out before componentization. */
+interface DetachedSlides {
+  parent: Layer;
+  slides: Layer[];
+}
+
+function detachSlides(layers: Layer[]): DetachedSlides[] {
+  const out: DetachedSlides[] = [];
+  walkLayers(layers, (layer) => {
+    if (layer.name !== 'slides' || !layer.children || layer.children.length === 0) return;
+    out.push({ parent: layer, slides: layer.children });
+    layer.children = [];
+  });
+  return out;
 }
 
 // ─── CMS plan helpers ─────────────────────────────────────────────────────────
@@ -220,7 +262,31 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
   // 2. CSV schema (no database yet).
   progress('csv', 0, 1);
   const csvCollections = parseCsvFiles(input.csvFiles);
-  const csvPlans = inferSchema(csvCollections, warn);
+  // The `csv_type_guess` warnings are held back when the Data API may replace a
+  // CSV collection outright — they are re-reported below for the plans that
+  // actually survive the merge.
+  const usingApi = Boolean(options.webflowApi?.token?.trim());
+  const csvPlans = inferSchema(csvCollections, usingApi ? undefined : warn);
+
+  // 2b. Optional: the Webflow Data API as the CMS source (SPEC §4.8a). Runs
+  // before anything is written, so a rejected token, a missing scope or a rate
+  // limit aborts the import with the project untouched. Without credentials
+  // nothing here executes and `cmsPlans` stays the CSV plan list.
+  let cmsPlans = csvPlans;
+  let cmsSource: WfCmsSource = 'csv';
+  let webflowSiteId: string | undefined;
+  if (usingApi && options.webflowApi) {
+    progress('webflow-api', 0, 1);
+    const pageHtml: string[] = [];
+    for (const file of zip.pages.values()) pageHtml.push(await file.text());
+    const api = await fetchCmsFromApi({ credentials: options.webflowApi, pageHtml, warn });
+    const merged = mergeCmsPlans({ csvPlans, apiPlans: api.plans, pageNames: zip.pages.keys(), warn });
+    cmsPlans = merged.plans;
+    cmsSource = merged.source;
+    webflowSiteId = api.siteId;
+    reportGuessedFields(cmsPlans, warn);
+    progress('webflow-api', 1, 1);
+  }
 
   // 3. Assets referenced by the export's own CSS and HTML.
   progress('assets', 0, 1);
@@ -236,7 +302,11 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
   for (const file of [zip.css.normalize, zip.css.components]) {
     if (file) frameworkCss.push(await file.text());
   }
-  for (const file of zip.pages.values()) collectHtmlAssetKeys(await file.text(), zip, assetKeys);
+  for (const file of zip.pages.values()) {
+    const html = await file.text();
+    collectHtmlAssetKeys(html, zip, assetKeys);
+    collectLightboxAssetKeys(html, zip, assetKeys);
+  }
   for (const file of zip.errorPages.values()) collectHtmlAssetKeys(await file.text(), zip, assetKeys);
 
   const folders = await getAllAssetFolders(false);
@@ -290,6 +360,7 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
       assetKey: (relPath: string) => (zip.files.has(relPath) ? relPath : null),
       warn,
       svgFiles,
+      widgets: options.widgets,
     }));
     progress('html', ++parsed, zip.pages.size);
   }
@@ -306,13 +377,13 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
 
   // 6. Page plan + slug conflicts — the last step that can fail cleanly.
   progress('plan', 0, 1);
-  const provisional = provisionalCms(csvPlans);
+  const provisional = provisionalCms(cmsPlans);
   const plans = planPages(pages, detailCollectionsOf(pages, provisional), warn, assets);
   await assertNoSlugConflicts(plans, options.pageSlugConflict, warn);
 
   // 7. CMS. (First database writes.)
   progress('cms', 0, 1);
-  const cms = await importCms(csvPlans, {
+  const cms = await importCms(cmsPlans, {
     mat,
     remoteAssets: options.remoteAssets,
     warn,
@@ -348,7 +419,7 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
   for (const page of pages) {
     const result = await convertPage(page, converter);
     for (const [nodeId, layer] of result.layerByNode) layerByNode.set(nodeId, layer);
-    applyNodeLayerPostProcessing(page, result.layerByNode, assets, warn);
+    applyNodeLayerPostProcessing(page, result.layerByNode, assets, warn, options.widgets);
     resolveShadowedChipClasses(result.roots, (id) => styleClasses.get(id));
     pinBackgroundBindingClasses(result.roots, (id) => styleClasses.get(id));
     rootsByPage.set(page.name, result.roots);
@@ -368,9 +439,22 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
     body: { id: 'body', name: 'body', classes: bodyClassesFor(page, model), children: rootsByPage.get(page.name) ?? [] },
   }));
   const regionHints = regionHintsOf(pages, layerByNode);
+  // Slider slides are structurally identical BY DESIGN, so both component passes
+  // would fold them into one master with per-slide text overrides — which takes
+  // the slide's own classes, its `restrictions.ancestor` and the ability to lay
+  // out slide 2 differently from slide 1. They are detached for the duration and
+  // componentized on their own afterwards, so a repeated card INSIDE one slide
+  // still becomes a component while two slides never merge.
+  const detachedSlides = pageLayers.flatMap((entry) => detachSlides(entry.body.children ?? []));
   await extractCrossPageComponents(pageLayers, mat, warn, { hintOf: (id) => regionHints.get(id) });
   for (const entry of pageLayers) {
     entry.body.children = await componentizeLayers(entry.body.children ?? [], mat as unknown as ImportMaterializer);
+  }
+  for (const slot of detachedSlides) {
+    for (const slide of slot.slides) {
+      slide.children = await componentizeLayers(slide.children ?? [], mat as unknown as ImportMaterializer);
+    }
+    slot.parent.children = slot.slides;
   }
 
   // 13. Persist layers, fonts and site settings.
@@ -453,6 +537,8 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
     errors,
     pageIds: Object.fromEntries(pageIds),
     collectionIds: Object.fromEntries(cms.collections.map((c) => [c.name, c.id])),
+    cmsSource,
+    ...(webflowSiteId ? { webflowSiteId } : {}),
     durationMs: Date.now() - started,
   };
 }

@@ -88,6 +88,39 @@ mehr benutzt.
 - **Verhalten statt Webflow-Skripte**: Menü- und Dropdown-Klicks werden als ycode-Interaktionen
   erzeugt, Webflows IX2-Definitionen ohne `eval` gelesen und auf Animationen abgebildet (9 Hover,
   4 Scroll-into-view, 3 Klick). `webflow.js` und jQuery werden nicht mitgeliefert.
+- **Webflow-Widgets werden native ycode-Elemente** (`lib/webwow/import/webflow-zip/widgets-native.ts`):
+  `.w-slider` → `slider` mit `slides`/`slide` und den nativen Navigations- und Paginierungs-Layern,
+  Einstellungen aus Webflows `data-*` (`data-infinite` → `loop`, Dauer in Sekunden, Effekt, Autoplay,
+  Touch); `.w-lightbox` → `lightbox` samt Galerie aus dem `w-json`-Payload, deren Bilder mitgeladen
+  und als Assets hinterlegt werden; `.w-form` → `form` mit Formular-Einstellungen, `input` /
+  `textarea` / `select` / `option` / Button **mit** `name`, `type`, `placeholder`, `required` … (ohne
+  sie käme die Absendung leer an) und `.w-form-done`/`.w-form-fail` als Erfolgs- bzw. Fehlermeldung
+  **innerhalb** des Formulars; `.w-tabs` → DOM bleibt, das Umschalten wird wie Navbar und Dropdown als
+  Klick-Interaktion erzeugt; `.w-row`/`.w-col-N` → Flex-Row mit echten Spaltenbreiten inklusive der
+  `medium`/`small`-Varianten. Jeder Builder ist einzeln abschaltbar (`options.widgets`), und was
+  erkannt, aber nicht vollständig abgebildet werden kann, meldet `widget_partial`.
+- **CMS-Inhalte wahlweise über die Webflow Data API** (`lib/webwow/import/webflow-zip/data-api.ts`,
+  optional). Die CSVs sind reiner Text, der Import muss den Feldtyp aus den Werten erraten; mit einem
+  API-Token kommen dieselben Collections typisiert — `Option` samt aller Auswahlmöglichkeiten,
+  `MultiImage`, `MultiReference`, `Number`, `Switch`, `Date`/`DateTime`, `RichText` — und mit echten
+  Asset-URLs. **Der Token wird nicht gespeichert**: nur für diesen einen Request, in keiner Tabelle,
+  keinem Log und keiner Antwort (echot Webflow ihn in einem Fehler, wird er vorher durch `<redacted>`
+  ersetzt). Nur lesend, nur vier `GET`-Endpunkte, jede Anfrage durch dieselbe SSRF-Sperre wie jeder
+  Asset-Download. Die Site-ID liest der Import aus dem Export (`data-wf-site`). Ohne Token bleibt
+  alles wie bisher; beides zusammen geht auch (API gewinnt pro Collection, nur-CSV- und nur-API-
+  Collections werden beide importiert und gemeldet). Fehler brechen ab, **bevor** geschrieben wird:
+  `webflow_api_unauthorized` (401), `_forbidden` (403, fehlender Scope), `_not_found` (404, Site),
+  `_rate_limited` (429, nach mehreren Wartezyklen gemäß `Retry-After`).
+- **Rich Text behält seine Auszeichnungen.** Upstreams `htmlToTipTapJSON` entfernt jedes Inline-Tag
+  außer `<a>`, sodass `<strong>`, `<em>`, `<u>`, `<s>` und `<code>` als reiner Text ankamen;
+  `richtext.ts` läuft über den echten Baum und erzeugt die kanonischen TipTap-Formen
+  (`richTextLink`, `richTextImage`) samt Marks.
+- **Bekannt, aber nicht vom Importer**: ein importierter Slider wird korrekt als ycode-Slider
+  angelegt, schaltet aber nicht weiter — ein von Hand eingesetzter Slider aus der Elementbibliothek
+  verhält sich identisch (`syncBullets` in `lib/slider-utils.ts` liest `swiper.el`, bevor es gesetzt
+  ist). Und ein Hintergrundvideo zeigt in einem Browser ohne H.264 nur sein Standbild, weil ycode
+  eine Datei pro Video speichert und der Import die mp4 behält (`embed_dropped`). Beides steht in
+  `docs/IMPORTER.md` § 3a.
 - **Jeder Verlust wird gemeldet.** Der Ergebnisdialog zeigt die Zählungen und die Warnungen **nach
   Ursache gruppiert** (CSS ohne Entsprechung, geratene CMS-Zuordnung, Dateien, HTML/Widgets,
   Animationen, Sonstiges) mit einem Satz, was die Gruppe bedeutet. Zwei Optionen im Dialog:

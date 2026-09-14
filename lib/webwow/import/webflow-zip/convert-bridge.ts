@@ -21,6 +21,8 @@ import { getAffectedProperties } from '@/lib/tailwind-class-mapper';
 import { MULTI_ASSET_COLLECTION_ID } from '@/lib/collection-field-utils';
 import { generateId } from '@/lib/utils';
 
+import { convertRichTextHtml } from './richtext';
+import { lightboxSettings, resolveWidgetFlags, sliderChromeLayers, type WfWidgetFlags } from './widgets-native';
 import type { WfBinding, WfCollectionBinding, WfNode, WfPage } from './types';
 import type { Warnings } from './warnings';
 
@@ -250,19 +252,21 @@ export function applyNodeLayerPostProcessing(
   layerByNode: Map<string, Layer>,
   assets: AssetIdResolver,
   warn?: Warnings,
+  widgets?: Partial<WfWidgetFlags>,
 ): void {
+  const flags = resolveWidgetFlags(widgets);
   for (const node of page.nodeIndex.values()) {
     const layer = layerByNode.get(node.wf.id);
     if (!layer) continue;
 
-    applyLayerKind(node, layer, assets, warn);
+    applyLayerKind(node, layer, assets, flags, warn);
     applyAnchorId(node, layer);
     applyCollection(node, layer);
     applyBinding(node, layer, layerByNode);
   }
 }
 
-function applyLayerKind(node: WfNode, layer: Layer, assets: AssetIdResolver, warn?: Warnings): void {
+function applyLayerKind(node: WfNode, layer: Layer, assets: AssetIdResolver, flags: WfWidgetFlags, warn?: Warnings): void {
   const wf = node.wf;
   switch (wf.layerKind) {
     case 'htmlEmbed':
@@ -274,7 +278,7 @@ function applyLayerKind(node: WfNode, layer: Layer, assets: AssetIdResolver, war
     case 'richText': {
       layer.name = 'richText';
       layer.restrictions = { ...layer.restrictions, editText: true };
-      layer.variables = { ...layer.variables, text: { type: 'dynamic_rich_text', data: { content: richTextDoc(wf.bindEmpty ? '' : wf.html ?? '') } } };
+      layer.variables = { ...layer.variables, text: { type: 'dynamic_rich_text', data: { content: richTextDoc(wf.bindEmpty ? '' : wf.html ?? '', flags.richText) } } };
       layer.children = [];
       break;
     }
@@ -327,6 +331,81 @@ function applyLayerKind(node: WfNode, layer: Layer, assets: AssetIdResolver, war
       delete layer.children;
       break;
 
+      // ── Native widgets (widgets-native.ts) ──
+
+    case 'slider': {
+      layer.name = 'slider';
+      layer.settings = { ...layer.settings, slider: wf.slider ?? undefined };
+      // In ycode the arrows and bullets ARE child layers — `filterDisabledSliderLayers`
+      // only removes them when the flags are off, and the public renderer tags
+      // them through `SWIPER_DATA_ATTR_MAP`. A slider without them has no controls.
+      layer.children = [...(layer.children ?? []), ...sliderChromeLayers()];
+      break;
+    }
+
+    case 'slides':
+      layer.name = 'slides';
+      layer.restrictions = { ...layer.restrictions, copy: false, delete: false, ancestor: 'slider' };
+      break;
+
+    case 'slide':
+      layer.name = 'slide';
+      layer.restrictions = { ...layer.restrictions, ancestor: 'slides' };
+      break;
+
+    case 'lightbox': {
+      layer.name = 'lightbox';
+      const keys = wf.lightbox?.files ?? [];
+      const files = keys.map((key) => assets.idOf(key) ?? key);
+      const unresolved = keys.filter((key) => !assets.idOf(key) && !/^https?:\/\//i.test(key));
+      if (unresolved.length > 0) {
+        warn?.add('widget_partial', `lightbox: ${unresolved.length} gallery image(s) not in the export, kept as raw paths`, { page: wf.page, node: wf.id });
+      }
+      layer.settings = { ...layer.settings, lightbox: lightboxSettings(files, wf.lightbox?.group ?? '') };
+      // A lightbox opens an overlay; the `<a href="#">` Webflow wraps it in must not navigate.
+      if (layer.variables?.link) {
+        const { link: _dropped, ...rest } = layer.variables;
+        layer.variables = rest;
+      }
+      break;
+    }
+
+    case 'form': {
+      layer.name = 'form';
+      layer.settings = {
+        ...layer.settings,
+        ...(wf.formId && !layer.settings?.id ? { id: wf.formId } : {}),
+        form: { form_type: 'standard', success_action: 'message', ...layer.settings?.form },
+      };
+      break;
+    }
+
+    case 'formControl': {
+      const plan = wf.formControl;
+      if (!plan) break;
+      layer.name = plan.name;
+      if (Object.keys(plan.attributes).length > 0) {
+        layer.attributes = { ...layer.attributes, ...plan.attributes };
+      }
+      if (plan.name === 'option') {
+        layer.variables = { ...layer.variables, text: { type: 'dynamic_text', data: { content: plan.text ?? '' } } };
+        if (plan.isPlaceholder) layer.settings = { ...layer.settings, isPlaceholder: true };
+        delete layer.children;
+      } else if (plan.name !== 'select' && plan.name !== 'button') {
+        // input / textarea are void or self-contained in ycode's renderer.
+        delete layer.children;
+      }
+      break;
+    }
+
+    case 'formAlert': {
+      // ycode's submit handler reveals `[data-alert-type]` inside the form;
+      // `hiddenGenerated` is what keeps them out of sight until then.
+      layer.alertType = wf.formAlert ?? 'success';
+      layer.hiddenGenerated = true;
+      break;
+    }
+
     default:
       break;
   }
@@ -346,8 +425,21 @@ function applyAnchorId(node: WfNode, layer: Layer): void {
 }
 
 /** Minimal TipTap doc from a rich-text HTML fragment (empty doc for a blank slot). */
-function richTextDoc(html: string): object {
+function richTextDoc(html: string, keepMarks = true): object {
   if (!html.trim()) return { type: 'doc', content: [{ type: 'paragraph' }] };
+  // Upstream's converter folds every inline tag away (`lib/csv-utils.ts`
+  // `parseInlineNodes` strips anything that is not an `<a>`), so Webflow's
+  // bold / italic / underline / strike / code reach the document as plain text.
+  // `richtext.ts` walks the real tree and keeps them; it returns null when the
+  // fragment has nothing convertible, which is when upstream still gets a turn.
+  if (keepMarks) {
+    try {
+      const doc = convertRichTextHtml(html);
+      if (doc) return doc;
+    } catch {
+      // fall through to upstream's converter
+    }
+  }
   try {
     const json = convertValueForFieldType(html, 'rich_text');
     if (json) {

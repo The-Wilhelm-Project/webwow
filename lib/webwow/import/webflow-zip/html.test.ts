@@ -384,7 +384,7 @@ test('unknown w-* classes are reported once per class, meta and google fonts are
   const page = parsePage(`<html><head><title> My  Site </title><meta content="Desc" name="description"><meta content="https://cdn.prod.website-files.com/x/6973b0695bd4b92617308ffa_og.jpg" property="og:image">
     <link href="https://fonts.googleapis.com/css?family=Open+Sans:300,400|Roboto" rel="stylesheet"><link href="images/favicon.png" rel="shortcut icon" type="image/x-icon"><link href="images/webclip.png" rel="apple-touch-icon"><link rel="canonical" href="https://example.com/">
     <script type="text/javascript">WebFont.load({ google: { families: ["Lato:400,700","Roboto"] } });</script></head>
-    <body><div class="w-slider w-slider"><div class="w-form-done"></div></div><script src="https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.js"></script><script src="js/site.js"></script></body></html>`, ctx);
+    <body><div class="w-widget w-widget"><div class="w-file-upload"></div></div><script src="https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.js"></script><script src="js/site.js"></script></body></html>`, ctx);
   assert.equal(page.title, 'My Site');
   assert.equal(page.description, 'Desc');
   assert.equal(page.ogImage, 'images/og.jpg');

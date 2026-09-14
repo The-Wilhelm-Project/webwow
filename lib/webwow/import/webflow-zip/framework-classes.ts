@@ -18,6 +18,7 @@
  */
 
 import type { WfNavCollapse } from './types';
+import { columnFrameworkClasses } from './widgets-native';
 
 export const FRAMEWORK_CLASSES: Record<string, string[]> = {
   'w-inline-block': ['inline-block', 'max-w-full'],
@@ -50,6 +51,61 @@ export const FRAMEWORK_CLASSES: Record<string, string[]> = {
   // Video / background-video runtime chrome that html.ts drops.
   'w-backgroundvideo-backgroundvideoplaypausebutton': [],
   'w-background-video--control': [],
+
+  // ── Native widgets (widgets-native.ts). Values reproduce Webflow's own
+  //    `components.css` defaults; the designer's site classes stack on top.
+  // Slider: the root is Swiper's container, `.w-slider-mask` is its wrapper and
+  // `.w-slide` a flex child, so the mask's `overflow:hidden` moves to the root.
+  'w-slider': ['relative', 'overflow-hidden', 'w-full', 'h-[300px]', 'text-center'],
+  'w-slider-mask': ['relative', 'flex', 'w-full', 'h-full', 'overflow-visible'],
+  'w-slide': ['relative', 'shrink-0', 'w-full', 'h-full', 'text-left'],
+  // Slider chrome ycode regenerates natively (html.ts drops these elements).
+  'w-slider-nav': [],
+  'w-slider-nav-invert': [],
+  'w-slider-dot': [],
+  'w-slider-arrow-left': [],
+  'w-slider-arrow-right': [],
+  'w-slider-aria-label': [],
+  'w-slider-force-show': [],
+  'w-icon-slider-left': [],
+  'w-icon-slider-right': [],
+  'w-round': [],
+
+  // Tabs: the DOM is kept, the switching is a generated interaction (widgets.ts),
+  // so `.w-tab-pane` must NOT carry a `hidden` shim — the interaction owns it.
+  'w-tabs': ['relative'],
+  'w-tab-menu': ['relative'],
+  'w-tab-link': ['relative', 'inline-block', 'align-top', 'no-underline', 'py-[9px]', 'px-[30px]', 'text-left', 'cursor-pointer', 'text-[#222]', 'bg-[#ddd]'],
+  'w-tab-content': ['relative', 'block', 'overflow-hidden'],
+  'w-tab-pane': ['relative'],
+
+  // Lightbox: `.w-lightbox` becomes a native lightbox layer; the rest is the
+  // runtime overlay Webflow injects, which never appears in an export's markup.
+  'w-lightbox': [],
+
+  // Forms. `.w-form-done` / `.w-form-fail` keep their look but their visibility
+  // is owned by `hiddenGenerated` + the submit handler, not by a `hidden` shim.
+  'w-form': ['mb-[15px]'],
+  'w-form-done': ['p-[20px]', 'text-center', 'bg-[#ddd]'],
+  'w-form-fail': ['mt-[10px]', 'p-[10px]', 'bg-[#ffdede]'],
+  'w-form-label': ['inline-block', 'cursor-pointer', 'font-normal', 'mb-0'],
+  'w-input': ['block', 'w-full', 'h-[38px]', 'py-[8px]', 'px-[12px]', 'mb-[10px]', 'text-[14px]', 'leading-[1.43]', 'text-[#333]', 'align-middle', 'bg-[#fff]', 'border', 'border-solid', 'border-[#ccc]'],
+  'w-select': ['block', 'w-full', 'h-[38px]', 'py-[8px]', 'px-[12px]', 'mb-[10px]', 'text-[14px]', 'leading-[1.43]', 'text-[#333]', 'align-middle', 'bg-[#f3f3f3]', 'border', 'border-solid', 'border-[#ccc]'],
+  'w-checkbox': ['block', 'mb-[5px]', 'pl-[20px]'],
+  'w-checkbox-input': ['float-left', '-ml-[20px]', 'mt-[4px]'],
+  'w-radio': ['block', 'mb-[5px]', 'pl-[20px]'],
+  'w-radio-input': ['float-left', '-ml-[20px]', 'mt-[3px]'],
+  'w-list-unstyled': ['pl-0', 'list-none'],
+
+  // Webflow's responsive visibility helpers (`display:none !important` reset per
+  // breakpoint). `tiny` has no ycode tier (SPEC D11), so `w-hidden-tiny` is a no-op.
+  'w-hidden-main': ['hidden', 'max-lg:block'],
+  'w-hidden-medium': ['max-lg:hidden', 'max-md:block'],
+  'w-hidden-small': ['max-md:hidden'],
+  'w-hidden-tiny': [],
+
+  // Legacy 12-column grid (`.w-row` / `.w-col-N` and the responsive variants).
+  ...columnFrameworkClasses(),
 };
 
 /**
@@ -83,7 +139,7 @@ export const DROPDOWN_CHEVRON_SVG =
 
 /** Webflow state / runtime classes that never influence styling in ycode. */
 export const IGNORED_CLASSES = new Set([
-  'w--current', 'w--open', 'w-dyn-bind-empty', 'w-condition-invisible', 'w-dyn-hide', 'w-mod-js', 'w-mod-touch', 'w-clearfix',
+  'w--current', 'w--open', 'w--tab-active', 'w--nav-menu-open', 'w-dyn-bind-empty', 'w-condition-invisible', 'w-dyn-hide', 'w-mod-js', 'w-mod-touch', 'w-clearfix',
 ]);
 
 /** True for every class that belongs to Webflow's framework (`w-*`, `wf-layout-layout`) or its state classes. */

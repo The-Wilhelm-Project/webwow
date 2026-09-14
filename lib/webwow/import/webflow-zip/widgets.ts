@@ -9,6 +9,12 @@
  *   display: on-load` so the menu starts collapsed on the affected breakpoints).
  * - Dropdown: the toggle gets a `click` (or `hover` for `data-hover="true"`)
  *   interaction that reveals the sibling `.w-dropdown-list`.
+ * - Tabs: ycode has no native tabs layer (checked against the element library),
+ *   and Webflow's tab switching lives entirely in `webflow.js`, which v2 does
+ *   not ship. Each `.w-tab-link` therefore gets a `click` interaction that shows
+ *   its own `.w-tab-pane` and hides every sibling pane — the panes that do not
+ *   start active carry `apply_styles: display on-load`, so exactly one pane is
+ *   visible before the first click.
  *
  * The runtime shows a toggled element by removing its `data-gsap-hidden`
  * attribute, so any Tailwind `hidden` shim on the target would keep it
@@ -22,6 +28,7 @@ import type { WfNavCollapse, WfNode, WfNodeRole, WfPage } from './types';
 import type { Warnings } from './warnings';
 
 const DISPLAY_SHIMS = new Set(['hidden', 'max-lg:hidden', 'max-md:hidden']);
+const ALL_BREAKPOINTS: Breakpoint[] = ['desktop', 'tablet', 'mobile'];
 const DEFAULT_NAV_DURATION_MS = 400;
 const DROPDOWN_DURATION_S = 0.2;
 
@@ -36,6 +43,23 @@ function collapseBreakpoints(collapse: WfNavCollapse | undefined): Breakpoint[] 
     default:
       return ['tablet', 'mobile'];
   }
+}
+
+/** Every descendant with `role`, document order, without descending into a nested widget of the same family. */
+function collectDescendants(node: WfNode, role: WfNodeRole, stopAt: WfNodeRole[]): WfNode[] {
+  const out: WfNode[] = [];
+  const visit = (current: WfNode) => {
+    for (const child of current.children ?? []) {
+      if (child.wf.role === role) {
+        out.push(child);
+        continue;
+      }
+      if (child.wf.role && stopAt.includes(child.wf.role)) continue;
+      visit(child);
+    }
+  };
+  visit(node);
+  return out;
 }
 
 function findDescendant(node: WfNode, role: WfNodeRole): WfNode | undefined {
@@ -85,6 +109,55 @@ function toggleInteraction(trigger: 'click' | 'hover', breakpoints: Breakpoint[]
 }
 
 /**
+ * One click interaction per tab link: show its own pane, hide the others.
+ *
+ * `yoyo` must stay false — a tab is not a toggle, and a second click on the
+ * active tab should leave it open.
+ */
+function generateTabInteractions(page: WfPage, tabs: WfNode, layerByNode: Map<string, Layer>, warn: Warnings): number {
+  const links = collectDescendants(tabs, 'tab-link', ['tabs']);
+  const panes = collectDescendants(tabs, 'tab-pane', ['tabs']);
+  if (links.length === 0 || panes.length === 0) {
+    warn.add('widget_partial', `tabs without ${links.length === 0 ? 'tab links' : 'tab panes'}: no switching interaction generated`, { page: page.name, node: tabs.wf.id });
+    return 0;
+  }
+
+  const paneByTab = new Map<string, WfNode>();
+  panes.forEach((pane, i) => paneByTab.set(pane.wf.tab?.id || `#${i}`, pane));
+  const paneLayers = panes.map((pane) => layerByNode.get(pane.wf.id)).filter((l): l is Layer => Boolean(l));
+
+  let generated = 0;
+  links.forEach((link, i) => {
+    const linkLayer = layerByNode.get(link.wf.id);
+    const pane = paneByTab.get(link.wf.tab?.id || `#${i}`) ?? panes[i];
+    const paneLayer = pane ? layerByNode.get(pane.wf.id) : undefined;
+    if (!linkLayer || !paneLayer) {
+      warn.add('widget_partial', `tab link without a matching pane (data-w-tab="${link.wf.tab?.id ?? ''}")`, { page: page.name, node: link.wf.id });
+      return;
+    }
+    const tweens = paneLayers.map((target) => ({
+      id: generateId('twn'),
+      layer_id: target.id,
+      position: 0,
+      duration: 0,
+      ease: 'none',
+      from: { display: target.id === paneLayer.id ? 'hidden' : 'visible' },
+      to: { display: target.id === paneLayer.id ? 'visible' : 'hidden' },
+      // Only the panes that do NOT start active are hidden before the first
+      // click; `collectHiddenLayerInfo` keys off exactly this combination.
+      apply_styles: target.id === paneLayer.id && !pane?.wf.tab?.active ? { display: 'on-load' as const } : {},
+    }));
+    linkLayer.interactions = [
+      ...(linkLayer.interactions ?? []),
+      { id: generateId('int'), trigger: 'click' as const, timeline: { breakpoints: ALL_BREAKPOINTS, repeat: 0, yoyo: false }, tweens },
+    ];
+    stripDisplayShims(paneLayer);
+    generated += 1;
+  });
+  return generated;
+}
+
+/**
  * Generate navbar / dropdown interactions for one page. Runs on the converted
  * layers BEFORE component extraction so every page copy carries the
  * interaction; `generated` counts the objects created by this call.
@@ -125,6 +198,8 @@ export function generateWidgetInteractions(page: WfPage, layerByNode: Map<string
       } else {
         warn.add('html_unmapped', `dropdown without ${toggle ? 'list' : 'toggle'}: no interaction generated`, { page: page.name, node: node.wf.id });
       }
+    } else if (node.wf.role === 'tabs') {
+      generated += generateTabInteractions(page, node, layerByNode, warn);
     }
     for (const child of node.children ?? []) visit(child);
   };

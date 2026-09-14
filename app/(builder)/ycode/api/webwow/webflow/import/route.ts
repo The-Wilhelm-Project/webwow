@@ -37,6 +37,15 @@ function formatWarning(warning: WfWarning): string {
  *   csvFiles          File[]   optional
  *   remoteAssets      'download' | 'skip'   (default 'download')
  *   pageSlugConflict  'fail' | 'suffix'     (default 'fail')
+ *   webflowApiToken   string   optional — a Webflow Data API token. When given,
+ *                              collection items are read from the REST v2 API
+ *                              as typed JSON instead of the CSV export. The
+ *                              token is used for this request only: it is never
+ *                              written to the import job row (whose payload is
+ *                              deliberately empty), never logged and never part
+ *                              of the response.
+ *   webflowSiteId     string   optional — defaults to the `data-wf-site` id in
+ *                              the export.
  */
 export async function POST(request: NextRequest) {
   let importId: string | null = null;
@@ -88,6 +97,17 @@ export async function POST(request: NextRequest) {
     const pageSlugConflict = formData.get('pageSlugConflict');
     if (pageSlugConflict === 'fail' || pageSlugConflict === 'suffix') options.pageSlugConflict = pageSlugConflict;
 
+    // Request-scoped only. Nothing below this line persists, logs or echoes it:
+    // the job payload stays empty and the response carries counts and warnings.
+    const apiToken = formData.get('webflowApiToken');
+    if (typeof apiToken === 'string' && apiToken.trim()) {
+      const siteId = formData.get('webflowSiteId');
+      options.webflowApi = {
+        token: apiToken.trim(),
+        ...(typeof siteId === 'string' && siteId.trim() ? { siteId: siteId.trim() } : {}),
+      };
+    }
+
     const job = await createWebflowImport({ payload: { zipFilename, zipBase64: '', csvFiles: [] } });
     importId = job.id;
     await updateWebflowImportStatus(importId, 'processing');
@@ -116,6 +136,8 @@ export async function POST(request: NextRequest) {
         errors: result.errors,
         pageIds: result.pageIds,
         collectionIds: result.collectionIds,
+        cmsSource: result.cmsSource,
+        webflowSiteId: result.webflowSiteId,
         durationMs: result.durationMs,
       },
     }, 200);

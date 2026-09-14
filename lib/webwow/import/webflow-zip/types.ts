@@ -10,8 +10,10 @@
  * Only type imports from upstream: nothing here loads Zustand or React.
  */
 
-import type { CollectionFieldType, Font } from '@/types';
+import type { CollectionFieldType, Font, SliderSettings } from '@/types';
 import type { ImportNode } from '@/lib/import/types';
+import type { WfCmsSource, WfDataApiCredentials } from './data-api';
+import type { FormControlPlan, WfWidgetFlags } from './widgets-native';
 
 // ─── Options / result ─────────────────────────────────────────────────────────
 
@@ -26,6 +28,20 @@ export interface WfImportOptions {
   assetFolderName: string;
   /** `assets.source` for uploaded files. Default `webflow-import`. */
   source: string;
+  /**
+   * Per-widget kill switches for the native widget builders
+   * (`widgets-native.ts`). Unset flags default to on; a widget turned off here
+   * takes the generic-box path and reports `html_unmapped` as before.
+   */
+  widgets?: Partial<WfWidgetFlags>;
+  /**
+   * Optional Webflow Data API credentials. When set, collection items come from
+   * the REST v2 API as typed JSON instead of the CSV export (`data-api.ts`);
+   * the site id is discovered from the export's `data-wf-site` when omitted.
+   * The token is request-scoped — it is never persisted, logged or returned.
+   * Unset (the default) means the CSV path runs exactly as before.
+   */
+  webflowApi?: WfDataApiCredentials;
 }
 
 export const DEFAULT_IMPORT_OPTIONS: WfImportOptions = {
@@ -41,7 +57,9 @@ export type WfWarningCode =
   | 'html_unmapped' | 'embed_script' | 'embed_dropped' | 'video_missing_file' | 'link_broken' | 'page_empty'
   | 'collection_guess' | 'field_guess' | 'binding_guess' | 'binding_unbound' | 'reference_unresolved' | 'csv_type_guess'
   | 'ix2_unsupported_event' | 'ix2_unsupported_action' | 'ix2_no_targets' | 'ix2_ease_approximated'
-  | 'component_skipped' | 'font_extra_weight' | 'slug_suffixed';
+  | 'component_skipped' | 'font_extra_weight' | 'slug_suffixed'
+  | 'widget_partial' | 'widget_skipped'
+  | 'cms_api_extra' | 'cms_api_partial';
 
 export interface WfWarning {
   code: WfWarningCode;
@@ -89,6 +107,10 @@ export interface WfImportResult {
   pageIds: Record<string, string>;
   /** CSV collection name -> collection id */
   collectionIds: Record<string, string>;
+  /** Where collection items came from: the CSV export, the Data API, or both. */
+  cmsSource: WfCmsSource;
+  /** Webflow site id the Data API was read from (absent when no token was supplied). */
+  webflowSiteId?: string;
   durationMs: number;
 }
 
@@ -115,7 +137,12 @@ export type WfNodeRole =
   | 'dyn-list' | 'dyn-items' | 'dyn-item' | 'dyn-empty' | 'rich-text'
   | 'nav' | 'nav-menu' | 'nav-button' | 'nav-brand'
   | 'dropdown' | 'dropdown-toggle' | 'dropdown-list' | 'dropdown-icon'
-  | 'grid' | 'cell' | 'bg-video' | 'embed-script' | 'iframe' | 'hr' | 'button';
+  | 'grid' | 'cell' | 'bg-video' | 'embed-script' | 'iframe' | 'hr' | 'button'
+  | 'slider' | 'slides' | 'slide'
+  | 'lightbox'
+  | 'form-wrapper' | 'form' | 'form-control' | 'form-alert'
+  | 'tabs' | 'tab-menu' | 'tab-link' | 'tab-content' | 'tab-pane'
+  | 'row' | 'col';
 
 export type WfNavCollapse = 'all' | 'medium' | 'small' | 'tiny' | 'none';
 
@@ -155,8 +182,23 @@ export interface WfNodeMeta {
   binding?: WfBinding;
   /** Set by binding.ts on role `dyn-item`. */
   collection?: WfCollectionBinding;
+  /** Native widget data (widgets-native.ts); set on role `slider`. */
+  slider?: SliderSettings;
+  /** Set on role `lightbox`: asset keys (ZIP path or https URL) + Webflow's gallery key. */
+  lightbox?: { files: string[]; group: string };
+  /** Set on role `form-control`: the ycode layer name plus the attributes the control needs to submit. */
+  formControl?: FormControlPlan;
+  /** Set on role `form-alert`. */
+  formAlert?: 'success' | 'error';
+  /** Set on role `form`: `settings.id`, which is what `form_id` is reported as on submission. */
+  formId?: string;
+  /** `data-w-tab` on roles `tab-link` / `tab-pane`; `active` mirrors `w--tab-active` / `w--current`. */
+  tab?: { id: string; active: boolean };
   /** Post-conversion replacement (convert-bridge). */
-  layerKind?: 'htmlEmbed' | 'richText' | 'video' | 'iframe' | 'hr';
+  layerKind?:
+    | 'htmlEmbed' | 'richText' | 'video' | 'iframe' | 'hr'
+    | 'slider' | 'slides' | 'slide' | 'lightbox'
+    | 'form' | 'formControl' | 'formAlert';
 }
 
 export interface WfNode extends ImportNode {

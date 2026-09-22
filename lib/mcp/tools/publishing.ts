@@ -1,8 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-// Webwow: the hardDeleteSoftDeleted* / cleanupDeletedCollections imports below are the
-// fork's addition - see the deletion block in the publish handler.
+// Webwow: the hardDeleteSoftDeleted* / cleanupDeletedCollections / syncLayerStyleChangesToDrafts
+// imports below are the fork's addition - see the deletion and style-sync blocks in the publish handler.
 import { getUnpublishedPages, getAllDraftPages, hardDeleteSoftDeletedPages } from '@/lib/repositories/pageRepository';
-import { getUnpublishedLayerStyles, publishLayerStyles, hardDeleteSoftDeletedLayerStyles } from '@/lib/repositories/layerStyleRepository';
+import { getUnpublishedLayerStyles, publishLayerStyles, hardDeleteSoftDeletedLayerStyles, syncLayerStyleChangesToDrafts } from '@/lib/repositories/layerStyleRepository';
 import { getUnpublishedComponents, publishComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
 import { getAllCollections, getUnpublishedCollections } from '@/lib/repositories/collectionRepository';
 import { getItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
@@ -128,15 +128,29 @@ export function registerPublishingTools(server: McpServer) {
       } catch { changes.components = 0; }
 
       // Publish layer styles
+      let changedLayerStyleIds: string[] = []; // Webwow: input of the style sync below
       try {
         const unpublished = await getUnpublishedLayerStyles();
         if (unpublished.length > 0) {
           const result = await publishLayerStyles(unpublished.map((s) => s.id));
           changes.layer_styles = result.count;
+          changedLayerStyleIds = result.changedStyleIds;
         } else {
           changes.layer_styles = 0;
         }
       } catch { changes.layer_styles = 0; }
+
+      // Webwow: propagate changed style values into the denormalized layer classes of every
+      // draft page/component that uses them, then republish those, like the HTTP publish route
+      // (app/(builder)/ycode/api/publish/route.ts). Without it an `update_style` went live only
+      // in the style row: published pages kept the old classes.
+      if (changedLayerStyleIds.length > 0) {
+        try {
+          const sync = await syncLayerStyleChangesToDrafts(changedLayerStyleIds);
+          if (sync.affectedComponentIds.length > 0) await publishComponents(sync.affectedComponentIds);
+          if (sync.affectedPageIds.length > 0) await publishPages(sync.affectedPageIds);
+        } catch { /* non-fatal */ }
+      }
 
       // Webwow: propagate draft deletions to the published copies. Without this a page
       // deleted through MCP keeps serving after `publish` (zombie page); the HTTP publish

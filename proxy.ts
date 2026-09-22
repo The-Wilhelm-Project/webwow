@@ -4,7 +4,8 @@ import { applySecurityHeaders } from '@/lib/security-headers-server';
 import { prefetchYcodePublishedAt } from '@/lib/ycode-html-comment';
 import { getSessionSecret } from '@/lib/webwow/secret';
 import { SITE_COOKIE, hostFromRequest, resolveSiteForRequest, scopeFor, type Resolved } from '@/lib/webwow/sites/resolve';
-import { registryAvailable, type SiteRow } from '@/lib/webwow/sites/registry';
+import { listSites, registryAvailable, type SiteRow } from '@/lib/webwow/sites/registry';
+import { findMcpTokenSite, isMcpPath, mcpTokenFromRequest } from '@/lib/webwow/sites/mcp-token-site';
 import { signSiteHeaderWebCrypto } from '@/lib/webwow/sites/site-header';
 import { runInSite } from '@/lib/webwow/sites/context';
 import { DEFAULT_SITE_ID, SITE_ID_RE } from '@/lib/webwow/sites/ids';
@@ -199,6 +200,13 @@ export async function proxy(request: NextRequest) {
     })
     : defaultOnly();
   if (isEditor && !multi) resolved = { ...resolved, pinInvalid: 'unknown' }; // no registry -> no editor sessions
+  // MCP on a host that selects no site (the builder host): the site whose database stores the token
+  // (lib/webwow/sites/mcp-token-site.ts). Explicit site hosts keep their site.
+  if (multi && resolved.via === 'default' && isMcpPath(pathname)) {
+    const token = mcpTokenFromRequest(pathname, request.headers.get('authorization'));
+    const owner = token ? await findMcpTokenSite(token, await listSites(), resolved.site.id) : null;
+    if (owner) resolved = { site: owner, via: 'mcp-token' };
+  }
   const siteId = resolved.site.id;
 
   const extra: Record<string, string> = {

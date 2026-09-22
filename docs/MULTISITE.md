@@ -64,8 +64,18 @@ Browser ──► proxy.ts
 * **Scope-Tabelle** (`scopeFor()` in `resolve.ts`): `public` = alles außerhalb von `/ycode`, `/api/templates`,
   `/webwow`, `/_next` **plus** die besucher-seitigen Routen unter `/ycode` (`POST /ycode/api/form-submissions`,
   `POST /ycode/api/collections/*/items/(filter|load-more)`, `/ycode/api/v1/*`, `/ycode/mcp*`, `/ycode/api/oauth/*`,
-  `/ycode/api/revalidate`). Sie folgen dem **Host**, damit ein Formular auf Site B in der Datenbank von Site B
-  landet. Alles andere ist `builder` und folgt dem Cookie/Pin.
+  `/ycode/api/revalidate`, OAuth-Zustimmungsseite `/ycode/oauth/authorize`). Sie folgen dem **Host**, damit ein
+  Formular auf Site B in der Datenbank von Site B landet. Alles andere ist `builder` und folgt dem Cookie/Pin.
+* **MCP** (`/ycode/mcp/<token>` und `/ycode/mcp` mit `Authorization: Bearer`): Ein Token liegt in `mcp_tokens` genau
+  einer Site-Datenbank und gilt nur dort. Wählt der Host keine Site (Builder-Host, `via = default`), bestimmt der
+  Token die Site (`lib/webwow/sites/mcp-token-site.ts`: Default-Site zuerst, dann die übrigen; Treffer 60 s, Fehlschlag
+  5 s gecacht) — die URL, die Integrations → MCP im Builder von Site B anzeigt, erreicht also Site B. Wählt der Host
+  eine Site (Domain, `<slug>.<base>`), wird nur in dieser Site geprüft: ein Token von Site A auf dem Host von Site B
+  bekommt `401`. Der Validierungs-Cache in `lib/mcp/token-cache.ts` ist pro Site geschlüsselt.
+  **OAuth-Connectoren** (claude.ai, ChatGPT) laufen komplett über den Host: Discovery, Registrierung, Zustimmung und
+  Token landen in der Site des Hosts. Für eine andere Site als die Default-Site den Connector auf deren Domain bzw.
+  `https://<slug>.<WEBWOW_SITES_BASE_DOMAIN>/ycode/mcp` richten (Login auf diesem Host nötig); die OAuth-URL, die die
+  Integrations-Seite anzeigt, ist die des Builder-Hosts und damit die Default-Site.
 * **Signierter Header:** Der Proxy ist die einzige Quelle von `x-webwow-site`; Client-seitig gesetzte
   `x-webwow-*` Header werden vor dem Weiterleiten gelöscht, die MAC wird in `getCurrentSiteId()` geprüft —
   ein gefälschter oder unsignierter Header fällt auf `default` zurück.

@@ -26,7 +26,7 @@ test('scopeFor table', () => {
     ['GET', '/dynamic/p_2'], ['GET', '/dynamic'], ['GET', '/.well-known/x'], ['GET', '/sitemap.xml'], ['GET', '/robots.txt'], ['GET', '/llms.txt'],
     ['POST', '/ycode/api/form-submissions'], ['POST', '/ycode/api/collections/x/items/load-more'], ['POST', '/ycode/api/collections/x/items/filter'],
     ['GET', '/ycode/api/v1/collections'], ['POST', '/ycode/api/v1/items'], ['GET', '/ycode/mcp'], ['POST', '/ycode/mcp/abc'],
-    ['GET', '/ycode/api/oauth/authorize'], ['POST', '/ycode/api/revalidate'], ['GET', '/api/cron/airtable-webhooks'], ['POST', '/api/page-auth/verify'],
+    ['GET', '/ycode/api/oauth/authorize'], ['GET', '/ycode/oauth/authorize'], ['POST', '/ycode/api/revalidate'], ['GET', '/api/cron/airtable-webhooks'], ['POST', '/api/page-auth/verify'],
     ['POST', '/api/airtable-webhook'], ['GET', '/ycodex'],
   ];
   for (const [method, path] of pub) assert.equal(scopeFor(path, method), 'public', `${method} ${path}`);

@@ -3,7 +3,7 @@
  *
  * Scope table (`scopeFor`): `public` paths are host-resolved (published pages,
  * storage, asset proxy, visitor-facing API routes such as form submissions,
- * collection filter/load-more, `/ycode/api/v1/*`, MCP, OAuth, revalidate);
+ * collection filter/load-more, `/ycode/api/v1/*`, MCP, OAuth API + consent page, revalidate);
  * `builder` paths (`/ycode/**`, `/api/templates/**`, `/webwow/**`, `/_next/**`)
  * are resolved from the editor pin (session token) or the `webwow_site` cookie.
  * Everything else falls back to the default site.
@@ -28,7 +28,7 @@ export interface ResolveInput {
 
 export interface Resolved {
   site: SiteRow;
-  via: 'pin' | 'cookie' | 'domain' | 'subdomain' | 'default';
+  via: 'pin' | 'cookie' | 'domain' | 'subdomain' | 'default' | 'mcp-token';
   pinInvalid?: 'unknown' | 'disabled' | 'revoked';
 }
 
@@ -39,6 +39,9 @@ const PUBLIC_YCODE_RULES: Array<{ method?: string; re: RegExp }> = [
   { re: /^\/ycode\/api\/v1(\/|$)/ },
   { re: /^\/ycode\/mcp(\/|$)/ },
   { re: /^\/ycode\/api\/oauth(\/|$)/ },
+  // OAuth consent page: must read the client registered through /ycode/api/oauth/register (host-resolved),
+  // so it follows the host too; with the builder cookie it looked the client up in another site ("Unknown client").
+  { re: /^\/ycode\/oauth(\/|$)/ },
   { re: /^\/ycode\/api\/revalidate\/?$/ },
 ];
 

@@ -15,9 +15,13 @@ import {
   createItem,
   updateItem,
   deleteItem,
+  getMaxIdValue,
 } from '@/lib/repositories/collectionItemRepository';
 import { setValuesByFieldName } from '@/lib/repositories/collectionItemValueRepository';
 import { coerceCollectionItemValues } from '@/lib/mcp/utils';
+// Webwow: built-in fields for new collections, field-key resolution and auto values for new items
+// (see the file header of lib/webwow/mcp/collection-items.ts).
+import { BUILT_IN_COLLECTION_FIELDS, autoItemValues, describeUnresolvedKeys, resolveValueKeys } from '@/lib/webwow/mcp/collection-items';
 
 const fieldTypeEnum = z.enum([
   'text', 'number', 'boolean', 'date', 'date_only',
@@ -82,14 +86,22 @@ export function registerCollectionTools(server: McpServer) {
 
   server.tool(
     'create_collection',
-    'Create a new CMS collection. After creating, use add_collection_field to define its schema.',
+    // Webwow: the tool now creates the built-in fields like the builder; the response lists them.
+    'Create a new CMS collection with the built-in fields ID, Status, Name, Slug, Created Date and Updated Date (returned in "fields"). Then use add_collection_field to add custom fields.',
     {
       name: z.string().describe('Collection name (e.g. "Blog Posts", "Team Members")'),
       sorting: sortingSchema.optional(),
     },
     async ({ name, sorting }) => {
       const collection = await createCollection({ name, sorting: sorting as CollectionSorting | undefined });
-      return { content: [{ type: 'text' as const, text: JSON.stringify(collection) }] };
+      // Webwow: same built-in fields as the builder (stores/useCollectionsStore.ts createCollection).
+      const fields = await Promise.all(BUILT_IN_COLLECTION_FIELDS.map((field) => createField({
+        ...field,
+        collection_id: collection.id,
+        is_published: false,
+      })));
+      const builtIns = fields.map((f) => ({ id: f.id, name: f.name, key: f.key, type: f.type }));
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...collection, fields: builtIns }) }] };
     },
   );
 
@@ -168,14 +180,24 @@ Call list_collection_items first to get the collection's field IDs and types. Th
     },
     async ({ collection_id, values }) => {
       const fields = await getFieldsByCollectionId(collection_id);
+      // Webwow: resolve keys (field id, key or name) BEFORE creating the item; unknown keys used to
+      // fail with a raw SQL error and leave an empty item behind.
+      const resolved = resolveValueKeys((values ?? {}) as Record<string, unknown>, fields);
+      const unresolved = describeUnresolvedKeys(resolved, fields);
+      if (unresolved) {
+        return { content: [{ type: 'text' as const, text: unresolved }], isError: true };
+      }
       const item = await createItem({ collection_id });
 
-      if (values && Object.keys(values).length > 0) {
+      // Webwow: auto values like the builder route (ID = max + 1, Created/Updated Date).
+      const auto = autoItemValues(fields, await getMaxIdValue(collection_id, false), new Date().toISOString(), resolved.values);
+      const allValues = { ...auto, ...resolved.values };
+      if (Object.keys(allValues).length > 0) {
         const fieldType: Record<string, CollectionFieldType> = {};
         for (const f of fields) {
           fieldType[f.id] = f.type;
         }
-        const coerced = coerceCollectionItemValues(values as Record<string, unknown>, fieldType);
+        const coerced = coerceCollectionItemValues(allValues, fieldType);
         await setValuesByFieldName(item.id, collection_id, coerced, fieldType);
       }
 
@@ -206,11 +228,17 @@ Values are { fieldId: value } pairs (call list_collection_items for field IDs/ty
     },
     async ({ collection_id, item_id, values }) => {
       const fields = await getFieldsByCollectionId(collection_id);
+      // Webwow: resolve keys (field id, key or name); reject unknown keys with the field list.
+      const resolved = resolveValueKeys(values as Record<string, unknown>, fields);
+      const unresolved = describeUnresolvedKeys(resolved, fields);
+      if (unresolved) {
+        return { content: [{ type: 'text' as const, text: unresolved }], isError: true };
+      }
       const fieldType: Record<string, CollectionFieldType> = {};
       for (const f of fields) {
         fieldType[f.id] = f.type;
       }
-      const coerced = coerceCollectionItemValues(values as Record<string, unknown>, fieldType);
+      const coerced = coerceCollectionItemValues(resolved.values, fieldType);
       await setValuesByFieldName(item_id, collection_id, coerced, fieldType);
       return { content: [{ type: 'text' as const, text: `Updated item ${item_id}` }] };
     },

@@ -34,7 +34,8 @@ export function createMcpServer(): McpServer {
   // runtime uses SYSTEM_INSTRUCTIONS alone, delivers group guides via
   // load_tools, and appends its own draft-first (never publish) policy instead.
   const server = new McpServer(
-    { name: 'ycode', version: '1.0.0' },
+    // Webwow: white-label fork - clients show serverInfo.name (e.g. in their MCP server details).
+    { name: 'webwow', version: '1.0.0' },
     { instructions: SYSTEM_INSTRUCTIONS + '\n' + Object.values(DEFERRED_GROUP_GUIDES).join('\n\n') + MCP_PUBLISHING_INSTRUCTIONS },
   );
 

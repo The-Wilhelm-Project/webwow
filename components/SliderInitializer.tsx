@@ -21,8 +21,43 @@ import {
 /** Tag attached to sliders we've already mounted so re-scans skip them. */
 const INITIALIZED_ATTR = 'data-slider-initialized';
 
+/** A mounted slider plus what the cleanup needs to hand it back in its pre-init markup. */
+interface MountedSlider {
+  el: HTMLElement;
+  swiper: Swiper;
+  restoreMarkup: () => void;
+}
+
+/**
+ * Snapshot the markup Swiper mutates so the slider can be mounted again after
+ * `destroy(true, true)`: the inline styles of root, wrapper and slides (they
+ * carry React-applied CSS vars such as `--bg-img`, which destroy() wipes) and
+ * the pagination's template bullet (replaced by rendered bullets on init).
+ * Needed because the effect cleanup runs while the DOM stays mounted, e.g.
+ * when React re-runs effects in development.
+ */
+function snapshotSliderMarkup(el: HTMLElement): () => void {
+  const styledNodes = [
+    el,
+    ...Array.from(
+      el.querySelectorAll<HTMLElement>(':scope > .swiper-wrapper, :scope > .swiper-wrapper > .swiper-slide'),
+    ),
+  ];
+  const styles = styledNodes.map((node) => [node, node.getAttribute('style')] as const);
+  const paginationEl = el.querySelector<HTMLElement>('[data-slider-pagination]');
+  const paginationHtml = paginationEl?.innerHTML;
+
+  return () => {
+    for (const [node, style] of styles) {
+      if (style === null) node.removeAttribute('style');
+      else node.setAttribute('style', style);
+    }
+    if (paginationEl && paginationHtml !== undefined) paginationEl.innerHTML = paginationHtml;
+  };
+}
+
 export default function SliderInitializer() {
-  const swiperInstancesRef = useRef<Swiper[]>([]);
+  const swiperInstancesRef = useRef<MountedSlider[]>([]);
 
   useEffect(() => {
     loadSwiperCss(document);
@@ -64,6 +99,7 @@ export default function SliderInitializer() {
 
           configureBulletRenderer(el, config);
 
+          const restoreMarkup = snapshotSliderMarkup(el);
           const swiper = new Swiper(el, config);
           applySwiperEasing(el, settings.easing);
           syncSliderStateAttributes(swiper);
@@ -72,7 +108,7 @@ export default function SliderInitializer() {
           if (paginationEl) paginationEl.style.visibility = '';
 
           el.setAttribute(INITIALIZED_ATTR, '');
-          swiperInstancesRef.current.push(swiper);
+          swiperInstancesRef.current.push({ el, swiper, restoreMarkup });
           swiperByElement.set(el, swiper);
           resizeObserver.observe(el);
         } catch {
@@ -86,15 +122,30 @@ export default function SliderInitializer() {
     // Re-scan after filter/load-more injects new collection items so sliders
     // inside those items get mounted. Defer to the next frame so the DOM has
     // settled after injection.
+    let pendingScan = 0;
     const handleItemsInjected = () => {
-      requestAnimationFrame(initSliders);
+      cancelAnimationFrame(pendingScan);
+      pendingScan = requestAnimationFrame(() => {
+        pendingScan = 0;
+        initSliders();
+      });
     };
     window.addEventListener(ITEMS_INJECTED_EVENT, handleItemsInjected);
 
     return () => {
       window.removeEventListener(ITEMS_INJECTED_EVENT, handleItemsInjected);
+      // A scan queued by an injection right before the cleanup must not run
+      // against the disconnected observer and the emptied instance list.
+      cancelAnimationFrame(pendingScan);
       resizeObserver.disconnect();
-      swiperInstancesRef.current.forEach((swiper) => swiper.destroy(true, true));
+      swiperInstancesRef.current.forEach(({ el, swiper, restoreMarkup }) => {
+        swiper.destroy(true, true);
+        restoreMarkup();
+        // Let a later effect run mount this slider again. Without this, React's
+        // development re-run of effects (Strict Mode) destroyed every slider
+        // and then skipped it as already initialized, so no slider ever moved.
+        el.removeAttribute(INITIALIZED_ATTR);
+      });
       swiperInstancesRef.current = [];
     };
   }, []);

@@ -356,8 +356,12 @@ export function syncSliderStateAttributes(swiper: InstanceType<typeof import('sw
   swiper.on('lock', syncNavButtons);
   swiper.on('unlock', syncNavButtons);
 
-  // Initial sync after mount
-  requestAnimationFrame(syncAll);
+  // Initial sync after mount. Skipped when the instance was destroyed in the
+  // meantime (e.g. by an effect cleanup): destroy() deletes swiper.el, so
+  // syncAll would throw on it.
+  requestAnimationFrame(() => {
+    if (!swiper.destroyed) syncAll();
+  });
 }
 
 /** Load minimal Swiper CSS into an iframe document via <link> tag */

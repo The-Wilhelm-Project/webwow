@@ -9,9 +9,12 @@ import {
 import { canManageSettings, extractRoleFromUser } from '@/lib/roles';
 import { getAuthUser } from '@/lib/supabase-auth';
 import { importWebflowZip, WfImportError } from '@/lib/webwow/import/webflow-zip';
+import { checkSiteUrl, MAX_SITE_URL_LENGTH } from '@/lib/webwow/import/webflow-zip/site-crawl';
+import { DEFAULT_WIDGET_FLAGS } from '@/lib/webwow/import/webflow-zip/widgets-native';
 import { ZIP_LIMITS } from '@/lib/webwow/import/webflow-zip/zip';
 
 import type { WfImportOptions, WfWarning } from '@/lib/webwow/import/webflow-zip/types';
+import type { WfWidgetFlags } from '@/lib/webwow/import/webflow-zip/widgets-native';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -46,6 +49,12 @@ function formatWarning(warning: WfWarning): string {
  *                              of the response.
  *   webflowSiteId     string   optional — defaults to the `data-wf-site` id in
  *                              the export.
+ *   websiteUrl        string   optional — the published site. Validated here
+ *                              (http(s), public host, <= 2 KB; 400
+ *                              `website_invalid`); the crawl itself never
+ *                              fails the import.
+ *   widgets           string   optional — JSON object of per-widget switches
+ *                              (`{"slider":false}`), unknown keys ignored.
  */
 export async function POST(request: NextRequest) {
   let importId: string | null = null;
@@ -97,6 +106,35 @@ export async function POST(request: NextRequest) {
     const pageSlugConflict = formData.get('pageSlugConflict');
     if (pageSlugConflict === 'fail' || pageSlugConflict === 'suffix') options.pageSlugConflict = pageSlugConflict;
 
+    const websiteUrl = formData.get('websiteUrl');
+    if (typeof websiteUrl === 'string' && websiteUrl.trim()) {
+      if (websiteUrl.length > MAX_SITE_URL_LENGTH) {
+        return noCache({ error: `The website URL is longer than ${MAX_SITE_URL_LENGTH} characters`, code: 'website_invalid' }, 400);
+      }
+      const site = await checkSiteUrl(websiteUrl);
+      if (!site.ok) return noCache({ error: `Website URL rejected: ${site.error}`, code: 'website_invalid' }, 400);
+      options.websiteUrl = `${site.origin}/`;
+    }
+
+    const widgets = formData.get('widgets');
+    if (typeof widgets === 'string' && widgets.trim()) {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(widgets);
+      } catch {
+        return noCache({ error: 'widgets must be a JSON object of booleans', code: 'widgets_invalid' }, 400);
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return noCache({ error: 'widgets must be a JSON object of booleans', code: 'widgets_invalid' }, 400);
+      }
+      const flags: Partial<WfWidgetFlags> = {};
+      for (const key of Object.keys(DEFAULT_WIDGET_FLAGS) as (keyof WfWidgetFlags)[]) {
+        const value = (parsed as Record<string, unknown>)[key];
+        if (typeof value === 'boolean') flags[key] = value;
+      }
+      if (Object.keys(flags).length > 0) options.widgets = flags;
+    }
+
     // Request-scoped only. Nothing below this line persists, logs or echoes it:
     // the job payload stays empty and the response carries counts and warnings.
     const apiToken = formData.get('webflowApiToken');
@@ -138,6 +176,7 @@ export async function POST(request: NextRequest) {
         collectionIds: result.collectionIds,
         cmsSource: result.cmsSource,
         webflowSiteId: result.webflowSiteId,
+        site: result.site,
         durationMs: result.durationMs,
       },
     }, 200);

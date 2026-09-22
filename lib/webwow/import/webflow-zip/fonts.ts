@@ -8,16 +8,18 @@
  * plain asset (`mat.uploadRaw`) and declared via a residual `@font-face` with
  * proper `font-weight` / `font-style` descriptors, which `saveSiteSettings`
  * appends to the site's custom head code together with the residual CSS.
+ * The fallback stack a site rule names (`NeueHaas, Arial, sans-serif`) becomes
+ * the row's `category`, which `buildFontClassesCss` appends to the family.
  *
  * Google Fonts requested by a page (`fonts.googleapis.com` links,
  * `WebFont.load`) are installed through `mat.installFont`.
  */
 
-import { getAllFonts } from '@/lib/repositories/fontRepository';
+import { getAllFonts, updateFont } from '@/lib/repositories/fontRepository';
 import { uploadFontFile } from '@/lib/font-upload';
 import { guessMimeType } from '@/lib/webwow/storage';
 import type { CssFontFace } from './css-tokenizer';
-import type { WfStyleModel } from './css';
+import { isSafeFontFamilyName, safeFontFallback, type WfStyleModel } from './css';
 import type { WfMaterializerLike, WfPage } from './types';
 import type { WfZipBundle } from './zip';
 import type { Warnings } from './warnings';
@@ -97,6 +99,11 @@ export async function installFonts(model: WfStyleModel, pages: WfPage[], zip: Wf
   for (const face of model.fontFaces) {
     const key = face.family.trim().toLowerCase();
     if (!key) continue;
+    if (!isSafeFontFamilyName(face.family)) {
+      // ycode quotes the family into its generated stylesheets (`font-family: "<family>"`).
+      warn.add('css_dropped', `@font-face with an unusable family name dropped: ${JSON.stringify(face.family.slice(0, 60))}`);
+      continue;
+    }
     const entry = families.get(key) ?? { family: face.family.trim(), faces: [] };
     entry.faces.push(face);
     families.set(key, entry);
@@ -118,6 +125,19 @@ export async function installFonts(model: WfStyleModel, pages: WfPage[], zip: Wf
       if (font) {
         fonts++;
         existing.add(key);
+        // ycode's font class is `"<family>", <category>` (buildFontClassesCss): the
+        // category carries the stack's fallbacks (`Arial, sans-serif`).
+        // Checked again here: the category is written verbatim into a `<style>` element.
+        const stack = model.fontFallbacks?.get(key);
+        const fallback = stack ? safeFontFallback(stack) : null;
+        if (stack && !fallback) warn.add('css_dropped', `font ${family}: fallback stack dropped (unsafe characters)`);
+        if (fallback) {
+          try {
+            await updateFont(font.id, { category: fallback });
+          } catch (error) {
+            warn.add('font_extra_weight', `font ${family}: fallback stack ${fallback} not stored (${error instanceof Error ? error.message : String(error)})`);
+          }
+        }
       } else {
         warn.add('asset_missing', `font ${family} could not be uploaded (${primaryPath})`);
       }

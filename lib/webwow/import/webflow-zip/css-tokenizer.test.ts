@@ -8,6 +8,7 @@ import {
   resolveVars,
   splitTopLevel,
   stripCssComments,
+  splitCompoundsWithCombinators,
   tokenizeCss,
 } from './css-tokenizer';
 
@@ -166,4 +167,9 @@ test('comments and BOMs are ignored, unbalanced input does not throw', () => {
   assert.doesNotThrow(() => tokenizeCss('}}.a{color:red}'));
   assert.equal(tokenizeCss('}}.a{color:red}').rules.length, 1);
   assert.equal(tokenizeCss('.a{}').rules.length, 1);
+});
+
+test('splitCompoundsWithCombinators keeps combinators and ignores whitespace inside attributes and strings', () => {
+  assert.deepEqual(splitCompoundsWithCombinators('.a > .b .c+.d ~ e'), { compounds: ['.a', '.b', '.c', '.d', 'e'], combinators: ['>', ' ', '+', '~'] });
+  assert.deepEqual(splitCompoundsWithCombinators('.a[title="x y"] .b:not(.c .d)'), { compounds: ['.a[title="x y"]', '.b:not(.c .d)'], combinators: [' '] });
 });

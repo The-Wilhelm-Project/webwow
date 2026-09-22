@@ -595,7 +595,8 @@ export async function fetchCmsFromApi(opts: FetchCmsFromApiOptions): Promise<WfA
 
 // ─── Merge with the CSV plans ─────────────────────────────────────────────────
 
-export type WfCmsSource = 'csv' | 'api' | 'mixed';
+/** `site` = every collection was built from the live site (no CSV, no API); `mixed` covers CSV + API. */
+export type WfCmsSource = 'csv' | 'api' | 'mixed' | 'site';
 
 export interface MergeCmsPlansOptions {
   csvPlans: WfCollectionPlan[];

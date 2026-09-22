@@ -15,29 +15,32 @@
  */
 
 import { ImportConverter } from '@/lib/import/convert';
-import { componentizeLayers } from '@/lib/import/componentize';
-import { mergeClassStack } from '@/lib/layer-style-resolve';
 import { createAssetFolder, getAllAssetFolders } from '@/lib/repositories/assetFolderRepository';
 import { generateAndSaveDraftCSS, generateCSSForPages } from '@/lib/server/cssGenerator';
 import { clearAllCache } from '@/lib/services/cacheService';
 import { guessMimeType } from '@/lib/webwow/storage';
 
 import { bindPages, chooseCollection } from './binding';
-import { importCms, inferSchema, parseCsvFiles, reportGuessedFields } from './cms';
-import { extractCrossPageComponents } from './components';
+import { importCms, inferSchema, inferTimeZoneFromDates, parseCsvFiles, reportGuessedFields } from './cms';
+import { componentizeKeepingMedia, extractCrossPageComponents } from './components';
 import { fetchCmsFromApi, mergeCmsPlans } from './data-api';
-import { applyNodeLayerPostProcessing, convertPage, pinBackgroundBindingClasses, resolveShadowedChipClasses, walkLayers } from './convert-bridge';
-import { buildStyleModel } from './css';
+import { applyNodeLayerPostProcessing, convertPage, liftSelfBoundBackgrounds, pinBackgroundBindingClasses, resolveShadowedChipClasses, walkLayers } from './convert-bridge';
+import { bodyClassesFor, buildStyleModel } from './css';
 import { installFonts } from './fonts';
 import { loadSvgIcons, parsePage } from './html';
 import { mapInteractions } from './ix2';
+import { collectRichTextClasses } from './richtext-styles';
+import { collectClassLists } from './states';
 import { parseIx2FromJs } from './ix2-parse';
 import { assertNoSlugConflicts, createPageRows, planPages, savePageLayers, saveSiteSettings } from './pages';
 import { ByteBudget } from './safe-fetch';
 import { ServerMaterializer } from './server-materializer';
+import { applySiteSeo, createSiteOracle, mergeSitePlans } from './site-cms';
+import { crawlSite, pagePathOf } from './site-crawl';
 import { DEFAULT_IMPORT_OPTIONS } from './types';
 import { Warnings } from './warnings';
 import { generateWidgetInteractions } from './widgets';
+import { siteClassIndex } from './widgets-extra';
 import { parseLightboxPayload } from './widgets-native';
 import { openWebflowZip } from './zip';
 
@@ -45,7 +48,9 @@ import type { WfCmsResult, WfCollectionInfo, WfCollectionPlan } from './cms';
 import type { WfCmsSource } from './data-api';
 import type { PageLayers, RegionHint } from './components';
 import type { PagePlan } from './pages';
-import type { WfImportCounts, WfImportOptions, WfImportResult, WfNode, WfPage } from './types';
+import type { SiteCmsMerge } from './site-cms';
+import type { SiteCollectionHint } from './site-crawl';
+import type { WfImportCounts, WfImportOptions, WfImportResult, WfNode, WfPage, WfSiteContribution } from './types';
 import type { WfZipBundle } from './zip';
 
 import type { ImportMaterializer } from '@/lib/import/materializer';
@@ -71,7 +76,7 @@ export interface WfImportHooks {
 // ─── Asset key collection ─────────────────────────────────────────────────────
 
 const CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"']*))\s*\)/gi;
-const HTML_REF_RE = /(?:src|href|content|srcset|data-poster-url|data-video-urls)\s*=\s*"([^"]*)"/gi;
+const HTML_REF_RE = /(?:src|href|content|srcset|data-poster-url|data-video-urls|data-src)\s*=\s*"([^"]*)"/gi;
 const DERIVATIVE_RE = /-p-\d+(\.[a-z0-9]+)$/i;
 
 /** `'../images/x-p-500.jpg?v=1'` -> `'images/x.jpg'` (the base file actually in the ZIP). */
@@ -165,6 +170,12 @@ function provisionalCms(plans: WfCollectionPlan[]): WfCmsResult {
   return { collections, counts: { collections: 0, fields: 0, items: 0, itemsPublishable: 0, cmsImages: 0, failed: 0, skipped: 0 } };
 }
 
+/** `detail_werke` -> `werke` (the folder slug of the collection pages). */
+function detailFolderOf(pageName: string): string | null {
+  const m = pageName.match(/^detail[_-](.+)$/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
 /** page basename -> the collection its `detail_*` page belongs to. */
 function detailCollectionsOf(pages: WfPage[], cms: WfCmsResult): Map<string, WfCollectionInfo> {
   const out = new Map<string, WfCollectionInfo>();
@@ -237,15 +248,6 @@ function regionHintsOf(pages: WfPage[], layerByNode: Map<string, Layer>): Map<st
   return hints;
 }
 
-function bodyClassesFor(page: WfPage, model: ReturnType<typeof buildStyleModel>): string {
-  const stack: string[] = [...(model.tags.get('body')?.classes ?? [])];
-  for (const name of page.bodyClassNames) {
-    const entry = model.classes.get(name);
-    if (entry) stack.push(...entry.ref.classes);
-  }
-  return mergeClassStack(stack).join(' ').trim();
-}
-
 // ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHooks): Promise<WfImportResult> {
@@ -302,10 +304,18 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
   for (const file of [zip.css.normalize, zip.css.components]) {
     if (file) frameworkCss.push(await file.text());
   }
+  // Classes of the rich-text elements, so the style model reads `.rich-text-block p`
+  // as a rich-text rule (textStyles) instead of residual CSS.
+  const richTextClasses = new Set<string>();
+  // Every element's class list, so a state rule inside a complex selector
+  // (`.dropdown-list.w--open .link`) knows which elements it targets (states.ts).
+  const classLists = new Set<string>();
   for (const file of zip.pages.values()) {
     const html = await file.text();
     collectHtmlAssetKeys(html, zip, assetKeys);
     collectLightboxAssetKeys(html, zip, assetKeys);
+    collectRichTextClasses(html, richTextClasses);
+    collectClassLists(html, classLists);
   }
   for (const file of zip.errorPages.values()) collectHtmlAssetKeys(await file.text(), zip, assetKeys);
 
@@ -331,13 +341,15 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
   const keys = [...assetKeys];
   let uploaded = 0;
   await mat.prepareAssets(keys, () => progress('assets', ++uploaded, keys.length));
-  const assets = { idOf: (key: string) => mat.assetId(key) };
+  const assets = { idOf: (key: string) => mat.assetId(key), urlOf: (key: string) => mat.assetUrl(key) };
 
   // 4. Style model.
   progress('css', 0, 1);
   const model = buildStyleModel({
     siteCss,
     frameworkCss,
+    richTextClasses,
+    classLists,
     assetUrl: (relativeUrl: string) => {
       const key = toZipKey(relativeUrl);
       return key ? mat.assetUrl(key) : null;
@@ -375,6 +387,63 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
     }
   }
 
+  // 5b. Optional: the published site as a source (SPEC B). Runs after the
+  // pages are parsed because the crawl needs the export's page list and the
+  // detail folders, and before the plan because it may add rows, fill cells
+  // and build whole collections. Never fatal: every problem is a `site_*`
+  // warning and the import continues with what the export has.
+  let siteMerge: SiteCmsMerge | null = null;
+  let siteCounts: WfSiteContribution | undefined;
+  if (options.websiteUrl?.trim()) {
+    progress('site', 0, 1);
+    const before = provisionalCms(cmsPlans);
+    const detailOwners = detailCollectionsOf(pages, before);
+    const detailPages = new Map<string, { folder: string; planIndex: number }>();
+    for (const page of pages) {
+      const folder = detailFolderOf(page.name);
+      if (!folder) continue;
+      const owner = detailOwners.get(page.name);
+      detailPages.set(page.name, { folder, planIndex: owner ? before.collections.indexOf(owner) : -1 });
+    }
+    const hints: SiteCollectionHint[] = cmsPlans.map((plan, i) => ({
+      name: plan.csv.name,
+      folder: [...detailPages.values()].find((d) => d.planIndex === i)?.folder ?? null,
+      slugs: plan.csv.rows.map((r) => (r['Slug'] ?? '').trim()).filter(Boolean),
+    }));
+    for (const { folder } of detailPages.values()) {
+      if (!hints.some((h) => h.folder === folder)) hints.push({ name: folder, folder, slugs: [] });
+    }
+    // Safety net for the never-fatal rule: the crawler and the merge guard
+    // themselves, but whatever still escapes (a parser or merge defect on an
+    // unforeseen page) must not turn into an HTTP 500 for the whole import.
+    try {
+      const site = await crawlSite({
+        baseUrl: options.websiteUrl,
+        pagePaths: [...zip.pages.keys()].filter((name) => !detailFolderOf(name)).map(pagePathOf),
+        collections: hints,
+        warn,
+      });
+      const merged = mergeSitePlans({ plans: cmsPlans, site, pages, detailPages, warn });
+      siteMerge = merged;
+      cmsPlans = merged.plans;
+      if (merged.siteOnly && cmsPlans.length > 0) cmsSource = 'site';
+      siteCounts = {
+        pages: site.stats.fetched,
+        failed: site.stats.failed + site.stats.skipped,
+        valuesFilled: merged.stats.valuesFilled,
+        itemsAdded: merged.stats.itemsAdded,
+        collectionsBuilt: merged.stats.collectionsBuilt,
+        slotsBound: 0,
+      };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      warn.add('site_unreachable', `website ${options.websiteUrl.trim()} could not be used (${reason}); the import continues with the export alone`);
+      siteMerge = null;
+      siteCounts = undefined;
+    }
+    progress('site', 1, 1);
+  }
+
   // 6. Page plan + slug conflicts — the last step that can fail cleanly.
   progress('plan', 0, 1);
   const provisional = provisionalCms(cmsPlans);
@@ -388,8 +457,11 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
     remoteAssets: options.remoteAssets,
     warn,
     onProgress: (done, total) => progress('cms', done, total),
+    ...(siteMerge && siteMerge.alternateUrls.size > 0 ? { alternateUrls: siteMerge.alternateUrls } : {}),
   });
   resolvePlanCollections(plans, provisional, cms);
+  // The live collection pages' <title> / description per item, now that the field ids exist.
+  if (siteMerge && siteMerge.seo.size > 0) applySiteSeo(plans, cms, siteMerge, warn);
 
   // 8. Page rows.
   progress('pages', 0, plans.length);
@@ -402,9 +474,11 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
     if (pageId && folderId) dynamicPageByCollection.set(plan.cms.collectionId, { pageId, folderId, slug: plan.folder.slug });
   }
 
-  // 9. Structural CMS binding.
+  // 9. CMS binding: live-site evidence first (deterministic), structure for the rest.
   progress('binding', 0, 1);
-  bindPages({ cms, pages, dynamicPageByCollection, warn });
+  const oracle = siteMerge ? createSiteOracle(siteMerge, cms, pages) : undefined;
+  bindPages({ cms, pages, dynamicPageByCollection, warn, oracle });
+  if (siteCounts && oracle) siteCounts.slotsBound = oracle.hits;
 
   // 10. Layers.
   progress('layers', 0, pages.length);
@@ -422,6 +496,10 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
     applyNodeLayerPostProcessing(page, result.layerByNode, assets, warn, options.widgets);
     resolveShadowedChipClasses(result.roots, (id) => styleClasses.get(id));
     pinBackgroundBindingClasses(result.roots, (id) => styleClasses.get(id));
+    // Re-points the item's node at its new child layer (interactions, regions).
+    if (liftSelfBoundBackgrounds(result.roots, result.layerByNode) > 0) {
+      for (const [nodeId, layer] of result.layerByNode) layerByNode.set(nodeId, layer);
+    }
     rootsByPage.set(page.name, result.roots);
     progress('layers', ++converted, pages.length);
   }
@@ -436,7 +514,7 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
   progress('components', 0, 1);
   const pageLayers: PageLayers[] = pages.map((page) => ({
     page: page.name,
-    body: { id: 'body', name: 'body', classes: bodyClassesFor(page, model), children: rootsByPage.get(page.name) ?? [] },
+    body: { id: 'body', name: 'body', classes: bodyClassesFor(page.bodyClassNames, model), children: rootsByPage.get(page.name) ?? [] },
   }));
   const regionHints = regionHintsOf(pages, layerByNode);
   // Slider slides are structurally identical BY DESIGN, so both component passes
@@ -446,13 +524,14 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
   // componentized on their own afterwards, so a repeated card INSIDE one slide
   // still becomes a component while two slides never merge.
   const detachedSlides = pageLayers.flatMap((entry) => detachSlides(entry.body.children ?? []));
-  await extractCrossPageComponents(pageLayers, mat, warn, { hintOf: (id) => regionHints.get(id) });
+  const siteClasses = siteClassIndex(pages, layerByNode);
+  await extractCrossPageComponents(pageLayers, mat, warn, { hintOf: (id) => regionHints.get(id), classesOf: (id) => siteClasses.get(id), variants: options.widgets?.navbarVariants !== false });
   for (const entry of pageLayers) {
-    entry.body.children = await componentizeLayers(entry.body.children ?? [], mat as unknown as ImportMaterializer);
+    entry.body.children = await componentizeKeepingMedia(entry.body.children ?? [], mat);
   }
   for (const slot of detachedSlides) {
     for (const slide of slot.slides) {
-      slide.children = await componentizeLayers(slide.children ?? [], mat as unknown as ImportMaterializer);
+      slide.children = await componentizeKeepingMedia(slide.children ?? [], mat);
     }
     slot.parent.children = slot.slides;
   }
@@ -473,12 +552,19 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
   const favicon = indexPage?.favicon ? assets.idOf(indexPage.favicon) : null;
   const webclip = indexPage?.webclip ? assets.idOf(indexPage.webclip) : null;
   const residualCss = [model.residualCss, fonts.residualFaces].filter((s) => s && s.trim()).join('\n');
-  await saveSiteSettings({
+  // Dates render in `settings.timezone`: the zone the live site renders in
+  // when the crawl saw one, else the zone Webflow's year-only dates imply.
+  const timeZone = siteMerge?.timeZone ? { zone: siteMerge.timeZone, reason: siteMerge.timeZoneReason ?? 'live site' } : inferTimeZoneFromDates(cmsPlans);
+  const settingsSaved = await saveSiteSettings({
     siteName: indexPage?.title ? indexPage.title.split(/\s+[–|]\s+/)[0].trim() : undefined,
     faviconAssetId: favicon ?? undefined,
     webClipAssetId: webclip ?? undefined,
     residualCss,
+    timezone: timeZone?.zone,
   });
+  if (timeZone) {
+    warn.add('timezone_set', settingsSaved.timezoneSet ? `site time zone set to ${timeZone.zone}: ${timeZone.reason}; CMS dates render as on the Webflow site` : `site time zone kept as configured; the CMS dates suggest ${timeZone.zone} (${timeZone.reason})`);
+  }
 
   // 14. CSS generation (publish throws on an empty `draft_css` — G4).
   progress('css-generate', 0, 1);
@@ -539,6 +625,7 @@ export async function importWebflowZip(input: WfImportInput, hooks?: WfImportHoo
     collectionIds: Object.fromEntries(cms.collections.map((c) => [c.name, c.id])),
     cmsSource,
     ...(webflowSiteId ? { webflowSiteId } : {}),
+    ...(siteCounts ? { site: siteCounts } : {}),
     durationMs: Date.now() - started,
   };
 }

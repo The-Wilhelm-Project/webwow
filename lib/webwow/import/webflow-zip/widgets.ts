@@ -14,7 +14,11 @@
  *   not ship. Each `.w-tab-link` therefore gets a `click` interaction that shows
  *   its own `.w-tab-pane` and hides every sibling pane — the panes that do not
  *   start active carry `apply_styles: display on-load`, so exactly one pane is
- *   visible before the first click.
+ *   visible before the first click. A tab link whose `w--current` rule became a
+ *   tween (states.ts, `wf.stateTween`) gets its active look on the same click
+ *   and every other link its resting look; the `from` values are each link's
+ *   on-load state (the active tab starts active), because the runtime paints
+ *   `from` before the first click.
  *
  * The runtime shows a toggled element by removing its `data-gsap-hidden`
  * attribute, so any Tailwind `hidden` shim on the target would keep it
@@ -23,9 +27,10 @@
  */
 
 import { generateId } from '@/lib/utils';
-import type { Breakpoint, Layer, LayerInteraction } from '@/types';
-import type { WfNavCollapse, WfNode, WfNodeRole, WfPage } from './types';
+import type { Breakpoint, InteractionTween, Layer, LayerInteraction } from '@/types';
+import type { WfNavCollapse, WfNode, WfNodeMeta, WfNodeRole, WfPage } from './types';
 import type { Warnings } from './warnings';
+import { dropdownAttributes } from './widgets-extra';
 
 const DISPLAY_SHIMS = new Set(['hidden', 'max-lg:hidden', 'max-md:hidden']);
 const ALL_BREAKPOINTS: Breakpoint[] = ['desktop', 'tablet', 'mobile'];
@@ -88,7 +93,22 @@ export function stripDisplayShims(layer: Layer): void {
   }
 }
 
-function toggleInteraction(trigger: 'click' | 'hover', breakpoints: Breakpoint[], targetLayerId: string, durationSeconds: number): LayerInteraction {
+/** A toggle's `w--open` styles as a tween on the same interaction (states.ts, `wf.stateTween`). */
+interface StateTweenTarget {
+  layerId: string;
+  tween: NonNullable<WfNodeMeta['stateTween']>;
+}
+
+function stateTweensOf(nodes: (WfNode | undefined)[], layerOf: (node: WfNode | undefined) => Layer | undefined): StateTweenTarget[] {
+  const out: StateTweenTarget[] = [];
+  for (const node of nodes) {
+    const layer = layerOf(node);
+    if (node?.wf.stateTween && layer) out.push({ layerId: layer.id, tween: node.wf.stateTween });
+  }
+  return out;
+}
+
+function toggleInteraction(trigger: 'click' | 'hover', breakpoints: Breakpoint[], targetLayerId: string, durationSeconds: number, states: StateTweenTarget[] = []): LayerInteraction {
   return {
     id: generateId('int'),
     trigger,
@@ -104,6 +124,18 @@ function toggleInteraction(trigger: 'click' | 'hover', breakpoints: Breakpoint[]
         to: { display: 'visible' },
         apply_styles: { display: 'on-load' },
       },
+      // The open state of the toggle itself (`.dropdown-toggle.w--open`), played and
+      // reversed together with the list: no `apply_styles`, the resting look is the layer's own.
+      ...states.map((s) => ({
+        id: generateId('twn'),
+        layer_id: s.layerId,
+        position: 0,
+        duration: durationSeconds,
+        ease: 'none',
+        from: s.tween.from,
+        to: s.tween.to,
+        apply_styles: {},
+      })),
     ],
   };
 }
@@ -126,6 +158,15 @@ function generateTabInteractions(page: WfPage, tabs: WfNode, layerByNode: Map<st
   panes.forEach((pane, i) => paneByTab.set(pane.wf.tab?.id || `#${i}`, pane));
   const paneLayers = panes.map((pane) => layerByNode.get(pane.wf.id)).filter((l): l is Layer => Boolean(l));
 
+  // Tab links with an active look (`.tab-link.w--current` -> wf.stateTween); the
+  // link Webflow marked current starts active (the first one when none is marked).
+  const anyActive = links.some((l) => l.wf.tab?.active);
+  const styledLinks = links.flatMap((l, idx) => {
+    const layer = layerByNode.get(l.wf.id);
+    if (!l.wf.stateTween || !layer) return [];
+    return [{ layerId: layer.id, tween: l.wf.stateTween, active: l.wf.tab?.active === true || (!anyActive && idx === 0) }];
+  });
+
   let generated = 0;
   links.forEach((link, i) => {
     const linkLayer = layerByNode.get(link.wf.id);
@@ -135,7 +176,7 @@ function generateTabInteractions(page: WfPage, tabs: WfNode, layerByNode: Map<st
       warn.add('widget_partial', `tab link without a matching pane (data-w-tab="${link.wf.tab?.id ?? ''}")`, { page: page.name, node: link.wf.id });
       return;
     }
-    const tweens = paneLayers.map((target) => ({
+    const tweens: InteractionTween[] = paneLayers.map((target) => ({
       id: generateId('twn'),
       layer_id: target.id,
       position: 0,
@@ -147,6 +188,18 @@ function generateTabInteractions(page: WfPage, tabs: WfNode, layerByNode: Map<st
       // click; `collectHiddenLayerInfo` keys off exactly this combination.
       apply_styles: target.id === paneLayer.id && !pane?.wf.tab?.active ? { display: 'on-load' as const } : {},
     }));
+    for (const s of styledLinks) {
+      tweens.push({
+        id: generateId('twn'),
+        layer_id: s.layerId,
+        position: 0,
+        duration: 0,
+        ease: 'none',
+        from: s.active ? s.tween.to : s.tween.from,
+        to: s.layerId === linkLayer.id ? s.tween.to : s.tween.from,
+        apply_styles: {},
+      });
+    }
     linkLayer.interactions = [
       ...(linkLayer.interactions ?? []),
       { id: generateId('int'), trigger: 'click' as const, timeline: { breakpoints: ALL_BREAKPOINTS, repeat: 0, yoyo: false }, tweens },
@@ -177,7 +230,7 @@ export function generateWidgetInteractions(page: WfPage, layerByNode: Map<string
         if (buttonLayer && menuLayer) {
           const ms = Number.parseInt(node.wf.attrs['data-duration'] ?? '', 10);
           const duration = (Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_NAV_DURATION_MS) / 1000;
-          const interaction = toggleInteraction('click', collapseBreakpoints(collapse), menuLayer.id, duration);
+          const interaction = toggleInteraction('click', collapseBreakpoints(collapse), menuLayer.id, duration, stateTweensOf([button], layerOf));
           buttonLayer.interactions = [...(buttonLayer.interactions ?? []), interaction];
           stripDisplayShims(menuLayer);
           generated++;
@@ -191,8 +244,18 @@ export function generateWidgetInteractions(page: WfPage, layerByNode: Map<string
       const toggleLayer = layerOf(toggle);
       const listLayer = layerOf(list);
       if (toggleLayer && listLayer) {
-        const interaction = toggleInteraction(node.wf.dropdownHover ? 'hover' : 'click', ['desktop', 'tablet', 'mobile'], listLayer.id, DROPDOWN_DURATION_S);
-        toggleLayer.interactions = [...(toggleLayer.interactions ?? []), interaction];
+        const hover = Boolean(node.wf.dropdownHover);
+        const wrapperLayer = layerOf(node);
+        // webflow.js opens a hover dropdown on the whole `.w-dropdown` (mouseenter /
+        // mouseleave on the wrapper), so the list stays open while the pointer moves
+        // from the toggle into it; a click dropdown listens on the toggle.
+        const triggerLayer = hover && wrapperLayer ? wrapperLayer : toggleLayer;
+        const interaction = toggleInteraction(hover ? 'hover' : 'click', ALL_BREAKPOINTS, listLayer.id, DROPDOWN_DURATION_S, stateTweensOf([toggle], layerOf));
+        triggerLayer.interactions = [...(triggerLayer.interactions ?? []), interaction];
+        // Hooks for the constant runtime line (DROPDOWN_RUNTIME_SCRIPT): outside click / Escape close, aria-expanded.
+        const attrs = dropdownAttributes(hover);
+        if (wrapperLayer) wrapperLayer.attributes = { ...wrapperLayer.attributes, ...attrs.wrapper };
+        toggleLayer.attributes = { ...toggleLayer.attributes, ...attrs.toggle };
         stripDisplayShims(listLayer);
         generated++;
       } else {

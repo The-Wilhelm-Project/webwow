@@ -12,15 +12,32 @@ import Module from 'node:module';
   require.cache[filename] = mod;
 }
 
+import http from 'node:http';
 import {
+  BUDGET_EXHAUSTED_ERROR,
   ByteBudget,
   DEFAULT_ALLOWED_HOSTS,
+  checkUrlSafety,
   envAllowedHosts,
+  envRelaxedHosts,
   filenameFromUrl,
   isAllowedHost,
   isPrivateAddress,
+  resolveSafeUrl,
   safeFetch,
 } from './safe-fetch';
+
+/** A throwaway HTTP server on the loopback; records every request it sees. */
+function listen(handler: http.RequestListener): Promise<{ server: http.Server; port: number; hits: { url: string; host: string }[] }> {
+  const hits: { url: string; host: string }[] = [];
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      hits.push({ url: req.url ?? '', host: req.headers.host ?? '' });
+      handler(req, res);
+    });
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: (server.address() as { port: number }).port, hits }));
+  });
+}
 
 const CDN = 'https://cdn.prod.website-files.com/696e3e261a55566a62dc5508/6973b0695bd4b92617308ffa_02-Sudisland.jpg';
 
@@ -77,11 +94,121 @@ test('isAllowedHost / envAllowedHosts', () => {
   assert.deepEqual(envAllowedHosts(''), []);
 });
 
+test('envRelaxedHosts: the operator list widens only outside production; safeFetch relaxes nothing on its own', async () => {
+  assert.deepEqual(envRelaxedHosts('localhost', 'production'), []);
+  assert.deepEqual(envRelaxedHosts('localhost,fixture.test', 'development').map(String), ['/^localhost$/i', '/^fixture\\.test$/i']);
+  assert.deepEqual(envRelaxedHosts('localhost', undefined).length, 1);
+  assert.deepEqual(envRelaxedHosts(undefined, 'development'), []);
+
+  const loopback = async () => [{ address: '127.0.0.1' }];
+  const url = new URL('http://localhost:8090/');
+  const allow = [/^localhost$/i];
+  assert.equal(await checkUrlSafety(url, allow, loopback), 'only https URLs are allowed (http:)');
+  assert.equal(await checkUrlSafety(url, allow, loopback, { allowHttp: true }), 'host localhost resolves to a non-public address');
+  assert.equal(await checkUrlSafety(url, allow, loopback, { relaxedHosts: [/^localhost$/i] }), null);
+  assert.equal(await checkUrlSafety(url, allow, loopback, { relaxedHosts: [/^other$/i] }), 'only https URLs are allowed (http:)');
+  assert.deepEqual(await resolveSafeUrl(url, allow, loopback, { relaxedHosts: [/^localhost$/i] }), { problem: null, addresses: ['127.0.0.1'] });
+  assert.deepEqual(await resolveSafeUrl(new URL('https://93.184.216.34/x'), [/.*/], loopback), { problem: null, addresses: ['93.184.216.34'] });
+
+  // The env list is never the default: with WEBWOW_IMPORT_ALLOWED_HOSTS set, safeFetch still
+  // refuses http on the loopback unless the caller passes the relaxation itself.
+  const { fetchImpl, calls } = stubFetch(() => body(4));
+  process.env.WEBWOW_IMPORT_ALLOWED_HOSTS = 'localhost';
+  try {
+    const refused = await safeFetch('http://localhost:8090/x.jpg', { fetchImpl, lookupImpl: loopback });
+    assert.equal(refused.ok, false);
+    const relaxed = await safeFetch('http://localhost:8090/x.jpg', { fetchImpl, lookupImpl: loopback, relaxedHosts: envRelaxedHosts('localhost', 'development') });
+    assert.ok(relaxed.ok);
+    assert.deepEqual(calls, ['http://localhost:8090/x.jpg']);
+  } finally {
+    delete process.env.WEBWOW_IMPORT_ALLOWED_HOSTS;
+  }
+});
+
+test('the socket connects to the validated address, not to a second DNS answer', async () => {
+  const { server, port, hits } = await listen((_req, res) => {
+    res.setHeader('content-type', 'text/html');
+    res.end('<html><body>internal</body></html>');
+  });
+  try {
+    // Pinning: `pinned.invalid` never resolves through the system, so the request can only
+    // reach the local server through the validated address; Host stays the hostname.
+    const pinned = await safeFetch(`http://pinned.invalid:${port}/page.html`, {
+      allowHosts: [/^pinned\.invalid$/], relaxedHosts: [/^pinned\.invalid$/], lookupImpl: async () => [{ address: '127.0.0.1' }],
+    });
+    assert.ok(pinned.ok, JSON.stringify(pinned));
+    assert.equal(pinned.buffer.toString(), '<html><body>internal</body></html>');
+    assert.equal(pinned.contentType, 'text/html');
+    assert.deepEqual(hits, [{ url: '/page.html', host: `pinned.invalid:${port}` }]);
+
+    // Rebinding: validation saw a public address for `localhost`; the connection must go to
+    // that address (unroutable TEST-NET here), never to 127.0.0.1 where the server listens.
+    hits.length = 0;
+    const rebound = await safeFetch(`http://localhost:${port}/secret`, {
+      allowHosts: [/^localhost$/], allowHttp: true, relaxedHosts: [], lookupImpl: async () => [{ address: '192.0.2.1' }], timeoutMs: 400,
+    });
+    assert.equal(rebound.ok, false);
+    assert.deepEqual(hits, [], 'the loopback server was never contacted');
+
+    // A redirect hop is resolved and pinned again: the first hop lands on the server, the
+    // second names a host that resolves privately and is refused before any connection.
+    hits.length = 0;
+    const { server: redirector, port: rport, hits: rhits } = await listen((_req, res) => {
+      res.statusCode = 302;
+      res.setHeader('location', `http://internal.invalid:${port}/admin`);
+      res.end();
+    });
+    try {
+      const hop = await safeFetch(`http://edge.invalid:${rport}/`, {
+        allowHosts: [/\.invalid$/], allowHttp: true, relaxedHosts: [/^edge\.invalid$/],
+        lookupImpl: async (host) => [{ address: host === 'edge.invalid' ? '127.0.0.1' : '10.0.0.9' }],
+      });
+      assert.equal(hop.ok, false);
+      assert.match((hop as { error: string }).error, /non-public/);
+      assert.equal(rhits.length, 1);
+      assert.deepEqual(hits, [], 'the internal target was never contacted');
+    } finally {
+      redirector.close();
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test('a chunked body without content-length is cut off the moment the budget runs out', async () => {
+  const budget = new ByteBudget(10);
+  assert.ok(budget.take(4));
+  let aborted = false;
+  let sent = 0;
+  const { fetchImpl, calls } = stubFetch((_url, init) => {
+    init?.signal?.addEventListener('abort', () => { aborted = true; });
+    const chunk = new Uint8Array(4).fill(1);
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= 4000) { controller.close(); return; }
+        sent += chunk.length;
+        controller.enqueue(chunk);
+      },
+    });
+    return new Response(stream, { status: 200 });
+  });
+  const res = await safeFetch(CDN, { fetchImpl, lookupImpl: publicLookup, budget });
+  assert.deepEqual(res, { ok: false, error: BUDGET_EXHAUSTED_ERROR });
+  assert.ok(aborted, 'the transfer was aborted');
+  assert.ok(sent <= 16, `only the budget's worth was transferred (${sent} bytes)`);
+  assert.equal(budget.used, 4, 'the cut-off download reserves nothing');
+  // An exhausted budget makes no request at all.
+  assert.ok(budget.take(6));
+  const none = await safeFetch(CDN, { fetchImpl, lookupImpl: publicLookup, budget });
+  assert.deepEqual(none, { ok: false, error: BUDGET_EXHAUSTED_ERROR });
+  assert.equal(calls.length, 1);
+});
+
 test('isPrivateAddress covers every reserved range', () => {
-  for (const ip of ['10.0.0.1', '172.16.0.1', '172.31.255.255', '192.168.0.1', '127.0.0.1', '127.255.0.9', '169.254.1.1', '169.254.169.254', '0.0.0.0', '0.1.2.3', '100.64.0.1', '224.0.0.1', '255.255.255.255', '::1', '::', 'fc00::1', 'fd00::1', 'fe80::1', 'FE80::abcd%eth0', 'ff02::1', '::ffff:192.168.0.1', '::ffff:10.1.1.1', '::ffff:c0a8:1', '2002:c0a8:0001::1', 'garbage', '1.2.3', '::ffff:999.1.1.1']) {
+  for (const ip of ['10.0.0.1', '172.16.0.1', '172.31.255.255', '192.168.0.1', '127.0.0.1', '127.255.0.9', '169.254.1.1', '169.254.169.254', '0.0.0.0', '0.1.2.3', '100.64.0.1', '224.0.0.1', '255.255.255.255', '::1', '::', 'fc00::1', 'fd00::1', 'fe80::1', 'FE80::abcd%eth0', 'ff02::1', '::ffff:192.168.0.1', '::ffff:10.1.1.1', '::ffff:c0a8:1', '2002:c0a8:0001::1', '64:ff9b::7f00:1', '64:ff9b::127.0.0.1', '64:ff9b::a9fe:a9fe', 'garbage', '1.2.3', '::ffff:999.1.1.1']) {
     assert.ok(isPrivateAddress(ip), `${ip} should be private`);
   }
-  for (const ip of ['93.184.216.34', '8.8.8.8', '172.15.0.1', '172.32.0.1', '11.0.0.1', '100.63.0.1', '100.128.0.1', '2606:4700::6810:84e5', '::ffff:93.184.216.34', '2001:db8::1']) {
+  for (const ip of ['93.184.216.34', '8.8.8.8', '172.15.0.1', '172.32.0.1', '11.0.0.1', '100.63.0.1', '100.128.0.1', '2606:4700::6810:84e5', '::ffff:93.184.216.34', '2001:db8::1', '64:ff9b::5db8:d822']) {
     assert.ok(!isPrivateAddress(ip), `${ip} should be public`);
   }
 });

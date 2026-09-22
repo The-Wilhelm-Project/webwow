@@ -112,6 +112,12 @@ export interface ImportCmsDeps {
   onProgress?: (done: number, total: number) => void;
   /** Parallel asset uploads (default 4). */
   concurrency?: number;
+  /**
+   * Fallback URL per asset URL (`site-cms.ts`): the same file as seen on the
+   * live site. Tried only when the primary download fails, so the CSV / API
+   * URL keeps precedence and the live site fills the gap.
+   */
+  alternateUrls?: Map<string, string>;
 }
 
 // ─── CSV parsing ──────────────────────────────────────────────────────────────
@@ -311,6 +317,43 @@ export function isYearOnlyDate(value: string): boolean {
   const h = d.getUTCHours();
   const min = d.getUTCMinutes();
   return (m === 11 && day === 31 && (h === 23 || h === 22) && min === 0) || (m === 0 && day === 1 && h === 0 && min === 0);
+}
+
+/**
+ * The site time zone Webflow's year-only dates betray: a year picked in the
+ * Designer is stored as local midnight of Jan 1 in the site's zone, so
+ * `Dec 31 23:00 UTC` means UTC+1 at that date (Central Europe), `Dec 31 22:00
+ * UTC` UTC+2 (Eastern Europe) and `Jan 1 00:00 UTC` UTC itself. The majority
+ * over every year-only cell of every date column decides; null without such
+ * cells or when UTC wins. Rendered in that zone the years read as on the
+ * Webflow site; the live-site evidence of `site-cms.ts` takes precedence.
+ */
+export function inferTimeZoneFromDates(plans: WfCollectionPlan[]): { zone: string; reason: string } | null {
+  const votes = new Map<string, number>();
+  for (const plan of plans) {
+    for (const f of plan.fields) {
+      if (f.system || (f.type !== 'date' && f.type !== 'date_only')) continue;
+      for (const row of plan.csv.rows) {
+        const v = (row[f.header] ?? '').trim();
+        if (!v || !isYearOnlyDate(v)) continue;
+        const hour = new Date(Date.parse(v)).getUTCHours();
+        const zone = hour === 23 ? 'Europe/Berlin' : hour === 22 ? 'Europe/Helsinki' : 'UTC';
+        votes.set(zone, (votes.get(zone) ?? 0) + 1);
+      }
+    }
+  }
+  let best: string | null = null;
+  let bestVotes = 0;
+  let total = 0;
+  for (const [zone, n] of votes) {
+    total += n;
+    if (n > bestVotes) {
+      best = zone;
+      bestVotes = n;
+    }
+  }
+  if (!best || best === 'UTC') return null;
+  return { zone: best, reason: `${bestVotes} of ${total} year-only date(s) in the CMS data are stored as local midnight of this zone` };
 }
 
 /** Date preset id for a column: `part-year` when >= 80 % of the values are year-only, else `date-eu-dot` (26.03.2026). */
@@ -562,14 +605,27 @@ export async function importCms(plans: WfCollectionPlan[], deps: ImportCmsDeps):
       let verbatim = 0;
       await mapConcurrent(pending, concurrency, async (url) => {
         let assetId: string | null = null;
+        let used = url;
         try {
           assetId = await mat.uploadAsset(url);
         } catch (error) {
           assetId = null;
           warn.add('asset_download_failed', `download failed: ${error instanceof Error ? error.message : String(error)}`);
         }
+        const alternate = deps.alternateUrls?.get(url);
+        if (!assetId && alternate && alternate !== url) {
+          try {
+            assetId = await mat.uploadAsset(alternate);
+            if (assetId) {
+              used = alternate;
+              warn.add('cms_site_value_filled', `image loaded from the live site instead of ${new URL(url).host}`);
+            }
+          } catch {
+            assetId = null;
+          }
+        }
         if (assetId) {
-          assetByUrl.set(url, { assetId, publicUrl: mat.assetUrl(url) ?? '' });
+          assetByUrl.set(url, { assetId, publicUrl: mat.assetUrl(used) ?? '' });
           counts.cmsImages++;
           return;
         }

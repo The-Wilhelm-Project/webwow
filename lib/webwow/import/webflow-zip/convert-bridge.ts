@@ -17,17 +17,26 @@
 import { convertValueForFieldType } from '@/lib/csv-utils';
 import { buildDesign } from '@/lib/import/design';
 import { mergeClassStack, splitVariant } from '@/lib/layer-style-resolve';
-import { getAffectedProperties } from '@/lib/tailwind-class-mapper';
+import { cssLonghandsOfUtility } from './css';
 import { MULTI_ASSET_COLLECTION_ID } from '@/lib/collection-field-utils';
 import { generateId } from '@/lib/utils';
 
 import { convertRichTextHtml } from './richtext';
+import {
+  applyEmbedVideo,
+  bgVideoControlAttributes,
+  codeChildLayer,
+  localeSelectorChildren,
+  lottieEmbedCode,
+  paginationIds,
+  paginationInfoDoc,
+} from './widgets-extra';
 import { lightboxSettings, resolveWidgetFlags, sliderChromeLayers, type WfWidgetFlags } from './widgets-native';
 import type { WfBinding, WfCollectionBinding, WfNode, WfPage } from './types';
 import type { Warnings } from './warnings';
 
 import type { ImportConverter } from '@/lib/import/convert';
-import type { CollectionVariable, ConditionalVisibility, FieldVariable, Layer, LinkSettings } from '@/types';
+import type { CollectionVariable, ConditionalVisibility, FieldVariable, Layer, LinkSettings, TextStyle } from '@/types';
 
 /** Virtual image field of a multi-asset (`__multi_asset__`) collection layer. */
 const ASSET_URL_FIELD = '__asset_url';
@@ -41,6 +50,8 @@ const BG_VIDEO_CLASSES = 'absolute -inset-[100%] m-auto w-full h-full object-cov
 /** Resolves an asset key (ZIP path or URL) that `prepareAssets` already uploaded. */
 export interface AssetIdResolver {
   idOf(key: string): string | null;
+  /** Public URL of an uploaded asset (needed where markup, not a layer variable, references the file — the Lottie JSON). */
+  urlOf?(key: string): string | null;
 }
 
 export interface ConvertPageResult {
@@ -106,37 +117,39 @@ export async function convertPage(page: WfPage, converter: ImportConverter): Pro
  * `.topheader` photo.
  *
  * This pass drops an earlier class only when a later class with the SAME
- * variant prefix affects EXACTLY the same property set, i.e. the one case where
- * the later declaration must win and nothing else can be meant. `text-[24px]`
- * (fontSize) and `text-[#fff]` (color) have different sets and both survive.
+ * variant prefix sets EVERY CSS property the earlier one sets (css.ts
+ * `cssLonghandsOfUtility`), i.e. the cases where the later declaration must win
+ * and nothing else can be meant: the same property (`bg-[…]` twice), or a later
+ * shorthand over earlier longhands (`.section.feature { padding: 0 }` as `p-[0]`
+ * over `.section`'s `pt-[60px] pr-[20px] …`, which upstream's merge keeps and
+ * Tailwind's order lets win). `text-[24px]` (font-size) and `text-[#fff]`
+ * (color) set different properties and both survive; so do a colour and a
+ * gradient (background-color vs background-image), which upstream files under
+ * one key. A later longhand never drops an earlier shorthand (`p-[0]` then
+ * `pt-[5px]`): both are needed, and Tailwind's order already lets the longhand win.
+ *
+ * Arbitrary *property* classes (`[background-position:0_0,0%]`,
+ * `[border-top-style:none]`) have no upstream key at all, so nothing else ever
+ * evicts them and two of them (a Webflow base class and its combo) would both
+ * reach the stylesheet, where alphabetical rule order decides the winner; they
+ * are keyed by the property named in the class.
  */
 export function dropShadowedClasses(classes: string): string {
   const tokens = classes.split(/\s+/).filter(Boolean);
-  const keyOf = (cls: string): string | null => {
-    // `getAffectedProperties` only understands bare utilities, so ask it about
-    // the base and keep the variant prefix as part of the key: a `max-lg:` value
-    // must never evict the desktop one.
+  const info = tokens.map((cls) => {
+    // The variant prefix is part of the key: a `max-lg:` value must never evict the desktop one.
     const { prefix, base } = splitVariant(cls);
-    // `[background-position:0_0,0%]` — an arbitrary *property* class. ycode's
-    // mapper reports no property for these, so nothing ever evicts them and two
-    // of them (a Webflow base class and its combo) both reach the stylesheet,
-    // where alphabetical rule order decides the winner. The property name in the
-    // class is the key.
-    const arbitrary = /^\[([a-zA-Z-]+):/.exec(base);
-    if (arbitrary) return `${prefix}|@${arbitrary[1].toLowerCase()}`;
-    const props = getAffectedProperties(base);
-    if (props.length === 0) return null;
-    return `${prefix}|${[...props].sort().join(',')}`;
-  };
-  const lastIndexByKey = new Map<string, number>();
-  tokens.forEach((cls, i) => {
-    const key = keyOf(cls);
-    if (key) lastIndexByKey.set(key, i);
+    return { prefix, longhands: cssLonghandsOfUtility(base) };
   });
   return tokens
-    .filter((cls, i) => {
-      const key = keyOf(cls);
-      return key === null || lastIndexByKey.get(key) === i;
+    .filter((_, i) => {
+      const own = info[i];
+      if (own.longhands.length === 0) return true;
+      for (let j = i + 1; j < tokens.length; j++) {
+        const later = info[j];
+        if (later.prefix === own.prefix && own.longhands.every((p) => later.longhands.includes(p))) return false;
+      }
+      return true;
     })
     .join(' ');
 }
@@ -194,6 +207,51 @@ export function resolveShadowedChipClasses(roots: Layer[], classesOfStyle: (id: 
     changed += 1;
   });
 
+  return changed;
+}
+
+/**
+ * A collection layer whose OWN background is bound to its own item
+ * (`<div class="section feature w-dyn-item">` with the painting as its
+ * background): ycode resolves an item's field bindings on the layers *inside*
+ * the repeated collection layer, never on the collection layer itself, so the
+ * published page painted ycode's placeholder image there instead of the item's
+ * painting. The item's element moves one level down: the collection layer keeps
+ * its id, its collection settings and nothing else (`display: contents`, so it
+ * adds no box and the item still lays out as a child of the list), and a new
+ * child takes everything the item carried — tag, classes, style chips and their
+ * per-layer overrides, attributes, interactions, the background binding (still
+ * reading the collection layer's item) — plus the children. `layerByNode` is
+ * pointed at the new child, so interactions and region lookups find the element
+ * that has the box. Must run AFTER `pinBackgroundBindingClasses`.
+ */
+export function liftSelfBoundBackgrounds(roots: Layer[], layerByNode: Map<string, Layer>): number {
+  let changed = 0;
+  const nodeOf = new Map<Layer, string>();
+  for (const [nodeId, layer] of layerByNode) nodeOf.set(layer, nodeId);
+
+  walkLayers(roots, (layer) => {
+    const collection = layer.variables?.collection;
+    const src = layer.variables?.backgroundImage?.src;
+    if (!collection || src?.type !== 'field' || src.data.collection_layer_id !== layer.id) return;
+
+    const item: Layer = { ...layer, id: generateId('lyr'), variables: { ...layer.variables } };
+    delete item.variables!.collection;
+    delete item.customName;
+    for (const key of Object.keys(layer) as (keyof Layer)[]) {
+      if (key !== 'id' && key !== 'name' && key !== 'customName') delete layer[key];
+    }
+    layer.name = 'div';
+    layer.classes = 'contents';
+    const design = buildDesign('contents');
+    if (design) layer.design = design;
+    layer.variables = { collection };
+    layer.children = [item];
+
+    const nodeId = nodeOf.get(layer);
+    if (nodeId) layerByNode.set(nodeId, item);
+    changed += 1;
+  });
   return changed;
 }
 
@@ -263,6 +321,8 @@ export function applyNodeLayerPostProcessing(
     applyAnchorId(node, layer);
     applyCollection(node, layer);
     applyBinding(node, layer, layerByNode);
+    applyPagination(node, layer, layerByNode, warn);
+    applyVisibility(node, layer, warn);
   }
 }
 
@@ -280,6 +340,7 @@ function applyLayerKind(node: WfNode, layer: Layer, assets: AssetIdResolver, fla
       layer.restrictions = { ...layer.restrictions, editText: true };
       layer.variables = { ...layer.variables, text: { type: 'dynamic_rich_text', data: { content: richTextDoc(wf.bindEmpty ? '' : wf.html ?? '', flags.richText) } } };
       layer.children = [];
+      applyRichTextStyles(wf.textStyles, layer);
       break;
     }
 
@@ -305,6 +366,7 @@ function applyLayerKind(node: WfNode, layer: Layer, assets: AssetIdResolver, fla
       const child: Layer = {
         id: generateId('lyr'),
         name: 'video',
+        customName: 'Background video',
         classes: BG_VIDEO_CLASSES,
         design: buildDesign(BG_VIDEO_CLASSES),
         attributes: { autoplay: video.autoplay, muted: true, loop: video.loop, controls: false, preload: 'metadata' },
@@ -315,7 +377,70 @@ function applyLayerKind(node: WfNode, layer: Layer, assets: AssetIdResolver, fla
           },
         },
       };
-      layer.children = [child];
+      // The video sits behind the content the designer placed on it (hero text, the play/pause button).
+      layer.children = [child, ...layer.children];
+      break;
+    }
+
+    // ── Extra widgets (widgets-extra.ts) ──
+
+    case 'embedVideo': {
+      if (!wf.embedVideo) break;
+      applyEmbedVideo(layer, wf.embedVideo);
+      break;
+    }
+
+    case 'lottie': {
+      const plan = wf.lottie;
+      if (!plan) break;
+      const url = (assets.urlOf?.(plan.src) ?? null) || (/^https?:\/\//i.test(plan.src) ? plan.src : '');
+      if (!url) {
+        warn?.add('asset_missing', `lottie animation could not be uploaded: ${plan.src}`, { page: wf.page, node: wf.id });
+      }
+      layer.name = 'htmlEmbed';
+      layer.settings = { ...layer.settings, tag: 'div', htmlEmbed: { code: lottieEmbedCode(plan, url || plan.src) } };
+      delete layer.children;
+      break;
+    }
+
+    case 'codeBlock': {
+      const plan = wf.codeBlock;
+      if (!plan) break;
+      layer.name = 'div';
+      layer.settings = { ...layer.settings, tag: 'pre' };
+      layer.children = [codeChildLayer(plan)];
+      break;
+    }
+
+    case 'map': {
+      if (!wf.map) break;
+      layer.name = 'map';
+      layer.settings = { ...layer.settings, map: wf.map.settings };
+      delete layer.children;
+      break;
+    }
+
+    case 'localeSelector': {
+      layer.name = 'localeSelector';
+      layer.settings = { ...layer.settings, tag: 'div', locale: { format: 'locale' } };
+      layer.attributes = { ...layer.attributes, display_type: 'name' };
+      layer.children = localeSelectorChildren(wf.locales?.current ?? '');
+      break;
+    }
+
+    case 'bgVideoControl': {
+      layer.name = 'button';
+      layer.settings = {
+        ...layer.settings,
+        customAttributes: { ...layer.settings?.customAttributes, ...bgVideoControlAttributes(wf.bgVideoControl ?? { labelPause: '', labelPlay: '' }) },
+      };
+      layer.attributes = { ...layer.attributes, type: 'button' };
+      break;
+    }
+
+    case 'label': {
+      layer.settings = { ...layer.settings, tag: 'label' };
+      if (wf.labelFor) layer.attributes = { ...layer.attributes, for: wf.labelFor };
       break;
     }
 
@@ -424,6 +549,17 @@ function applyAnchorId(node: WfNode, layer: Layer): void {
   layer.settings = { ...layer.settings, id };
 }
 
+/**
+ * `layer.textStyles` from the tag and `.w-richtext` rules (richtext-styles.ts):
+ * paragraph margins, heading sizes, list padding … that ycode renders per block.
+ * The container keeps its own classes only — no `gap`, the margins carry the
+ * spacing (ycode's Rich Text element uses `flex-col gap-[16px]` instead).
+ */
+function applyRichTextStyles(textStyles: Record<string, TextStyle> | undefined, layer: Layer): void {
+  if (!textStyles) return;
+  layer.textStyles = { ...(layer.textStyles ?? {}), ...structuredClone(textStyles) };
+}
+
 /** Minimal TipTap doc from a rich-text HTML fragment (empty doc for a blank slot). */
 function richTextDoc(html: string, keepMarks = true): object {
   if (!html.trim()) return { type: 'doc', content: [{ type: 'paragraph' }] };
@@ -496,27 +632,122 @@ function applyCollection(node: WfNode, layer: Layer): void {
   const collection: CollectionVariable = { id: binding.collectionId, sort_by: binding.sortBy ?? 'manual' };
   if (binding.sortOrder) collection.sort_order = binding.sortOrder;
   if (binding.limit !== undefined) collection.limit = binding.limit;
-  if (binding.filters && binding.filters.length > 0) collection.filters = filtersOf(binding);
+  if (binding.offset !== undefined && binding.offset > 0) collection.offset = binding.offset;
+  if ((binding.filters && binding.filters.length > 0) || binding.excludeCurrentItem) collection.filters = filtersOf(binding);
+  // Webflow's `.w-pagination-wrapper` -> ycode's page-mode pagination (widgets-extra.ts);
+  // the page size is the number of template items the export shipped.
+  if (node.wf.pagination) collection.pagination = { enabled: true, mode: 'pages', items_per_page: node.wf.pagination.itemsPerPage };
 
   layer.variables = { ...layer.variables, collection };
 }
 
-function filtersOf(binding: WfCollectionBinding): ConditionalVisibility {
-  return {
-    groups: [
-      {
+/**
+ * ycode's pagination controls are ordinary layers whose ids and attributes the
+ * SSR pass keys on (`{cid}-pagination-prev`, `data-pagination-action`, …).
+ * The converted `.w-pagination-wrapper` gets exactly those.
+ */
+function applyPagination(node: WfNode, layer: Layer, layerByNode: Map<string, Layer>, warn?: Warnings): void {
+  if (node.wf.layerKind !== 'pagination') return;
+  const target = node.wf.paginationFor ? layerByNode.get(node.wf.paginationFor) : undefined;
+  // Upstream's converter gives every item template a `collection: { id: '' }`; only a bound one has an id.
+  if (!target || !target.variables?.collection?.id) {
+    warn?.add('widget_partial', 'pagination controls kept as plain layers: the list is not bound to a collection', { page: node.wf.page, node: node.wf.id });
+    return;
+  }
+  const ids = paginationIds(target.id);
+  layer.id = ids.wrapper;
+  layer.attributes = { ...layer.attributes, 'data-pagination-for': target.id, 'data-pagination-mode': 'pages' };
+
+  for (const child of node.children ?? []) {
+    const childLayer = layerByNode.get(child.wf.id);
+    if (!childLayer) continue;
+    if (child.wf.role === 'pagination-prev' || child.wf.role === 'pagination-next') {
+      const isPrev = child.wf.role === 'pagination-prev';
+      childLayer.id = isPrev ? ids.prev : ids.next;
+      childLayer.name = 'button';
+      childLayer.settings = { ...childLayer.settings, tag: 'button' };
+      childLayer.attributes = { ...childLayer.attributes, type: 'button', 'data-pagination-action': isPrev ? 'prev' : 'next', 'data-collection-layer-id': target.id };
+      if (childLayer.variables?.link) {
+        const { link: _dropped, ...rest } = childLayer.variables;
+        childLayer.variables = rest;
+      }
+      // A `<div>` is invalid inside a `<button>`; the text child becomes a span.
+      for (const grandChild of childLayer.children ?? []) {
+        if (grandChild.name === 'text') grandChild.settings = { ...grandChild.settings, tag: 'span' };
+      }
+    } else if (child.wf.role === 'pagination-info') {
+      childLayer.id = ids.info;
+      childLayer.name = 'text';
+      childLayer.settings = { ...childLayer.settings, tag: 'div' };
+      childLayer.restrictions = { ...childLayer.restrictions, editText: true };
+      childLayer.variables = { ...childLayer.variables, text: { type: 'dynamic_rich_text', data: { content: paginationInfoDoc(child.text ?? '') } } };
+      delete childLayer.children;
+    }
+  }
+}
+
+/**
+ * `wf.visibility` -> `variables.conditionalVisibility`: the rule binding.ts
+ * reconstructed for a `.w-condition-invisible` element (widgets-extra.ts
+ * `planConditionalVisibility`) or the "field is present" rule of a bound slot
+ * that carried `w-dyn-bind-empty` (binding.ts `planEmptyValueVisibility`).
+ * Condition-invisible elements binding.ts never reached (no bound list around
+ * them) keep the `hidden` fallback class html.ts gave them, and say so once.
+ */
+function applyVisibility(node: WfNode, layer: Layer, warn?: Warnings): void {
+  const wf = node.wf;
+  if (!wf.conditionInvisible && !wf.visibility) return;
+  if (wf.visibility) {
+    const rule = wf.visibility;
+    const visibility: ConditionalVisibility = {
+      groups: [{
         id: 'vc-g-1',
-        conditions: (binding.filters ?? []).map((f, i) => ({
-          id: `vc-${i + 1}`,
-          source: 'collection_field' as const,
-          fieldId: f.fieldId,
-          fieldType: f.fieldType,
-          operator: 'is' as const,
-          value: f.value,
-        })),
-      },
-    ],
-  };
+        conditions: [{
+          id: 'vc-1',
+          source: 'collection_field',
+          fieldId: rule.fieldId,
+          fieldType: rule.fieldType,
+          operator: rule.operator,
+          ...(rule.value !== undefined ? { value: rule.value } : {}),
+        }],
+      }],
+    };
+    layer.variables = { ...layer.variables, conditionalVisibility: visibility };
+    return;
+  }
+  if (!wf.visibilityChecked) {
+    warn?.add('widget_partial', 'condition-invisible element outside a bound collection kept hidden (the Designer\'s rule is not in the export)', { page: wf.page, node: wf.id });
+  }
+}
+
+/**
+ * The list's filter conditions: the field filters in one group, and "not the
+ * current item" (ycode's `self` condition with the dynamic page's item, which
+ * a related-items list uses) as a group of its own — groups are ANDed, the
+ * conditions of one group ORed.
+ */
+function filtersOf(binding: WfCollectionBinding): ConditionalVisibility {
+  const groups: ConditionalVisibility['groups'] = [];
+  if (binding.filters && binding.filters.length > 0) {
+    groups.push({
+      id: 'vc-g-1',
+      conditions: binding.filters.map((f, i) => ({
+        id: `vc-${i + 1}`,
+        source: 'collection_field' as const,
+        fieldId: f.fieldId,
+        fieldType: f.fieldType,
+        operator: f.operator ?? ('is' as const),
+        value: f.value,
+      })),
+    });
+  }
+  if (binding.excludeCurrentItem) {
+    groups.push({
+      id: 'vc-g-current',
+      conditions: [{ id: 'vc-current', source: 'self' as const, operator: 'is_not_one_of' as const, value: '[]', includesCurrentPageItem: true }],
+    });
+  }
+  return { groups };
 }
 
 /** Field-level bindings (text, image, background, rich text, link, video). */
@@ -534,6 +765,7 @@ function applyBinding(node: WfNode, layer: Layer, layerByNode: Map<string, Layer
       layer.restrictions = { ...layer.restrictions, editText: true };
       layer.variables = { ...layer.variables, text: { type: 'dynamic_rich_text', data: { content: dynamicVariableDoc(variable, binding.fieldName) } } };
       layer.children = [];
+      if (layer.name === 'richText') applyRichTextStyles(node.wf.textStyles, layer);
       break;
     }
 

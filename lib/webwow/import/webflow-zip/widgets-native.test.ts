@@ -48,6 +48,8 @@ function emptyStyles(): WfStyleModel {
     fontFaces: [],
     fontFamilies: [],
     boundBackgroundKeys: new Set(),
+    states: new Map(),
+    resting: new Map(),
   };
 }
 
@@ -533,7 +535,13 @@ test('columns: a .w-row grid gets real widths and readable names instead of anon
 
 test('flags: every widget defaults to on and can be turned off individually', () => {
   const all = resolveWidgetFlags();
-  assert.deepEqual(all, { slider: true, tabs: true, lightbox: true, form: true, columns: true, richText: true });
+  assert.deepEqual(all, {
+    slider: true, tabs: true, lightbox: true, form: true, columns: true, richText: true,
+    // widgets-extra.ts
+    video: true, lottie: true, codeBlock: true, fileUpload: true, map: true, search: true, locales: true,
+    pagination: true, conditionalVisibility: true, bgVideoControl: true, iconFont: true, navbarVariants: true,
+    unsupportedWidgets: true, badge: true,
+  });
   assert.equal(resolveWidgetFlags({ slider: false }).slider, false);
   assert.equal(resolveWidgetFlags({ slider: false }).form, true);
 });

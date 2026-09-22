@@ -20,13 +20,17 @@
 
 import { parse, HTMLElement, NodeType, type Node } from 'node-html-parser';
 import type { ImportImage, ImportStyleRef } from '@/lib/import/types';
-import { UNDERLAY_TAGS, namespaceSelector, wfClass, type WfStyleModel } from './css';
+import type { TweenProperties } from '@/types';
+import { BREAKPOINT_PREFIX, UNDERLAY_TAGS, liftComboOverBreakpoints, mergePrefixedClasses, namespaceSelector, wfClass, type WfStyleModel } from './css';
+import type { CssDeclaration } from './css-tokenizer';
+import { richTextStylesFor } from './richtext-styles';
 import {
   DROPDOWN_CHEVRON_SVG,
   FRAMEWORK_CLASSES,
   isFrameworkClass,
   isKnownFrameworkClass,
   navFrameworkClasses,
+  setsPosition,
 } from './framework-classes';
 import {
   FORM_CONTROL_TAGS,
@@ -36,6 +40,28 @@ import {
   sliderSettingsFromAttrs,
   type WfWidgetFlags,
 } from './widgets-native';
+import {
+  BG_VIDEO_TOGGLE_SCRIPT,
+  CODE_BLOCK_CLASSES,
+  DROPDOWN_RUNTIME_SCRIPT,
+  FILE_UPLOAD_NOTE,
+  FILE_UPLOAD_STATE_CLASSES,
+  LOCALES_NOTE,
+  MAP_KEY_NOTE,
+  SEARCH_NOTE,
+  UNSUPPORTED_WIDGET_NOTES,
+  embedVideoClasses,
+  iconFontSvg,
+  inlineStyleClasses,
+  isSearchForm,
+  languageFromClasses,
+  planEmbedVideo,
+  planLottie,
+  planMap,
+  sizeFromClasses,
+  unsupportedWidgetFamily,
+} from './widgets-extra';
+import { stateCarrier, stateHandling, stateLabel, stateTweenFromDeclarations, type WfStateRule } from './states';
 import type { WfNavCollapse, WfNode, WfNodeMeta, WfNodeRole, WfPage } from './types';
 import type { WfZipBundle } from './zip';
 import type { Warnings } from './warnings';
@@ -194,6 +220,20 @@ function tidyText(text: string): string {
     .trim();
 }
 
+/** An `<img width>` a browser maps to a width (`800`, `50%`); not `auto`, empty or junk. */
+export function explicitImageWidth(width: string | undefined): boolean {
+  return !!width && /^\s*\d+(\.\d+)?(px|%)?\s*$/i.test(width) && parseFloat(width) > 0;
+}
+
+/** True when an inline `style` carries `display: none` (Webflow parks its script-driven state boxes that way). */
+export function hasInlineDisplayNone(style: string | undefined): boolean {
+  if (!style) return false;
+  return style.split(';').some((decl) => {
+    const idx = decl.indexOf(':');
+    return idx !== -1 && decl.slice(0, idx).trim().toLowerCase() === 'display' && decl.slice(idx + 1).trim().toLowerCase().replace(/\s*!important$/, '') === 'none';
+  });
+}
+
 function classList(el: HTMLElement): string[] {
   return (el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean);
 }
@@ -292,26 +332,87 @@ function comboBySet(styles: WfStyleModel): Map<string, ImportStyleRef> {
   return index;
 }
 
+/** State rules for a chain, also matched order-insensitively (`.b.a.w--open` on an element `a b`). */
+function stateRulesFor(styles: WfStyleModel, chain: string): (WfStateRule & { merged?: boolean })[] | undefined {
+  const direct = styles.states.get(chain);
+  if (direct) return direct;
+  const sorted = chain.split('.').sort().join('.');
+  for (const [key, rules] of styles.states) {
+    if (key.split('.').sort().join('.') === sorted) return rules;
+  }
+  return undefined;
+}
+
+/** Main-breakpoint declarations of the base class and every combo prefix, later chains winning (the toggle's resting values). */
+function restingFor(styles: WfStyleModel, siteClasses: string[]): CssDeclaration[] {
+  const out: CssDeclaration[] = [];
+  for (let i = 1; i <= siteClasses.length; i++) out.push(...(styles.resting.get(siteClasses.slice(0, i).join('.')) ?? []));
+  return out;
+}
+
+/** Resting values a tab link falls back to when its own classes never set the key (states.ts `fallback`). */
+const TAB_LINK_RESTING: TweenProperties = { backgroundColor: '#000000/0' };
+
+/** Breakpoint tier of a merged nav-menu state rule: the narrower of the rule's own breakpoint and the collapse point. */
+const COLLAPSE_PREFIX: Record<Exclude<WfNavCollapse, 'none'>, string> = { all: '', medium: 'max-lg:', small: 'max-md:', tiny: 'max-md:' };
+const PREFIX_RANK: Record<string, number> = { '': 0, 'max-lg:': 1, 'max-md:': 2 };
+
+/**
+ * Scope a nav-menu state rule (`.nav-menu[data-nav-menu-open] { … }`) to the
+ * breakpoints on which the menu can be opened at all: the rule's own prefix
+ * (`max-md:` for a `small` rule) or the collapse tier, whichever is narrower.
+ */
+function scopeToCollapse(rule: WfStateRule, collapse: Exclude<WfNavCollapse, 'none'>): string[] {
+  const own = BREAKPOINT_PREFIX[rule.breakpoint];
+  const tier = COLLAPSE_PREFIX[collapse];
+  const prefix = PREFIX_RANK[tier] > PREFIX_RANK[own] ? tier : own;
+  if (prefix === own) return rule.classes;
+  return rule.classes.map((c) => `${prefix}${c.startsWith(own) ? c.slice(own.length) : c}`);
+}
+
 interface StyleInfo {
   styles: ImportStyleRef[];
   boundBackground: boolean;
 }
 
-/** Base ref for the first site class, then one combo ref per chain prefix (`a.b`, `a.b.c`, …). */
+/** Stylesheet position of a class's first rule; a class with no rule of its own (a state-only chip) sorts last, a model without positions keeps the class order. */
+function positionOf(styles: WfStyleModel, name: string, index: number): number {
+  if (!styles.order) return index;
+  return styles.order.get(name) ?? Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * The element's chips, lowest first, as the browser cascades Webflow's rules:
+ *
+ * 1. every class of the list that has a **standalone** rule (`.button` on an
+ *    element `heading-2 button` applies exactly like `.heading-2`), ordered
+ *    by stylesheet position — equal specificity, so the later rule wins;
+ * 2. one combo ref per chain prefix (`a.b`, `a.b.c`, …): more classes, more
+ *    specificity, so they sit above every single-class chip.
+ *
+ * A single class's breakpoint utility (`max-md:` from `.button`) would beat a
+ * combo there (equal-weight utilities, the narrower variant sorts later).
+ * css.ts lifts the combo's value onto that breakpoint
+ * (`liftComboOverBreakpoints`) for every class an element carrying the combo
+ * has, which it knows from the export's class lists (`BuildStyleModelInput.classLists`,
+ * `coOccurringClasses`), and restates it under 480 px against their `tiny`
+ * rules (`comboTinyOverrides`). Without those lists only the chain's own
+ * classes are lifted over.
+ */
 function resolveStyles(siteClasses: string[], styles: WfStyleModel): StyleInfo {
   const refs: ImportStyleRef[] = [];
   let bound = false;
   const bySet = comboBySet(styles);
-  for (let i = 1; i <= siteClasses.length; i++) {
+  const singles = [...new Set(siteClasses)]
+    .map((name, index) => ({ name, index, entry: styles.classes.get(name) }))
+    .filter((x): x is { name: string; index: number; entry: NonNullable<typeof x.entry> } => x.entry !== undefined)
+    .sort((a, b) => positionOf(styles, a.name, a.index) - positionOf(styles, b.name, b.index) || a.index - b.index);
+  for (const { entry } of singles) {
+    refs.push(entry.ref);
+    if (entry.boundBackground) bound = true;
+  }
+  for (let i = 2; i <= siteClasses.length; i++) {
     const chain = siteClasses.slice(0, i).join('.');
-    if (i === 1) {
-      const entry = styles.classes.get(chain);
-      if (entry) {
-        refs.push(entry.ref);
-        if (entry.boundBackground) bound = true;
-      }
-      continue;
-    }
     const combo = styles.combos.get(chain) ?? bySet.get(siteClasses.slice(0, i).sort().join('.'));
     if (combo) refs.push(combo);
     if (styles.boundBackgroundKeys.has(chain)) bound = true;
@@ -337,6 +438,11 @@ class PageParser {
   readonly googleFonts = new Set<string>();
   private embedDroppedWarned = false;
   private tinyColumnWarned = false;
+  private fileUploadWarned = false;
+  private mapKeyWarned = false;
+  private bgVideoScriptAdded = false;
+  private dropdownScriptAdded = false;
+  private readonly unsupportedWarned = new Set<string>();
   private readonly flags: WfWidgetFlags;
 
   constructor(private readonly ctx: HtmlContext) {
@@ -395,6 +501,7 @@ class PageParser {
     const wf = node.wf;
     const info = resolveStyles(wf.siteClasses, styles);
     if (info.styles.length > 0) node.styles = info.styles;
+    const states = this.applyStateRules(node, scope, role);
 
     const framework: string[] = [];
     const addFw = (list: string[]) => {
@@ -412,6 +519,10 @@ class PageParser {
       if (c === 'w-nav-menu') {
         addFw(shim);
         if (!scope.navHasButton) addFw(navFrameworkClasses(scope.navCollapse, 'menu'));
+        // The hamburger opens the menu as Webflow's panel below the bar on the
+        // collapsed breakpoints — unless the designer positioned the menu
+        // (a `position: fixed` slide-in keeps its own layout).
+        else if (!setsPosition(info.styles.flatMap((ref) => ref.classes))) addFw(navFrameworkClasses(scope.navCollapse, 'menu-open'));
         continue;
       }
       if (c === 'w-nav-button') {
@@ -425,14 +536,25 @@ class PageParser {
     // designer's Quick Stack values into `.w-layout-layout` there) contributes
     // those translated classes on top of the hand-written shim — otherwise the
     // shim's `grid` arrives without the gaps and padding the page was built with.
+    const fromSheet: string[] = [];
     for (const c of wf.classNames) {
       if (!FRAMEWORK_CLASSES[c]) continue;
-      const fromSheet = styles.classes.get(c);
-      if (fromSheet) addFw(fromSheet.ref.classes);
+      const rule = styles.classes.get(c);
+      if (rule) fromSheet.push(...rule.ref.classes);
     }
+    addFw(fromSheet);
+    // A site state rule on a framework class (`.w-dropdown-list.w--open`, two
+    // classes) outranks every one-class rule of the element: the framework
+    // class's own site rule, and the element's site classes (`.dropdown-list`).
+    // Without site chips it goes on top of the framework layer; with them it
+    // becomes a one-off above the chips — except where a state rule of the
+    // element's own site chain (merged into its chip, equally specific and
+    // later in the sheet) sets the same property.
+    const stateClasses = this.frameworkStateClasses(states, info.styles, fromSheet);
+    if (info.styles.length === 0) addFw(stateClasses);
     if (framework.length > 0) node.frameworkClasses = framework;
 
-    const oneOff: string[] = [];
+    const oneOff: string[] = info.styles.length > 0 ? [...stateClasses] : [];
     if (wf.htmlId) {
       const grid = styles.ids.get(wf.htmlId);
       if (grid) oneOff.push(...grid);
@@ -440,7 +562,17 @@ class PageParser {
       // stays in the residual stylesheet, which can only match through the id.
       if (styles.residual.ids.has(wf.htmlId)) wf.keepHtmlId = true;
     }
-    if (wf.classNames.includes('w-condition-invisible')) oneOff.push('hidden');
+    if (wf.classNames.includes('w-condition-invisible')) {
+      // `hidden` is the fallback; binding.ts swaps it for a reconstructed
+      // visibility rule when the element's field is known (widgets-extra.ts).
+      oneOff.push('hidden');
+      if (this.flags.conditionalVisibility) wf.conditionInvisible = true;
+    }
+    // An inline `display:none` is Webflow's way of parking a state box until its
+    // script shows it (`.w-users-userformerrorstate`, `.w-commerce-commerceaddtocarterror`,
+    // …). Without the script the box must stay hidden, so the declaration becomes
+    // the `hidden` utility; every other inline style is the widget builders' business.
+    if (hasInlineDisplayNone(wf.attrs.style)) oneOff.push('hidden');
     for (const c of wf.classNames) {
       if (styles.residual.classNames.has(c)) oneOff.push(wfClass(c));
     }
@@ -448,8 +580,24 @@ class PageParser {
 
     if (UNDERLAY_TAGS.has(wf.tag)) {
       const underlay = styles.tags.get(wf.tag);
-      if (underlay) node.underlayStyles = [underlay];
+      if (underlay && info.styles.length === 0 && framework.length > 0) {
+        // No site class to absorb the shims: upstream's converter folds them into
+        // the lowest named style, i.e. *above* the tag underlay, so normalize.css's
+        // button reset (`border-0`, `text-[inherit]`) would evict the widget's own
+        // border and colour (pagination buttons, a bare `.w-button` submit). The
+        // underlay goes under the shims instead, inline, and the node keeps no chip.
+        node.frameworkClasses = mergePrefixedClasses([...underlay.classes, ...framework]);
+      } else if (underlay) {
+        node.underlayStyles = [underlay];
+      }
     }
+    // ycode renders an image's `width` / `height` attributes from its asset when
+    // the export had none (every CMS-bound image), and the width attribute is a
+    // presentational `width: <n>px` that holds wherever no class sets a width:
+    // `height: 100%; max-height: 70vh` then squeezes the picture instead of
+    // scaling it down. The export's element had no such hint, so its width was
+    // `auto`; that goes under everything else.
+    if (node.kind === 'image' && !explicitImageWidth(wf.attrs.width)) node.frameworkClasses = ['w-auto', ...(node.frameworkClasses ?? [])];
 
     // Webflow's bound-background placeholder URL (css.ts `boundBackgroundKeys`) only ever
     // appears on CMS-bound backgrounds, so the flag is set even when the element has
@@ -459,6 +607,109 @@ class PageParser {
     const friendly = wf.siteClasses[0] ?? wf.tag;
     node.displayName = `${friendly} ${wf.id}`;
     this.nodeIndex.set(wf.id, node);
+  }
+
+  /**
+   * Webflow state combos of this element's chains (`.dropdown-list.w--open`,
+   * states.ts): merged into the chip for elements whose closed state is
+   * `display: none`, turned into `wf.stateTween` for a toggle (or a tab link's
+   * `w--current`), otherwise reported as `css_state_dropped`. The merge mutates
+   * the shared `ImportStyleRef` once per rule (before conversion, so every page
+   * sees it).
+   *
+   * On a nav menu the merged classes are scoped to the navbar's collapsed
+   * breakpoints (`max-lg:` for `data-collapse="medium"`, `max-md:` for
+   * `small` / `tiny`, none for `all`): above the collapse point the menu is
+   * always visible and webflow.js never sets the open state there, so an
+   * unscoped `display` / `background` would restyle the desktop bar. A rule
+   * that already sits on a narrower breakpoint keeps its own prefix; a navbar
+   * that never collapses (`none`) has no open state at all.
+   *
+   * A site rule on a framework class (`.w-dropdown-toggle.w--open`) is looked
+   * up by that class: it has no chip, so merged classes are returned for the
+   * element's framework classes, and a tween starts from the class's own
+   * site-sheet values.
+   */
+  private applyStateRules(node: WfNode, scope: Scope, role?: WfNodeRole): { framework: string[]; site: string[] } {
+    const { styles } = this.ctx;
+    const wf = node.wf;
+    let stateTween: WfNodeMeta['stateTween'];
+    const frameworkMerged: string[] = [];
+    const siteMerged: string[] = [];
+    const chains: { rules: (WfStateRule & { merged?: boolean })[]; ref: ImportStyleRef | undefined; resting: string[] }[] = [];
+    for (let i = 1; i <= wf.siteClasses.length; i++) {
+      const chain = wf.siteClasses.slice(0, i).join('.');
+      const rules = stateRulesFor(styles, chain);
+      if (!rules) continue;
+      const ref = i === 1 ? styles.classes.get(chain)?.ref : (styles.combos.get(chain) ?? comboBySet(styles).get(wf.siteClasses.slice(0, i).sort().join('.')));
+      chains.push({ rules, ref, resting: wf.siteClasses.slice(0, i) });
+    }
+    for (const c of new Set(wf.classNames)) {
+      const rules = !wf.siteClasses.includes(c) ? styles.states.get(c) : undefined;
+      if (rules) chains.push({ rules, ref: undefined, resting: [c] });
+    }
+    for (const { rules, ref, resting } of chains) {
+      const framework = ref === undefined && resting.length === 1 && !wf.siteClasses.includes(resting[0]);
+      for (const rule of rules) {
+        const handling = stateHandling(role, rule.state);
+        if (handling === 'variant') continue;
+        if (handling === 'merge') {
+          let classes = rule.classes;
+          if (role === 'nav-menu') {
+            const collapse = scope.navCollapse ?? 'medium';
+            if (collapse === 'none') {
+              this.warn('css_state_dropped', `${rule.selector}: the navbar never collapses (data-collapse="none"), so its menu is never opened and the ${stateLabel(rule.state)} state has no ycode counterpart`, wf.id);
+              continue;
+            }
+            classes = scopeToCollapse(rule, collapse);
+          }
+          if (framework) frameworkMerged.push(...classes);
+          else {
+            siteMerged.push(...classes);
+            if (ref && !rule.merged) {
+              ref.classes = mergePrefixedClasses([...ref.classes, ...classes]);
+              rule.merged = true;
+            }
+          }
+          continue;
+        }
+        if (handling === 'tween') {
+          if (rule.breakpoint !== 'main') {
+            this.warn('css_state_dropped', `${rule.selector}: the ${stateLabel(rule.state)} state on a breakpoint cannot become an interaction tween`, wf.id);
+            continue;
+          }
+          // A tab returns to its resting look when another tab is clicked, so the
+          // tab tween needs an explicit value for every key (a transparent
+          // background when the tab's own classes never set one).
+          const options = role === 'tab-link' ? { fallback: TAB_LINK_RESTING } : {};
+          const plan = stateTweenFromDeclarations(rule.declarations, restingFor(styles, resting), options);
+          if (plan.dropped.length > 0) this.warn('css_state_dropped', `${rule.selector}: ${plan.dropped.join('; ')} cannot become an interaction tween${role === 'tab-link' ? ' on the tab link' : ''} (ycode tweens background colour, opacity, transform, size and display)`, wf.id);
+          if (Object.keys(plan.to).length > 0) stateTween = { from: { ...(stateTween?.from ?? {}), ...plan.from }, to: { ...(stateTween?.to ?? {}), ...plan.to } };
+          continue;
+        }
+        this.warn('css_state_dropped', `${rule.selector}: webflow.js sets .${rule.state} on ${stateCarrier(rule.state)}, not on this ${role ?? wf.tag}; the rule has no ycode counterpart`, wf.id);
+      }
+    }
+    if (stateTween) wf.stateTween = stateTween;
+    return { framework: frameworkMerged, site: siteMerged };
+  }
+
+  /**
+   * The merged classes of state rules on the element's framework classes
+   * (`.w-dropdown-list.w--open`), ready to sit above everything a one-class
+   * rule gave the element: re-stated on the narrower breakpoints where a chip
+   * or the framework class's own site rule sets the same property (two classes
+   * beat one on every breakpoint in Webflow), and without what a state rule of
+   * the element's site chain sets on the same variant (that rule is equally
+   * specific and comes later in the site sheet).
+   */
+  private frameworkStateClasses(states: { framework: string[]; site: string[] }, chips: ImportStyleRef[], fromSheet: string[]): string[] {
+    if (states.framework.length === 0) return [];
+    const site = new Set(states.site);
+    const lower = [...chips.flatMap((ref) => ref.classes).filter((c) => !site.has(c)), ...fromSheet];
+    const lifted = liftComboOverBreakpoints(mergePrefixedClasses(states.framework), lower);
+    if (states.site.length === 0) return lifted;
+    return lifted.filter((cls) => mergePrefixedClasses([cls, ...states.site]).includes(cls));
   }
 
   private make(el: HTMLElement | null, kind: WfNode['kind'], tag: string, classNames: string[], scope: Scope, role?: WfNodeRole): WfNode {
@@ -537,7 +788,7 @@ class PageParser {
   }
 
   /** Convert element children; loose text runs between elements become text nodes (footer cells). */
-  private convertChildren(el: HTMLElement, scope: Scope): WfNode[] {
+  private convertChildren(el: HTMLElement, scope: Scope, skip?: Set<HTMLElement>): WfNode[] {
     const out: WfNode[] = [];
     let run: string[] = [];
     const flush = () => {
@@ -554,6 +805,7 @@ class PageParser {
         continue;
       }
       if (!(child instanceof HTMLElement)) continue;
+      if (skip?.has(child)) continue;
       if (tagOf(child) === 'br') {
         run.push('\n');
         continue;
@@ -583,17 +835,27 @@ class PageParser {
     const has = (c: string) => classNames.includes(c);
 
     if (has('w-dyn-empty')) return null;
+    // ── widgets-extra.ts (SPEC part C) ──
+    if (this.flags.badge && has('w-webflow-badge')) return null;
+    if (this.flags.unsupportedWidgets) this.noteUnsupportedWidget(classNames);
+    if (this.flags.video && (has('w-video') || has('w-embed-youtubevideo'))) {
+      const node = this.convertEmbedVideo(el, tag, classNames, scope);
+      if (node) return node;
+    }
     if (has('w-embed')) return this.convertEmbed(el, tag, classNames, scope);
     if (has('w-background-video')) return this.convertBackgroundVideo(el, tag, classNames, scope);
+    if (this.flags.bgVideoControl && has('w-background-video--control')) return this.convertBgVideoControl(el, classNames, scope);
     if (has('w-richtext')) {
       const node = this.make(el, 'box', tag, classNames, scope, 'rich-text');
       node.wf.layerKind = 'richText';
       node.wf.html = node.wf.bindEmpty ? '' : el.innerHTML.trim();
       node.children = [];
+      const textStyles = richTextStylesFor(this.ctx.styles, classNames);
+      if (textStyles) node.wf.textStyles = textStyles;
       return node;
     }
-    if (has('w-dyn-list')) return this.box(el, tag, classNames, scope, 'dyn-list');
-    if (has('w-dyn-items')) return this.box(el, tag, classNames, scope, 'dyn-items');
+    if (has('w-dyn-list')) return this.convertDynList(el, tag, classNames, scope);
+    if (has('w-dyn-items')) return this.convertDynItems(el, tag, classNames, scope);
     if (has('w-dyn-item')) {
       const node = this.make(el, 'collection', tag, classNames, scope, 'dyn-item');
       node.children = this.convertChildren(el, scope);
@@ -616,6 +878,10 @@ class PageParser {
     if (has('w-dropdown')) {
       const node = this.box(el, tag, classNames, scope, 'dropdown');
       node.wf.dropdownHover = (el.getAttribute('data-hover') ?? '').toLowerCase() === 'true';
+      if (!this.dropdownScriptAdded) {
+        this.dropdownScriptAdded = true;
+        this.bodyScripts.push(DROPDOWN_RUNTIME_SCRIPT);
+      }
       return node;
     }
     if (has('w-dropdown-toggle')) return this.box(el, tag, classNames, scope, 'dropdown-toggle');
@@ -628,10 +894,28 @@ class PageParser {
     if (has('w-layout-layout')) return this.box(el, tag, classNames, scope, 'grid');
     if (has('w-layout-cell')) return this.box(el, tag, classNames, scope, 'cell');
 
+    // ── Extra widgets (widgets-extra.ts), each behind its own flag ──
+    if (this.flags.locales && has('w-locales-list')) return this.convertLocales(el, tag, classNames, scope);
+    if (this.flags.lottie && has('w-lottie')) return this.convertLottie(el, tag, classNames, scope);
+    if (this.flags.codeBlock && has('w-code-block')) return this.convertCodeBlock(el, tag, classNames, scope);
+    if (this.flags.map && has('w-widget-map')) return this.convertMap(el, tag, classNames, scope);
+    if (this.flags.fileUpload && has('w-file-upload')) return this.convertFileUpload(el, tag, classNames, scope);
+    if (this.flags.pagination && has('w-pagination-wrapper')) return this.convertPagination(el, tag, classNames, scope);
+    if (this.flags.iconFont) {
+      const glyph = iconFontSvg(classNames);
+      if (glyph) {
+        const node = this.make(el, 'icon', tag, classNames, scope, 'icon-font');
+        node.svg = glyph.svg;
+        this.rename(node, glyph.className.replace(/^w-icon-/, 'Icon '));
+        return node;
+      }
+    }
+
     // ── Native widgets (widgets-native.ts), each behind its own flag ──
     if (this.flags.slider && has('w-slider')) return this.convertSlider(el, tag, classNames, scope);
     if (this.flags.lightbox && has('w-lightbox')) return this.convertLightbox(el, classNames, scope);
-    if (this.flags.form && has('w-form')) return this.convertFormWrapper(el, tag, classNames, scope);
+    // `<form class="w-form">` (the search form) IS the form; only a wrapper div gets the wrapper path.
+    if (this.flags.form && has('w-form') && tag !== 'form') return this.convertFormWrapper(el, tag, classNames, scope);
     if (this.flags.form && has('w-form-done')) return this.convertFormAlert(el, tag, classNames, scope, 'success');
     if (this.flags.form && has('w-form-fail')) return this.convertFormAlert(el, tag, classNames, scope, 'error');
     if (this.flags.form && tag === 'form') {
@@ -639,9 +923,14 @@ class PageParser {
       node.wf.layerKind = 'form';
       node.wf.formId = (el.getAttribute('id') || el.getAttribute('name') || '').trim() || undefined;
       this.rename(node, 'Form');
+      if (this.flags.search && isSearchForm(node.wf.attrs)) {
+        this.rename(node, 'Search form');
+        this.warn('widget_unsupported', SEARCH_NOTE, node.wf.id);
+      }
       return node;
     }
     if (this.flags.form && FORM_CONTROL_TAGS.has(tag)) return this.convertFormControl(el, tag, classNames, scope);
+    if (this.flags.form && tag === 'label') return this.convertLabel(el, classNames, scope);
     if (this.flags.tabs && has('w-tabs')) {
       const node = this.box(el, tag, classNames, scope, 'tabs');
       this.rename(node, 'Tabs');
@@ -933,7 +1222,11 @@ class PageParser {
   private convertBackgroundVideo(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
     const node = this.make(el, 'box', tag, classNames, scope, 'bg-video');
     node.wf.layerKind = 'video';
-    node.children = [];
+    // Everything but the `<video>` itself (and its `<noscript>` fallback) is
+    // real content Webflow lets the designer place on top of the video — the
+    // hero heading, the play/pause button. convert-bridge prepends the video.
+    const skip = new Set(elementChildren(el).filter((c) => tagOf(c) === 'video' || tagOf(c) === 'noscript'));
+    node.children = this.convertChildren(el, scope, skip);
     const candidates: string[] = [];
     for (const source of el.querySelectorAll('source')) {
       const src = source.getAttribute('src');
@@ -962,10 +1255,257 @@ class PageParser {
       loop: (el.getAttribute('data-loop') ?? 'true').toLowerCase() !== 'false',
     };
     if (poster) node.wf.video.poster = poster;
-    if (!this.embedDroppedWarned) {
+    if (!this.embedDroppedWarned && !this.flags.bgVideoControl) {
       this.embedDroppedWarned = true;
       this.warn('embed_dropped', 'background video controls / noscript fallback dropped');
     }
+    return node;
+  }
+
+  // ── Extra widgets (widgets-extra.ts) ──
+
+  /** `.w-users-*` / `.w-commerce-*`: no ycode equivalent; reported once per page, the markup converts as usual. */
+  private noteUnsupportedWidget(classNames: string[]): void {
+    const family = unsupportedWidgetFamily(classNames);
+    if (!family || this.unsupportedWarned.has(family)) return;
+    this.unsupportedWarned.add(family);
+    this.warn('widget_unsupported', UNSUPPORTED_WIDGET_NOTES[family]);
+  }
+
+  /**
+   * `.w-video.w-embed > iframe` (embedly-wrapped YouTube / Vimeo) and
+   * `.w-embed-youtubevideo > iframe` -> `video` (YouTube) or `iframe` layer.
+   * Returns null when no player iframe is found, so the generic embed path runs.
+   */
+  private convertEmbedVideo(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode | null {
+    const iframe = el.querySelector('iframe');
+    if (!iframe) return null;
+    const plan = planEmbedVideo({
+      src: iframe.getAttribute('src') ?? '',
+      style: el.getAttribute('style') ?? undefined,
+      width: iframe.getAttribute('width') ?? undefined,
+      height: iframe.getAttribute('height') ?? undefined,
+      title: iframe.getAttribute('title') ?? undefined,
+    });
+    if (!plan) return null;
+    const node = this.make(el, 'box', tag, classNames, scope, 'embed-video');
+    node.wf.layerKind = 'embedVideo';
+    node.wf.embedVideo = plan;
+    node.children = [];
+    // One-off classes go through upstream's converter (per-chip override), the
+    // only place that survives ycode's re-flatten of `layer.classes` on publish.
+    node.classes = [...new Set([...(node.classes ?? []), ...embedVideoClasses(plan)])];
+    this.rename(node, plan.provider === 'youtube' ? 'YouTube video' : plan.provider === 'vimeo' ? 'Vimeo video' : 'Video embed');
+    return node;
+  }
+
+  /** `.w-lottie[data-src]` -> `htmlEmbed` with `<lottie-player>` (convert-bridge); the JSON is an asset. */
+  private convertLottie(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
+    const node = this.make(el, 'box', tag, classNames, scope, 'lottie');
+    node.wf.layerKind = 'lottie';
+    node.children = [];
+    const raw = (el.getAttribute('data-src') ?? '').trim();
+    let src = raw;
+    if (raw && !isRemoteUrl(raw)) {
+      const rel = relativePath(raw);
+      src = this.ctx.assetKey(rel) ?? rel;
+      if (!this.ctx.zip.files.has(rel)) this.warn('asset_missing', `lottie animation missing from the export: ${rel}`, node.wf.id);
+    }
+    const size = sizeFromClasses((node.styles ?? []).flatMap((ref) => ref.classes));
+    node.wf.lottie = planLottie(node.wf.attrs, src, size);
+    if (node.wf.lottie.ix2) {
+      this.warn('widget_partial', 'lottie is driven by an interaction (data-is-ix2-target); imported as a plain player, the scroll/hover control is not reproduced', node.wf.id);
+    }
+    if (!raw) this.warn('widget_partial', 'lottie without data-src: empty player', node.wf.id);
+    this.rename(node, 'Lottie');
+    return node;
+  }
+
+  /** `.w-code-block > pre > code` -> `<pre>` box + `<code>` text child with the code verbatim (convert-bridge). */
+  private convertCodeBlock(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
+    const node = this.make(el, 'box', tag, classNames, scope, 'code-block');
+    node.wf.layerKind = 'codeBlock';
+    node.children = [];
+    const pre = el.querySelector('pre') ?? el;
+    const code = pre.querySelector('code') ?? pre;
+    // `.text` decodes entities and keeps every space, tab and newline; the
+    // highlight.js spans are dropped with the markup.
+    node.wf.codeBlock = {
+      code: code.text.replace(/^\n/, ''),
+      language: languageFromClasses([...classList(code), ...classList(pre)]),
+    };
+    const inline = [
+      ...CODE_BLOCK_CLASSES,
+      ...inlineStyleClasses(el.getAttribute('style') ?? undefined),
+      ...inlineStyleClasses(pre === el ? undefined : pre.getAttribute('style') ?? undefined),
+    ];
+    node.classes = [...new Set([...(node.classes ?? []), ...inline])];
+    this.rename(node, 'Code block');
+    return node;
+  }
+
+  /**
+   * `.w-file-upload`: only the default state (input + label + info) survives —
+   * the uploading / success / error boxes are driven by webflow.js. The input
+   * stays a real `<input type="file">`, but ycode's form handler posts JSON,
+   * so the file never reaches the server (reported as `widget_partial`).
+   */
+  private convertFileUpload(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
+    const skip = new Set(elementChildren(el).filter((c) => classList(c).some((cls) => FILE_UPLOAD_STATE_CLASSES.has(cls))));
+    const node = this.make(el, 'box', tag, classNames, scope, 'file-upload');
+    node.children = this.convertChildren(el, scope, skip);
+    this.rename(node, 'File upload');
+    if (!this.fileUploadWarned) {
+      this.fileUploadWarned = true;
+      this.warn('widget_partial', FILE_UPLOAD_NOTE, node.wf.id);
+    }
+    return node;
+  }
+
+  /** `.w-widget-map[data-widget-*]` -> `map` layer with `settings.map`. */
+  private convertMap(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
+    const node = this.make(el, 'box', tag, classNames, scope, 'map');
+    node.wf.layerKind = 'map';
+    node.children = [];
+    node.wf.map = planMap(node.wf.attrs);
+    for (const note of node.wf.map.notes) this.warn('widget_partial', `map: ${note}`, node.wf.id);
+    if (!this.mapKeyWarned) {
+      this.mapKeyWarned = true;
+      this.warn('widget_partial', MAP_KEY_NOTE, node.wf.id);
+    }
+    this.rename(node, 'Map');
+    return node;
+  }
+
+  /** `.w-locales-list > .w-locales-items > .w-locales-item > a[hreflang]` -> `localeSelector` layer. */
+  private convertLocales(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
+    const node = this.make(el, 'box', tag, classNames, scope, 'locales');
+    node.wf.layerKind = 'localeSelector';
+    node.children = [];
+    const links = el.querySelectorAll('a[hreflang]');
+    const current = links.find((a) => classList(a).includes('w--current') || a.getAttribute('aria-current') === 'page') ?? links[0];
+    node.wf.locales = {
+      current: current ? textContent(current) : '',
+      codes: links.map((a) => (a.getAttribute('hreflang') ?? '').trim()).filter(Boolean),
+    };
+    this.warn('widget_partial', LOCALES_NOTE, node.wf.id);
+    this.rename(node, 'Locales');
+    return node;
+  }
+
+  /** `.w-dyn-list`: a `.w-pagination-wrapper` child is wired to the list's item (convert-bridge builds ycode's pagination). */
+  private convertDynList(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
+    const node = this.box(el, tag, classNames, scope, 'dyn-list');
+    if (!this.flags.pagination) return node;
+    const children = node.children ?? [];
+    const pagination = children.find((c) => c.wf.role === 'pagination');
+    if (!pagination) return node;
+    const items = children.find((c) => c.wf.role === 'dyn-items');
+    const item = items?.children?.find((c) => c.wf.role === 'dyn-item');
+    if (!items || !item) {
+      this.warn('widget_partial', 'pagination without a collection item: controls dropped', pagination.wf.id);
+      node.children = children.filter((c) => c !== pagination);
+      return node;
+    }
+    item.wf.pagination = { itemsPerPage: Math.max(1, items.wf.dynItemCount ?? 1) };
+    pagination.wf.paginationFor = item.wf.id;
+    return node;
+  }
+
+  /**
+   * `.w-dyn-items`: a paginated export ships one template item per page slot;
+   * only the first becomes the collection layer (ycode repeats it), the count
+   * is the page size.
+   */
+  private convertDynItems(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
+    const node = this.make(el, 'box', tag, classNames, scope, 'dyn-items');
+    const items = elementChildren(el).filter((c) => classList(c).includes('w-dyn-item'));
+    node.wf.dynItemCount = items.length;
+    const parent = el.parentNode instanceof HTMLElement ? el.parentNode : null;
+    const paginated = this.flags.pagination && parent !== null && elementChildren(parent).some((c) => classList(c).includes('w-pagination-wrapper'));
+    const skip = paginated ? new Set(items.slice(1)) : undefined;
+    node.children = this.convertChildren(el, scope, skip);
+    return node;
+  }
+
+  /** `.w-pagination-wrapper` -> wrapper + prev / next buttons + page info; ids and attributes come from convert-bridge. */
+  private convertPagination(el: HTMLElement, tag: string, classNames: string[], scope: Scope): WfNode {
+    const node = this.make(el, 'box', tag, classNames, scope, 'pagination');
+    node.wf.layerKind = 'pagination';
+    node.children = [];
+    this.rename(node, 'Pagination');
+    for (const child of elementChildren(el)) {
+      const cls = classList(child);
+      if (cls.includes('w-pagination-previous') || cls.includes('w-pagination-next')) {
+        const isPrev = cls.includes('w-pagination-previous');
+        // Webflow's `<a href="?…_page=N">` navigates; ycode's controls are buttons
+        // the client-side pager listens to, so the href is dropped on purpose.
+        const button = this.make(child, 'box', 'button', cls, scope, isPrev ? 'pagination-prev' : 'pagination-next');
+        button.button = true;
+        button.wf.layerKind = 'paginationButton';
+        button.children = this.convertChildren(child, scope);
+        this.rename(button, isPrev ? 'Previous' : 'Next');
+        node.children.push(button);
+        continue;
+      }
+      if (cls.includes('w-page-count')) {
+        const info = this.make(child, 'text', tagOf(child), cls, scope, 'pagination-info');
+        info.wf.layerKind = 'paginationInfo';
+        info.text = textContent(child);
+        this.rename(info, 'Page info');
+        node.children.push(info);
+        continue;
+      }
+      const other = this.convertElement(child, scope);
+      if (other) node.children.push(other);
+    }
+    return node;
+  }
+
+  /**
+   * `.w-background-video--control`: Webflow's play/pause button. Two `<span>`s
+   * hold the pause and play glyphs (the second starts `hidden`) plus a
+   * visually hidden label each. The button keeps both glyphs as children; the
+   * constant runtime line (`BG_VIDEO_TOGGLE_SCRIPT`) toggles them.
+   */
+  private convertBgVideoControl(el: HTMLElement, classNames: string[], scope: Scope): WfNode {
+    const node = this.make(el, 'box', 'button', classNames, scope, 'bg-video-control');
+    node.button = true;
+    node.wf.layerKind = 'bgVideoControl';
+    const labels: string[] = [];
+    const glyphs: WfNode[] = [];
+    for (const span of elementChildren(el)) {
+      const label = span.querySelector('.w-hidden');
+      labels.push(label ? textContent(label) : '');
+      const glyph = elementChildren(span).find((c) => tagOf(c) === 'svg' || tagOf(c) === 'img');
+      const converted = glyph ? this.convertElement(glyph, scope) : null;
+      if (!converted) continue;
+      if (span.hasAttribute('hidden') || glyphs.length === 1) converted.classes = [...new Set([...(converted.classes ?? []), 'hidden'])];
+      this.rename(converted, glyphs.length === 0 ? 'Pause icon' : 'Play icon');
+      glyphs.push(converted);
+    }
+    node.children = glyphs;
+    node.wf.bgVideoControl = { labelPause: labels[0] || (el.getAttribute('aria-label') ?? ''), labelPlay: labels[1] || '' };
+    if (!this.bgVideoScriptAdded) {
+      this.bgVideoScriptAdded = true;
+      this.bodyScripts.push(BG_VIDEO_TOGGLE_SCRIPT);
+    }
+    this.rename(node, 'Video control');
+    return node;
+  }
+
+  /** `<label for>`: keeps its tag and `for`, so clicking it still focuses the control (file inputs depend on it). */
+  private convertLabel(el: HTMLElement, classNames: string[], scope: Scope): WfNode {
+    let node: WfNode;
+    if (isTextual(el)) {
+      node = this.make(el, 'text', 'label', classNames, scope, 'label');
+      node.text = textContent(el);
+    } else {
+      node = this.box(el, 'label', classNames, scope, 'label');
+    }
+    node.wf.layerKind = 'label';
+    const target = (el.getAttribute('for') ?? '').trim();
+    if (target) node.wf.labelFor = target;
     return node;
   }
 }

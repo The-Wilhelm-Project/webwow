@@ -5,14 +5,31 @@
  * `WEBWOW_IMPORT_ALLOWED_HOSTS` env var, comma-separated literal hostnames);
  * every resolved address must be public; redirects are followed manually (max
  * 3) and re-validated; the body is streamed with a running byte counter and
- * aborted above `maxBytes`; an optional `ByteBudget` caps the whole import.
+ * aborted above `maxBytes`; an optional `ByteBudget` caps the whole import and
+ * is charged chunk by chunk while the body streams, so a response without a
+ * `content-length` header can never transfer more than the budget has left.
+ * The address that passed validation is the address the socket connects to:
+ * the request goes through Node's http(s) client with a `lookup` that returns
+ * the validated addresses (Host header and TLS servername stay the hostname),
+ * so a name whose DNS answers differently a second time (rebinding) cannot
+ * steer the connection to an internal service. Every redirect hop is resolved
+ * and pinned the same way.
+ * Two explicit relaxations exist for the live-site source: `allowHttp` (a
+ * public site without TLS) and `relaxedHosts` (operator-listed hosts, outside
+ * production only, may be plain http on a private address — the fixture site
+ * of the verification setup). Neither is ever derived from user input, and
+ * neither is on unless the caller passes it (`site-crawl.ts` and the CMS image
+ * download of `server-materializer.ts` pass `envRelaxedHosts()` explicitly).
  * Never throws — every failure is `{ ok: false, error }`. Because only https
  * URLs on allowlisted hosts pass, the storage fetch-intercept (`/storage/...`)
  * can never be reached from here.
  */
 
 import { promises as dns } from 'dns';
-import { isIP } from 'net';
+import http from 'http';
+import https from 'https';
+import { isIP, type LookupFunction } from 'net';
+import { Readable } from 'stream';
 import { guessMimeType } from '@/lib/webwow/storage';
 
 export class ByteBudget {
@@ -28,10 +45,18 @@ export class ByteBudget {
     return true;
   }
 
+  /** Give back `n` bytes reserved earlier (a download that failed after streaming part of its body). */
+  release(n: number): void {
+    if (n > 0) this.used = Math.max(0, this.used - n);
+  }
+
   get remaining(): number {
     return Math.max(0, this.limit - this.used);
   }
 }
+
+/** The error text of a download refused or cut off by the {@link ByteBudget}; callers compare against it. */
+export const BUDGET_EXHAUSTED_ERROR = 'import download budget exhausted';
 
 export const DEFAULT_ALLOWED_HOSTS: RegExp[] = [
   /(^|\.)website-files\.com$/i,
@@ -53,11 +78,40 @@ export interface SafeFetchOptions {
   fetchImpl?: typeof fetch;
   /** Injectable for tests. */
   lookupImpl?: (host: string) => Promise<{ address: string }[]>;
+  /**
+   * Accept plain `http:` URLs (public hosts only — the private-address check
+   * still applies). Off by default; the live-site crawler (`site-crawl.ts`)
+   * turns it on because a published site may not have TLS.
+   */
+  allowHttp?: boolean;
+  /**
+   * Hosts for which `http:` and non-public addresses are tolerated. Off by
+   * default — nothing is relaxed unless the caller passes it. The intended
+   * value is {@link envRelaxedHosts}: the operator's `WEBWOW_IMPORT_ALLOWED_HOSTS`
+   * entries, and only outside production. Never widened from user input.
+   */
+  relaxedHosts?: RegExp[];
+}
+
+/** The rules {@link checkUrlSafety} relaxes for a request; both default to off. */
+export interface UrlSafetyPolicy {
+  allowHttp?: boolean;
+  relaxedHosts?: RegExp[];
 }
 
 export type SafeFetchResult =
   | { ok: true; buffer: Buffer; contentType: string; filename: string }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /**
+       * Set when a redirect target was refused by the safety rules: the absolute
+       * URL the server pointed at. Lets a caller with a wider policy (the site
+       * crawler re-basing `example.com` -> `www.example.com`) decide for itself
+       * instead of treating the hop as an unreachable page.
+       */
+      redirect?: string;
+    };
 
 export const DEFAULT_TIMEOUT_MS = 20_000;
 export const DEFAULT_MAX_BYTES = 20 * 2 ** 20;
@@ -74,6 +128,17 @@ export function envAllowedHosts(raw: string | undefined = process.env.WEBWOW_IMP
     .map((h) => h.trim().toLowerCase())
     .filter((h) => /^[a-z0-9.-]+$/.test(h))
     .map((h) => new RegExp(`^${escapeRegExp(h)}$`, 'i'));
+}
+
+/**
+ * Hosts that may be reached over plain http and on non-public addresses: the
+ * literal `WEBWOW_IMPORT_ALLOWED_HOSTS` entries, but only outside production
+ * (the same rule `data-api.ts` applies to its stub base URL). In production
+ * this is always empty, whatever the env var says.
+ */
+export function envRelaxedHosts(raw: string | undefined = process.env.WEBWOW_IMPORT_ALLOWED_HOSTS, nodeEnv: string | undefined = process.env.NODE_ENV): RegExp[] {
+  if (nodeEnv === 'production') return [];
+  return envAllowedHosts(raw);
 }
 
 export function isAllowedHost(host: string, allow: RegExp[]): boolean {
@@ -135,7 +200,8 @@ function parseIPv6(ip: string): number[] | null {
 /**
  * True for loopback, link-local, unique-local, unspecified, multicast and
  * private-range addresses (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16,
- * 0/8, 100.64/10, ::1, ::, fc00::/7, fe80::/10, ::ffff:<v4> of any of those).
+ * 0/8, 100.64/10, ::1, ::, fc00::/7, fe80::/10, and ::ffff:<v4>, 2002:<v4>
+ * (6to4) or 64:ff9b::<v4> (NAT64) embedding any of those).
  * Unparseable input counts as private (fail closed).
  */
 export function isPrivateAddress(ip: string): boolean {
@@ -162,6 +228,10 @@ export function isPrivateAddress(ip: string): boolean {
       // 6to4: embedded IPv4 in the next 32 bits.
       return isPrivateIPv4([h[1] >> 8, h[1] & 0xff, h[2] >> 8, h[2] & 0xff]);
     }
+    if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+      // NAT64 well-known prefix 64:ff9b::/96: embedded IPv4 in the last 32 bits.
+      return isPrivateIPv4([h[6] >> 8, h[6] & 0xff, h[7] >> 8, h[7] & 0xff]);
+    }
     return false;
   }
   return true;
@@ -186,29 +256,41 @@ export function filenameFromUrl(url: string): string {
   return decoded || 'download';
 }
 
-async function readBody(res: Response, maxBytes: number, abort: AbortController): Promise<Buffer | null> {
-  if (!res.body) return Buffer.alloc(0);
+type BodyOutcome = { kind: 'ok'; buffer: Buffer } | { kind: 'too_large' } | { kind: 'budget' };
+
+/**
+ * Stream the body with a running counter. Every chunk is reserved against the
+ * budget before it is kept, so the transfer stops the moment the budget is
+ * gone — with or without a `content-length` header. A body that is cut off
+ * gives its reservation back.
+ */
+async function readBody(res: Response, maxBytes: number, abort: AbortController, budget?: ByteBudget): Promise<BodyOutcome> {
+  if (!res.body) return { kind: 'ok', buffer: Buffer.alloc(0) };
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let reserved = 0;
+  const stop = async (kind: 'too_large' | 'budget'): Promise<BodyOutcome> => {
+    abort.abort();
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore
+    }
+    budget?.release(reserved);
+    return { kind };
+  };
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (value) {
-      total += value.byteLength;
-      if (total > maxBytes) {
-        abort.abort();
-        try {
-          await reader.cancel();
-        } catch {
-          // ignore
-        }
-        return null;
-      }
-      chunks.push(value);
-    }
+    if (!value) continue;
+    if (budget && !budget.take(value.byteLength)) return stop('budget');
+    reserved += value.byteLength;
+    total += value.byteLength;
+    if (total > maxBytes) return stop('too_large');
+    chunks.push(value);
   }
-  return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
+  return { kind: 'ok', buffer: Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total) };
 }
 
 function combineSignals(abort: AbortController, timeoutMs: number): AbortSignal {
@@ -218,39 +300,111 @@ function combineSignals(abort: AbortController, timeoutMs: number): AbortSignal 
   return abort.signal;
 }
 
+const defaultLookup: NonNullable<SafeFetchOptions['lookupImpl']> = async (host: string) => dns.lookup(host, { all: true });
+
+/** What a URL resolved to under the safety rules: the reason it was refused, or the addresses a request may connect to. */
+export type SafeUrlResolution = { problem: string; addresses?: undefined } | { problem: null; addresses: string[] };
+
 /**
  * The URL half of `safeFetch`'s safety rules, without the download: https only,
  * no credentials in the URL, host on the allowlist, and every address the host
- * resolves to public. Returns the reason a URL is refused, or null when it
- * passes. Exported so callers that speak a protocol of their own — the Webflow
- * Data API client (`data-api.ts`) sends an `Authorization` header and reads
- * JSON, which `safeFetch` deliberately cannot do — run through the same guard
- * instead of reaching for a bare `fetch`.
+ * resolves to public. Returns the validated addresses so the request can be
+ * pinned to exactly them (a second DNS answer inside the http client is never
+ * consulted), or the reason the URL is refused.
  */
-export async function checkUrlSafety(
+export async function resolveSafeUrl(
   url: URL,
   allow: RegExp[],
-  lookup: NonNullable<SafeFetchOptions['lookupImpl']> = async (host: string) => dns.lookup(host, { all: true }),
-): Promise<string | null> {
-  if (url.protocol !== 'https:') return `only https URLs are allowed (${url.protocol})`;
-  if (url.username || url.password) return 'URLs with credentials are not allowed';
+  lookup: NonNullable<SafeFetchOptions['lookupImpl']> = defaultLookup,
+  policy: UrlSafetyPolicy = {},
+): Promise<SafeUrlResolution> {
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  if (!isAllowedHost(host, allow)) return `host ${host} is not in the allowlist`;
+  const relaxed = policy.relaxedHosts ? isAllowedHost(host, policy.relaxedHosts) : false;
+  const httpOk = url.protocol === 'http:' && (policy.allowHttp === true || relaxed);
+  if (url.protocol !== 'https:' && !httpOk) return { problem: `only https URLs are allowed (${url.protocol})` };
+  if (url.username || url.password) return { problem: 'URLs with credentials are not allowed' };
+  if (!isAllowedHost(host, allow)) return { problem: `host ${host} is not in the allowlist` };
   if (isIP(host)) {
-    if (isPrivateAddress(host)) return `address ${host} is not public`;
-    return null;
+    // An operator-listed host (development only) may live on a private address.
+    if (!relaxed && isPrivateAddress(host)) return { problem: `address ${host} is not public` };
+    return { problem: null, addresses: [host] };
   }
   let addresses: { address: string }[];
   try {
     addresses = await lookup(host);
   } catch (error) {
-    return `DNS lookup failed for ${host}: ${error instanceof Error ? error.message : String(error)}`;
+    return { problem: `DNS lookup failed for ${host}: ${error instanceof Error ? error.message : String(error)}` };
   }
-  if (!addresses || addresses.length === 0) return `DNS lookup returned no address for ${host}`;
-  for (const a of addresses) {
-    if (isPrivateAddress(a.address)) return `host ${host} resolves to a non-public address`;
+  if (!addresses || addresses.length === 0) return { problem: `DNS lookup returned no address for ${host}` };
+  const list = addresses.map((a) => a.address.trim()).filter((a) => isIP(a) !== 0);
+  if (list.length === 0) return { problem: `DNS lookup returned no usable address for ${host}` };
+  if (!relaxed) {
+    for (const a of list) {
+      if (isPrivateAddress(a)) return { problem: `host ${host} resolves to a non-public address` };
+    }
   }
-  return null;
+  return { problem: null, addresses: list };
+}
+
+/**
+ * {@link resolveSafeUrl} without the addresses: the reason a URL is refused, or
+ * null when it passes. Exported so callers that speak a protocol of their own —
+ * the Webflow Data API client (`data-api.ts`) sends an `Authorization` header
+ * and reads JSON, which `safeFetch` deliberately cannot do — run through the
+ * same guard instead of reaching for a bare `fetch`.
+ */
+export async function checkUrlSafety(
+  url: URL,
+  allow: RegExp[],
+  lookup: NonNullable<SafeFetchOptions['lookupImpl']> = defaultLookup,
+  policy: UrlSafetyPolicy = {},
+): Promise<string | null> {
+  return (await resolveSafeUrl(url, allow, lookup, policy)).problem;
+}
+
+/**
+ * One GET through Node's http(s) client whose socket connects to exactly the
+ * validated `addresses` (the `lookup` option answers from that list — with all
+ * of them when the client asks for `all`, so its own family selection keeps
+ * working) while `Host` and the TLS servername remain the URL's hostname.
+ * Redirects are not followed here; `safeFetch` re-validates every hop. The
+ * result is a WHATWG `Response` so the rest of the pipeline is shared with the
+ * injectable `fetchImpl` of the tests.
+ */
+function pinnedRequest(url: URL, addresses: string[], signal: AbortSignal): Promise<Response> {
+  const client = url.protocol === 'https:' ? https : http;
+  const entries = addresses.map((address) => ({ address, family: isIP(address) }));
+  const lookup: LookupFunction = (_hostname, options, callback) => {
+    const wanted = options.family === 4 || options.family === 6 ? entries.filter((e) => e.family === options.family) : entries;
+    const list = wanted.length > 0 ? wanted : entries;
+    if (options.all) callback(null, list);
+    else callback(null, list[0].address, list[0].family);
+  };
+  return new Promise<Response>((resolve, reject) => {
+    const req = client.request(url, { method: 'GET', headers: { accept: '*/*' }, signal, lookup }, (res) => {
+      const status = res.statusCode ?? 0;
+      if (status < 200 || status > 599) {
+        res.resume();
+        reject(new Error(`HTTP ${status}`));
+        return;
+      }
+      const headers = new Headers();
+      for (const [key, value] of Object.entries(res.headers)) {
+        if (value === undefined) continue;
+        try {
+          headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+        } catch {
+          // a header the WHATWG model refuses is not one this module reads
+        }
+      }
+      const bodyless = status === 204 || status === 205 || status === 304;
+      if (bodyless) res.resume();
+      const body = bodyless ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>);
+      resolve(new Response(body, { status, headers }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 /**
@@ -261,9 +415,11 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
   const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   const allow = opts.allowHosts ?? [...DEFAULT_ALLOWED_HOSTS, ...envAllowedHosts()];
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const lookup = opts.lookupImpl ?? (async (host: string) => dns.lookup(host, { all: true }));
+  const fetchImpl = opts.fetchImpl;
+  const lookup = opts.lookupImpl ?? defaultLookup;
+  const policy: UrlSafetyPolicy = { allowHttp: opts.allowHttp === true, relaxedHosts: opts.relaxedHosts ?? [] };
   const filename = filenameFromUrl(url);
+  if (opts.budget && opts.budget.remaining <= 0) return { ok: false, error: BUDGET_EXHAUSTED_ERROR };
 
   try {
     let current: URL;
@@ -276,13 +432,16 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
     let response: Response | null = null;
     const abort = new AbortController();
     for (let hop = 0; hop <= maxRedirects; hop++) {
-      const problem = await checkUrlSafety(current, allow, lookup);
-      if (problem) return { ok: false, error: problem };
-      const res = await fetchImpl(current.toString(), {
-        redirect: 'manual',
-        signal: combineSignals(abort, timeoutMs),
-        headers: { accept: '*/*' },
-      });
+      const resolved = await resolveSafeUrl(current, allow, lookup, policy);
+      if (resolved.problem !== null) {
+        return hop === 0 ? { ok: false, error: resolved.problem } : { ok: false, error: resolved.problem, redirect: current.toString() };
+      }
+      const signal = combineSignals(abort, timeoutMs);
+      // The injected `fetchImpl` exists for tests only; the real path pins the socket
+      // to the addresses that were just validated.
+      const res = fetchImpl
+        ? await fetchImpl(current.toString(), { redirect: 'manual', signal, headers: { accept: '*/*' } })
+        : await pinnedRequest(current, resolved.addresses, signal);
       if (res.status >= 300 && res.status < 400) {
         const location = res.headers.get('location');
         try {
@@ -323,14 +482,13 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
       } catch {
         // ignore
       }
-      return { ok: false, error: 'import download budget exhausted' };
+      return { ok: false, error: BUDGET_EXHAUSTED_ERROR };
     }
 
-    const buffer = await readBody(response, maxBytes, abort);
-    if (!buffer) return { ok: false, error: `file larger than ${Math.round(maxBytes / 2 ** 20)} MB` };
-    if (opts.budget && !opts.budget.take(buffer.length)) {
-      return { ok: false, error: 'import download budget exhausted' };
-    }
+    const body = await readBody(response, maxBytes, abort, opts.budget);
+    if (body.kind === 'too_large') return { ok: false, error: `file larger than ${Math.round(maxBytes / 2 ** 20)} MB` };
+    if (body.kind === 'budget') return { ok: false, error: BUDGET_EXHAUSTED_ERROR };
+    const { buffer } = body;
     const headerType = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
     const contentType = headerType && headerType !== 'application/octet-stream' ? headerType : guessMimeType(filename);
     return { ok: true, buffer, contentType, filename };

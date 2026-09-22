@@ -9,7 +9,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { convertValueForFieldType } from '@/lib/csv-utils';
+import { buildStyleModel, type WfStyleModel } from './css';
 import { convertRichTextHtml, type TipTapNode } from './richtext';
+import { collectRichTextClasses, richTextStylesFor, textStyleKeyForTag } from './richtext-styles';
+import { Warnings } from './warnings';
 
 /** A Webflow rich-text field with everything the designer panel can produce. */
 const WEBFLOW_RICH_TEXT = `
@@ -134,4 +137,98 @@ test('nothing convertible -> null, so the caller can fall back to upstream', () 
 test('plain text without tags still becomes a paragraph', () => {
   const doc = convertRichTextHtml('Nur Text')!;
   assert.deepEqual(doc, { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Nur Text' }] }] });
+});
+
+test('every paragraph stays its own paragraph node, so per-block margins apply', () => {
+  const doc = convertRichTextHtml('<p>Samstag 28. Februar</p>\n<p>Sonntag 1. März</p><p></p><p>Ende</p>')!;
+  assert.deepEqual(doc.content.map((n) => n.type), ['paragraph', 'paragraph', 'paragraph']);
+  assert.deepEqual(doc.content.map((n) => n.content![0].text), ['Samstag 28. Februar', 'Sonntag 1. März', 'Ende']);
+  // Upstream's converter (CMS rich_text values) keeps them apart as well.
+  const upstream = JSON.parse(convertValueForFieldType('<p>A</p><p>B</p>', 'rich_text')!);
+  assert.deepEqual(upstream.content.map((n: TipTapNode) => n.type), ['paragraph', 'paragraph']);
+});
+
+// ─── textStyles from the stylesheet (richtext-styles.ts) ──────────────────────
+
+function styleModel(siteCss: string, frameworkCss: string, richTextClasses: string[] = []): WfStyleModel {
+  return buildStyleModel({ siteCss: [siteCss], frameworkCss: [frameworkCss], richTextClasses, assetUrl: () => null, warn: new Warnings() });
+}
+
+const WEBFLOW_TAG_RULES = `
+  b, strong { font-weight: bold }
+  h1, h2, h3, h4, h5, h6 { font-weight: bold; margin-bottom: 10px }
+  h2 { font-size: 32px; line-height: 36px; margin-top: 20px }
+  p { margin-top: 0; margin-bottom: 10px }
+  blockquote { margin: 0 0 10px 0; padding: 10px 20px; border-left: 5px solid #E2E2E2; font-size: 18px; line-height: 22px }
+  figure { margin: 0; margin-bottom: 10px }
+  ul, ol { margin-top: 0px; margin-bottom: 10px; padding-left: 40px }
+  img { max-width: 100%; display: inline-block }
+  .w-richtext ol, .w-richtext ul { overflow: hidden }
+  .w-richtext figure { position: relative; max-width: 60% }
+  .w-richtext figure img { width: 100% }
+`;
+
+test('richTextStylesFor maps tag and .w-richtext rules onto ycode\'s text-style keys with design data', () => {
+  const model = styleModel('p { margin-bottom: 10px } a { color: #000 }', WEBFLOW_TAG_RULES);
+  const styles = richTextStylesFor(model, ['rich-text-block', 'w-richtext'])!;
+
+  assert.equal(styles.paragraph.classes, 'mt-[0] mb-[10px]');
+  assert.deepEqual(styles.paragraph.design, { spacing: { isActive: true, marginTop: '0', marginBottom: '10px' } });
+  assert.equal(styles.paragraph.label, 'Paragraph');
+
+  assert.equal(styles.h2.classes, 'font-[700] mb-[10px] text-[32px] leading-[36px] mt-[20px]');
+  assert.equal(styles.h2.design?.typography?.fontSize, '32px');
+  assert.equal(styles.h2.design?.typography?.fontWeight, '700');
+  assert.equal(styles.h2.design?.spacing?.marginTop, '20px');
+  assert.equal(styles.h1.classes, 'font-[700] mb-[10px]', 'the group rule alone');
+
+  assert.equal(styles.bulletList.classes, 'list-disc mt-[0px] mb-[10px] pl-[40px] overflow-hidden', 'list marker baseline + tag rule + .w-richtext rule');
+  assert.equal(styles.orderedList.classes, 'list-decimal mt-[0px] mb-[10px] pl-[40px] overflow-hidden');
+  assert.equal(styles.bulletList.design?.spacing?.paddingLeft, '40px');
+
+  assert.equal(styles.link.classes, 'underline text-[#000]', 'browser underline stays, colour from the site rule');
+  assert.equal(styles.link.design?.typography?.color, '#000');
+  assert.equal(styles.bold.classes, 'font-[700]');
+  assert.equal(styles.italic, undefined, 'no rule touches <em>, so ycode\'s default stays');
+  assert.equal(styles.listItem, undefined);
+
+  assert.ok(styles.blockquote.classes!.includes('pl-[20px]'));
+  assert.equal(styles.blockquote.design?.spacing?.paddingLeft, '20px');
+  assert.equal(styles.blockquote.design?.typography?.fontSize, '18px');
+
+  // The image carries the figure box: ycode renders it without a <figure>.
+  assert.equal(styles.richTextImage.classes, 'inline-block m-[0] mb-[10px] w-full relative max-w-[60%]');
+  assert.equal(styles.richTextImage.design?.sizing?.maxWidth, '60%');
+  assert.equal(styles.richTextImage.design?.spacing?.marginBottom, '10px');
+
+  // Nothing about the container: spacing comes from the margins, never from a gap.
+  for (const entry of Object.values(styles)) assert.ok(!/(^|\s)gap-/.test(entry.classes ?? ''));
+});
+
+test('richTextStylesFor: the element\'s own classes win over .w-richtext and the tag rules, in class order', () => {
+  const model = styleModel(
+    'p { margin-bottom: 10px } .rich-text-block p { margin-bottom: 24px; font-size: 18px } .rich-text-block h2 { font-size: 40px } .article p { margin-bottom: 32px }',
+    WEBFLOW_TAG_RULES,
+    ['rich-text-block', 'article'],
+  );
+  const one = richTextStylesFor(model, ['rich-text-block', 'w-richtext'])!;
+  assert.equal(one.paragraph.classes, 'mt-[0] mb-[24px] text-[18px]');
+  assert.equal(one.h2.classes, 'font-[700] mb-[10px] leading-[36px] mt-[20px] text-[40px]');
+
+  const two = richTextStylesFor(model, ['rich-text-block', 'article', 'w-richtext'])!;
+  assert.equal(two.paragraph.classes, 'mt-[0] text-[18px] mb-[32px]', 'later class wins');
+  assert.equal(two.paragraph.design?.spacing?.marginBottom, '32px');
+
+  const other = richTextStylesFor(model, ['w-richtext'])!;
+  assert.equal(other.paragraph.classes, 'mt-[0] mb-[10px]', 'a rich text without the class keeps the tag rule');
+});
+
+test('richTextStylesFor returns undefined without any rule, and collectRichTextClasses finds the container classes', () => {
+  assert.equal(richTextStylesFor(styleModel('.hero { padding: 10px }', ''), ['w-richtext']), undefined);
+  const found = new Set<string>();
+  collectRichTextClasses('<div class="rich-text-block w-richtext"><p>x</p></div><div class="text-block"></div><div class=\'article w-richtext w-dyn-bind-empty\'></div>', found);
+  assert.deepEqual([...found].sort(), ['article', 'rich-text-block', 'w-dyn-bind-empty', 'w-richtext']);
+  assert.equal(textStyleKeyForTag('figure'), 'richTextImage');
+  assert.equal(textStyleKeyForTag('strong'), 'bold');
+  assert.equal(textStyleKeyForTag('div'), undefined);
 });

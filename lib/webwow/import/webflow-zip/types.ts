@@ -10,7 +10,7 @@
  * Only type imports from upstream: nothing here loads Zustand or React.
  */
 
-import type { CollectionFieldType, Font, SliderSettings } from '@/types';
+import type { CollectionFieldType, Font, SliderSettings, TextStyle, TweenProperties } from '@/types';
 import type { ImportNode } from '@/lib/import/types';
 import type { WfCmsSource, WfDataApiCredentials } from './data-api';
 import type { FormControlPlan, WfWidgetFlags } from './widgets-native';
@@ -42,6 +42,14 @@ export interface WfImportOptions {
    * Unset (the default) means the CSV path runs exactly as before.
    */
   webflowApi?: WfDataApiCredentials;
+  /**
+   * URL of the published Webflow site (`https://www.example.com`). When set,
+   * the live pages are crawled (`site-crawl.ts`) to supply what the export
+   * lacks: rendered CMS values, CMS image URLs, detail pages and the exact
+   * slot -> field mapping. Validated by the route (`website_invalid`); the
+   * crawl itself is never fatal (`site_*` warnings).
+   */
+  websiteUrl?: string;
 }
 
 export const DEFAULT_IMPORT_OPTIONS: WfImportOptions = {
@@ -53,13 +61,17 @@ export const DEFAULT_IMPORT_OPTIONS: WfImportOptions = {
 
 export type WfWarningCode =
   | 'zip_entry_skipped' | 'asset_download_failed' | 'asset_skipped' | 'asset_missing'
-  | 'css_residual' | 'css_dropped' | 'css_neutralised'
+  | 'css_residual' | 'css_dropped' | 'css_neutralised' | 'css_state_dropped'
   | 'html_unmapped' | 'embed_script' | 'embed_dropped' | 'video_missing_file' | 'link_broken' | 'page_empty'
   | 'collection_guess' | 'field_guess' | 'binding_guess' | 'binding_unbound' | 'reference_unresolved' | 'csv_type_guess'
   | 'ix2_unsupported_event' | 'ix2_unsupported_action' | 'ix2_no_targets' | 'ix2_ease_approximated'
   | 'component_skipped' | 'font_extra_weight' | 'slug_suffixed'
   | 'widget_partial' | 'widget_skipped'
-  | 'cms_api_extra' | 'cms_api_partial';
+  | 'widget_unsupported'
+  | 'cms_api_extra' | 'cms_api_partial'
+  | 'site_unreachable' | 'site_page_failed' | 'site_page_skipped'
+  | 'cms_site_only' | 'cms_site_item_added' | 'cms_site_value_filled' | 'locales_collapsed'
+  | 'timezone_set' | 'seo_from_site';
 
 export interface WfWarning {
   code: WfWarningCode;
@@ -111,7 +123,25 @@ export interface WfImportResult {
   cmsSource: WfCmsSource;
   /** Webflow site id the Data API was read from (absent when no token was supplied). */
   webflowSiteId?: string;
+  /** What the live site contributed (absent when no `websiteUrl` was given). */
+  site?: WfSiteContribution;
   durationMs: number;
+}
+
+/** Counters for the live-site source (`site-crawl.ts` / `site-cms.ts`). */
+export interface WfSiteContribution {
+  /** Pages fetched and parsed. */
+  pages: number;
+  /** Pages that failed or were skipped (limits, non-HTML, off-host). */
+  failed: number;
+  /** Empty CSV/API cells filled from a live value. */
+  valuesFilled: number;
+  /** Items that exist on the live site but in no CSV/API collection. */
+  itemsAdded: number;
+  /** Collections built from the live site alone (no CSV, no API). */
+  collectionsBuilt: number;
+  /** Binding slots decided by a live value instead of the structural heuristic. */
+  slotsBound: number;
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -142,7 +172,10 @@ export type WfNodeRole =
   | 'lightbox'
   | 'form-wrapper' | 'form' | 'form-control' | 'form-alert'
   | 'tabs' | 'tab-menu' | 'tab-link' | 'tab-content' | 'tab-pane'
-  | 'row' | 'col';
+  | 'row' | 'col'
+  | 'embed-video' | 'lottie' | 'code-block' | 'file-upload' | 'map' | 'locales'
+  | 'pagination' | 'pagination-prev' | 'pagination-next' | 'pagination-info'
+  | 'bg-video-control' | 'icon-font' | 'label';
 
 export type WfNavCollapse = 'all' | 'medium' | 'small' | 'tiny' | 'none';
 
@@ -172,12 +205,19 @@ export interface WfNodeMeta {
   boundBackground?: boolean;
   /** Inner HTML for rich-text / embed-script nodes. */
   html?: string;
+  /** Rich-text nodes: `layer.textStyles` derived from the tag and `.w-richtext` rules (richtext-styles.ts). */
+  textStyles?: Record<string, TextStyle>;
   /** Background video wrapper data. */
   video?: { sources: string[]; poster?: string; autoplay: boolean; loop: boolean };
   /** On role `nav`. */
   navCollapse?: WfNavCollapse;
   /** On role `dropdown` (`data-hover="true"`). */
   dropdownHover?: boolean;
+  /**
+   * The element's `w--open` styles as a tween (states.ts), on roles `dropdown-toggle`
+   * and `nav-button`; widgets.ts adds it to the generated toggle interaction.
+   */
+  stateTween?: { from: TweenProperties; to: TweenProperties };
   /** Set by binding.ts. */
   binding?: WfBinding;
   /** Set by binding.ts on role `dyn-item`. */
@@ -198,7 +238,48 @@ export interface WfNodeMeta {
   layerKind?:
     | 'htmlEmbed' | 'richText' | 'video' | 'iframe' | 'hr'
     | 'slider' | 'slides' | 'slide' | 'lightbox'
-    | 'form' | 'formControl' | 'formAlert';
+    | 'form' | 'formControl' | 'formAlert'
+    | 'embedVideo' | 'lottie' | 'codeBlock' | 'map' | 'localeSelector'
+    | 'pagination' | 'paginationButton' | 'paginationInfo'
+    | 'bgVideoControl' | 'label';
+
+  // ── widgets-extra.ts ──
+  /** Set on role `embed-video` (`.w-video` / `.w-embed-youtubevideo`). */
+  embedVideo?: import('./widgets-extra').EmbedVideoPlan;
+  /** Set on role `lottie`. */
+  lottie?: import('./widgets-extra').LottiePlan;
+  /** Set on role `code-block`. */
+  codeBlock?: import('./widgets-extra').CodeBlockPlan;
+  /** Set on role `map`. */
+  map?: import('./widgets-extra').MapPlan;
+  /** Set on role `locales`. */
+  locales?: import('./widgets-extra').LocalesPlan;
+  /** Set on role `dyn-items`: number of `.w-dyn-item` templates the export shipped (page size of a paginated list). */
+  dynItemCount?: number;
+  /** Set on role `dyn-item` when its list has a `.w-pagination-wrapper`. */
+  pagination?: { itemsPerPage: number };
+  /** Set on role `pagination`: `wf.id` of the dyn-item node whose layer owns the pagination. */
+  paginationFor?: string;
+  /** Had `w-condition-invisible` (the `hidden` fallback class is on `node.classes`). */
+  conditionInvisible?: boolean;
+  /** binding.ts looked at the invisible element (a rule was reconstructed or the miss was reported). */
+  visibilityChecked?: boolean;
+  /** Reconstructed visibility rule (replaces the `hidden` fallback). */
+  visibility?: WfVisibilityPlan;
+  /** Set on role `bg-video-control`. */
+  bgVideoControl?: import('./widgets-extra').BgVideoControlPlan;
+  /** Set on role `label`: `<label for>`. */
+  labelFor?: string;
+}
+
+/** A visibility rule reconstructed from a `.w-condition-invisible` element. */
+export interface WfVisibilityPlan {
+  fieldId: string;
+  fieldType: CollectionFieldType;
+  operator: 'is_present' | 'is';
+  value?: string;
+  source: 'collection' | 'page';
+  reason: string;
 }
 
 export interface WfNode extends ImportNode {
@@ -222,12 +303,21 @@ export interface WfBinding {
   reason: string;
 }
 
+/** A list filter: a boolean field that is set, or a date field after / before today (ycode's `$today` preset). */
+export type WfListFilter =
+  | { fieldId: string; fieldType: 'boolean'; operator?: 'is'; value: 'true' }
+  | { fieldId: string; fieldType: 'date' | 'date_only'; operator: 'is_after' | 'is_before'; value: '$today' };
+
 export interface WfCollectionBinding {
   collectionId: string;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
   limit?: number;
-  filters?: { fieldId: string; fieldType: 'boolean'; value: 'true' }[];
+  /** Leading items skipped (the second of two lists that split one collection in one sort). */
+  offset?: number;
+  filters?: WfListFilter[];
+  /** A list on its own collection's page leaves the page's item out (a `self` condition in its filters). */
+  excludeCurrentItem?: boolean;
   /** Nested image list. */
   multiAsset?: { fieldId: string; source: 'collection' | 'page'; parentCollectionNodeId?: string };
   confidence: number;

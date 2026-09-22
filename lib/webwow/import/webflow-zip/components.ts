@@ -18,12 +18,16 @@
 
 import { cloneDeep } from 'lodash';
 
+import { componentizeLayers } from '@/lib/import/componentize';
+import type { ImportMaterializer } from '@/lib/import/materializer';
 import { cleanLayersForComponentCreation } from '@/lib/layer-utils';
+import { generateId } from '@/lib/utils';
 
 import type { ServerMaterializer } from './server-materializer';
 import type { Warnings } from './warnings';
+import { variantNameFromClasses } from './widgets-extra';
 
-import type { Layer } from '@/types';
+import type { Component, ComponentVariable, ComponentVariableValue, ComponentVariant, Layer } from '@/types';
 
 /** One page's root layer (`body.id === 'body'`; its children are the page). */
 export interface PageLayers {
@@ -42,6 +46,10 @@ export type RegionHint = 'nav' | 'footer' | 'header';
 export interface ExtractOptions {
   /** `layer.id` -> region hint. Hinted layers are candidates at ANY depth. */
   hintOf?: (layerId: string) => RegionHint | undefined;
+  /** `layer.id` -> the Webflow site classes of its node (`['navbar', 'black']`); names the variants. */
+  classesOf?: (layerId: string) => string[] | undefined;
+  /** Same region with different classes on another page -> a variant of one component (default on). */
+  variants?: boolean;
 }
 
 export interface CrossPageComponentResult {
@@ -83,10 +91,12 @@ function textOf(layer: Layer): string {
 }
 
 function mediaOf(layer: Layer): string {
-  const src = layer.variables?.image?.src ?? layer.variables?.icon?.src ?? layer.variables?.video?.src;
+  const src = layer.variables?.image?.src ?? layer.variables?.icon?.src ?? layer.variables?.video?.src ?? layer.variables?.audio?.src;
   if (!src) return '';
   const v = src as { type?: string; data?: Record<string, unknown> };
-  return `${v.type ?? ''}:${JSON.stringify(v.data ?? {})}`;
+  // A background video's poster is part of what the region shows.
+  const poster = layer.variables?.video?.poster as { data?: Record<string, unknown> } | undefined;
+  return `${v.type ?? ''}:${JSON.stringify(v.data ?? {})}${poster ? `:${JSON.stringify(poster.data ?? {})}` : ''}`;
 }
 
 function linkOf(layer: Layer): string {
@@ -214,6 +224,39 @@ function componentNameFor(candidate: Candidate, used: Set<string>, fallbackIndex
   return name;
 }
 
+/**
+ * True when two regions with the same loose signature differ in nothing but
+ * classes / style chips (anywhere in the tree): the case a component variant
+ * exists for. Links, text, media and structure must match exactly.
+ */
+export function classesOnlyDiff(a: Layer, b: Layer): boolean {
+  if (a.name !== b.name || tagOf(a) !== tagOf(b)) return false;
+  if (textOf(a) !== textOf(b) || mediaOf(a) !== mediaOf(b) || linkOf(a) !== linkOf(b)) return false;
+  const ca = a.children ?? [];
+  const cb = b.children ?? [];
+  if (ca.length !== cb.length) return false;
+  return ca.every((child, i) => classesOnlyDiff(child, cb[i]));
+}
+
+/** Name of a variant from the first layer pair whose Webflow classes differ (`navbar black` -> `Black`). */
+function variantName(primary: Layer, variant: Layer, classesOf: ExtractOptions['classesOf'], fallbackIndex: number): string {
+  const fallback = `Variant ${fallbackIndex}`;
+  if (!classesOf) return fallback;
+  const pairs: [Layer, Layer][] = [];
+  const collect = (a: Layer, b: Layer) => {
+    pairs.push([a, b]);
+    const ca = a.children ?? [];
+    const cb = b.children ?? [];
+    for (let i = 0; i < Math.min(ca.length, cb.length); i++) collect(ca[i], cb[i]);
+  };
+  collect(primary, variant);
+  for (const [a, b] of pairs) {
+    const name = variantNameFromClasses(classesOf(a.id), classesOf(b.id), fallbackIndex);
+    if (name !== fallback) return name;
+  }
+  return fallback;
+}
+
 /** Human-readable summary of why two near-identical regions could not be merged. */
 function diffSummary(a: Layer, b: Layer): string {
   const reasons: string[] = [];
@@ -265,11 +308,65 @@ export async function extractCrossPageComponents(
   let instances = 0;
   let regionIndex = 1;
 
+  const variantsEnabled = opts.variants !== false;
+
+  /** Replace every occurrence of a strict group with an instance of `componentId` (+ variant). */
+  const instantiate = (group: Candidate[], componentId: string, componentVariantId?: string): void => {
+    for (const occurrence of group) {
+      const body = bodyByPage.get(occurrence.page);
+      if (!body) continue;
+      const instance: Layer = { id: occurrence.layer.id, name: 'div', classes: '', componentId, children: [] };
+      if (componentVariantId) instance.componentVariantId = componentVariantId;
+      if (replaceById(body, occurrence.layer.id, instance)) {
+        instances += 1;
+        merged.add(occurrence.layer);
+      }
+    }
+  };
+
   const mergeGroups = async (candidates: Candidate[]): Promise<void> => {
     const groups = new Map<string, Candidate[]>();
     for (const candidate of candidates) push(groups, regionSignature(candidate.layer), candidate);
+    const keys = [...groups.keys()].sort();
+    const consumed = new Set<string>();
+
+    // Variant families: strict groups that share a loose signature and differ
+    // ONLY in classes (`navbar` vs `navbar black`) become one component with one
+    // variant per look — the model ycode has for exactly this. Different links or
+    // structure still keep a group apart (reported below as near-misses).
+    if (variantsEnabled) {
+      const families = new Map<string, string[]>();
+      for (const key of keys) {
+        const loose = looseSignature(groups.get(key)![0].layer);
+        families.set(loose, [...(families.get(loose) ?? []), key]);
+      }
+      for (const familyKeys of families.values()) {
+        if (familyKeys.length < 2) continue;
+        const members = familyKeys.map((k) => groups.get(k)!).sort((a, b) => b.length - a.length);
+        if (new Set(members.flat().map((c) => c.page)).size < 2) continue;
+        const primary = members[0];
+        if (!members.slice(1).every((m) => classesOnlyDiff(primary[0].layer, m[0].layer))) continue;
+
+        const name = componentNameFor(primary[0], usedNames, regionIndex++);
+        const variants: ComponentVariant[] = members.map((m, i) => ({
+          id: generateId('cmpvar'),
+          name: i === 0 ? 'Default' : variantName(primary[0].layer, m[0].layer, opts.classesOf, i + 1),
+          layers: cleanLayersForComponentCreation([cloneDeep(m[0].layer)]),
+        }));
+        const component = await mat.createComponent(name, variants[0].layers, undefined, variants);
+        for (const k of familyKeys) consumed.add(k);
+        if (!component) {
+          warn.add('component_skipped', `could not create the component for ${name}`);
+          continue;
+        }
+        components += 1;
+        members.forEach((m, i) => instantiate(m, component.id, variants[i].id));
+      }
+    }
+
     // Deterministic order: by signature.
-    for (const key of [...groups.keys()].sort()) {
+    for (const key of keys) {
+      if (consumed.has(key)) continue;
       const group = groups.get(key)!;
       if (new Set(group.map((c) => c.page)).size < 2) continue;
 
@@ -281,16 +378,7 @@ export async function extractCrossPageComponents(
         continue;
       }
       components += 1;
-
-      for (const occurrence of group) {
-        const body = bodyByPage.get(occurrence.page);
-        if (!body) continue;
-        const instance: Layer = { id: occurrence.layer.id, name: 'div', classes: '', componentId: component.id, children: [] };
-        if (replaceById(body, occurrence.layer.id, instance)) {
-          instances += 1;
-          merged.add(occurrence.layer);
-        }
-      }
+      instantiate(group, component.id);
     }
   };
 
@@ -335,4 +423,136 @@ export async function extractCrossPageComponents(
   }
 
   return { components, instances };
+}
+
+// ─── Repeated siblings with media upstream does not compare ──────────────────
+
+/** Media kinds upstream's `componentizeLayers` neither fingerprints nor turns into variables. */
+type MediaKind = 'video' | 'audio' | 'icon';
+const MEDIA_KINDS: MediaKind[] = ['video', 'audio', 'icon'];
+/** Prefix of the stand-in asset id a media layer carries while upstream's pass runs. */
+const MEDIA_TOKEN = 'wfmedia:';
+
+interface StashedMedia {
+  kind: MediaKind;
+  /** The layer's own `variables[kind]` (the template keeps it, plus the variable id). */
+  variable: NonNullable<Layer['variables']>[MediaKind];
+  /** The component-variable value of this media (`VideoSettingsValue` & co.). */
+  value: ComponentVariableValue;
+}
+
+type MarkerImage = { src?: { type?: string; id?: string; data?: { asset_id?: unknown } } };
+
+function tokenOf(image: unknown): string | null {
+  const id = (image as MarkerImage | undefined)?.src?.data?.asset_id;
+  return typeof id === 'string' && id.startsWith(MEDIA_TOKEN) ? id : null;
+}
+
+/**
+ * Upstream's `componentizeLayers` groups repeated siblings by shape and turns
+ * the text, image and link leaves that differ into component variables, but it
+ * never looks at a video, audio or icon source: two tiles of `/artist` with
+ * different background videos became one component that plays the first video
+ * in both. This runs upstream's pass with every such media layer standing in as
+ * an image layer (an image upstream *does* compare, with a stand-in asset id
+ * derived from the media and the video's poster, autoplay and loop), then turns
+ * the stand-ins back: the component template's layer gets its media with the
+ * variable id, the variable becomes a `video` / `audio` / `icon` variable whose
+ * value ycode's `applyComponentOverrides` applies, and each instance's image
+ * override becomes the matching media override. Identical media stays plain
+ * template content, exactly as upstream treats identical images.
+ */
+export async function componentizeKeepingMedia(
+  layers: Layer[],
+  mat: Pick<ImportMaterializer, 'createComponent'>,
+): Promise<Layer[]> {
+  const stash = new Map<string, StashedMedia>();
+  const tokenByKey = new Map<string, string>();
+
+  const standIn = (layer: Layer): void => {
+    const vars = layer.variables;
+    if (vars && !vars.image) {
+      const kind = MEDIA_KINDS.find((k) => vars[k]?.src);
+      if (kind) {
+        const variable = cloneDeep(vars[kind])!;
+        const value = mediaValueOf(kind, layer);
+        const key = JSON.stringify([kind, value]);
+        let token = tokenByKey.get(key);
+        if (!token) {
+          token = `${MEDIA_TOKEN}${tokenByKey.size}`;
+          tokenByKey.set(key, token);
+          stash.set(token, { kind, variable, value });
+        }
+        const rest = { ...vars };
+        delete rest[kind];
+        layer.variables = {
+          ...rest,
+          image: { src: { type: 'asset', data: { asset_id: token } }, alt: { type: 'dynamic_text', data: { content: '' } } },
+        };
+      }
+    }
+    for (const child of layer.children ?? []) standIn(child);
+  };
+
+  const restore = (layer: Layer): void => {
+    const token = tokenOf(layer.variables?.image);
+    const entry = token ? stash.get(token) : undefined;
+    if (entry && layer.variables) {
+      const variableId = (layer.variables.image as MarkerImage).src?.id;
+      const media = cloneDeep(entry.variable) as { src?: Record<string, unknown> };
+      if (variableId && media.src) media.src = { ...media.src, id: variableId };
+      const rest = { ...layer.variables };
+      delete rest.image;
+      layer.variables = { ...rest, [entry.kind]: media };
+    }
+    const overrides = layer.componentOverrides;
+    if (overrides?.image) {
+      for (const [variableId, value] of Object.entries(overrides.image)) {
+        const t = tokenOf(value);
+        const e = t ? stash.get(t) : undefined;
+        if (!e) continue;
+        overrides[e.kind] = { ...(overrides[e.kind] ?? {}), [variableId]: cloneDeep(e.value) };
+        delete overrides.image[variableId];
+      }
+      if (Object.keys(overrides.image).length === 0) delete overrides.image;
+    }
+    for (const child of layer.children ?? []) restore(child);
+  };
+
+  const restoreVariables = (variables: ComponentVariable[] | undefined): ComponentVariable[] | undefined =>
+    variables?.map((variable) => {
+      const t = variable.type === 'image' ? tokenOf(variable.default_value) : null;
+      const e = t ? stash.get(t) : undefined;
+      if (!e) return variable;
+      const name = variable.name.replace(/^Image\b/, e.kind.charAt(0).toUpperCase() + e.kind.slice(1));
+      return { ...variable, name, type: e.kind, default_value: cloneDeep(e.value) };
+    });
+
+  for (const layer of layers) standIn(layer);
+  if (stash.size === 0) return componentizeLayers(layers, mat as unknown as ImportMaterializer);
+
+  // Upstream's pass only ever calls `createComponent`; the template is restored before it is stored.
+  const wrapped: Pick<ImportMaterializer, 'createComponent'> = {
+    createComponent: (name: string, componentLayers: Layer[], variables?: ComponentVariable[]): Promise<Component | null> => {
+      for (const layer of componentLayers) restore(layer);
+      return mat.createComponent(name, componentLayers, restoreVariables(variables));
+    },
+  };
+  const out = await componentizeLayers(layers, wrapped as unknown as ImportMaterializer);
+  for (const layer of out) restore(layer);
+  return out;
+}
+
+/** What an instance override of the layer's media carries (`src` / `poster` / playback flags for a video). */
+function mediaValueOf(kind: MediaKind, layer: Layer): ComponentVariableValue {
+  const vars = layer.variables!;
+  if (kind === 'video') {
+    const attrs = (layer.attributes ?? {}) as Record<string, unknown>;
+    const flags: Record<string, boolean> = {};
+    for (const flag of ['autoplay', 'loop', 'muted', 'controls']) {
+      if (typeof attrs[flag] === 'boolean') flags[flag] = attrs[flag] as boolean;
+    }
+    return cloneDeep({ src: vars.video!.src, ...(vars.video!.poster ? { poster: vars.video!.poster } : {}), ...flags }) as ComponentVariableValue;
+  }
+  return cloneDeep({ src: vars[kind]!.src }) as ComponentVariableValue;
 }

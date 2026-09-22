@@ -24,8 +24,9 @@
 import { MULTI_ASSET_COLLECTION_ID } from '@/lib/collection-field-utils';
 import type { CollectionFieldType } from '@/types';
 import type { WfCmsResult, WfCollectionInfo, WfCollectionInfoField } from './cms';
-import type { WfBinding, WfNode, WfPage } from './types';
+import type { WfBinding, WfCollectionBinding, WfListFilter, WfNode, WfPage, WfVisibilityPlan } from './types';
 import type { Warnings } from './warnings';
+import { planConditionalVisibility } from './widgets-extra';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -35,6 +36,61 @@ export interface BindingDeps {
   /** collection id -> its dynamic page (links to items need it). */
   dynamicPageByCollection: Map<string, { pageId: string; folderId: string; slug: string }>;
   warn: Warnings;
+  /**
+   * Optional evidence from the published site (`site-cms.ts`): decides a list's
+   * collection and a slot's field deterministically where a live value matches
+   * exactly one field. Every hit is bound with confidence 1 and emits no
+   * `collection_guess` / `binding_guess`; the heuristics fill what is left.
+   */
+  oracle?: BindingOracle;
+}
+
+export interface BindingOracleSlotHit {
+  field: WfCollectionInfoField;
+  kind: WfBinding['kind'];
+  /** Date preset override (`part-year`, `date-eu-dot`). */
+  format?: string;
+  reason: string;
+}
+
+/** What the live site proves about a list's settings (`site-cms.ts`, `finaliseMerge`). */
+export interface BindingOracleListHit {
+  /** Every crawled page shows this many items while the collection has more. */
+  limit?: number;
+  /**
+   * With `limit`: every shown item is a known row and no single field selects
+   * exactly those rows — a heuristic filter would contradict the live page.
+   */
+  exact?: boolean;
+  /** The shown items are exactly the rows this condition selects (replaces the heuristic filter). */
+  filter?: { field: WfCollectionInfoField; operator: 'is' | 'is_after' | 'is_before'; value: 'true' | '$today' };
+  /** Leading items to skip: the list shows what an earlier list of the page leaves out (in `sort`). */
+  offset?: number;
+  /** The sort the list shares with the other list of such a split. */
+  sort?: { field: WfCollectionInfoField; order: 'asc' | 'desc' };
+  /**
+   * A list on a collection page: whether the live pages leave their own item
+   * out (`follows`: they show the items after it in a fixed order).
+   */
+  current?: { mode: 'excluded' | 'shown'; follows?: boolean; reason: string };
+  reason: string;
+}
+
+export interface BindingOracle {
+  /** The collection a top-level list shows, when the live items identify one. */
+  collection?(ctx: { page: WfPage; list: WfNode }): CollectionChoice | null;
+  /** Limit or filter of a top-level list, when the live item counts prove one. */
+  list?(ctx: { page: WfPage; list: WfNode }): BindingOracleListHit | null;
+  /**
+   * Why the low-confidence fallback (largest collection) must not bind this
+   * list: the live site showed the list, and its items identify no collection.
+   * Null when the fallback may be used.
+   */
+  vetoFallback?(ctx: { page: WfPage; list: WfNode }): string | null;
+  /** The field a slot shows, when its live values match exactly one field of `collection`. */
+  slot(node: WfNode, ctx: { page: WfPage; collection: WfCollectionInfo; source: 'collection' | 'page'; itemNode?: WfNode }): BindingOracleSlotHit | null;
+  /** Number of slots decided so far (reporting). */
+  readonly hits: number;
 }
 
 export interface CollectionChoice {
@@ -298,6 +354,9 @@ interface SlotScope {
   index: PageIndex;
   warn: Warnings;
   label: string;
+  oracle?: BindingOracle;
+  /** The item template node (source `collection`), for the oracle. */
+  itemNode?: WfNode;
 }
 
 function makeBinding(scope: SlotScope, field: WfCollectionInfoField, kind: WfBinding['kind'], confidence: number, reason: string): WfBinding {
@@ -353,10 +412,28 @@ function bindSlots(root: WfNode | WfNode[], scope: SlotScope): void {
     else nodes.push(r, ...descendants(r, isNestedList, true));
   }
   const c = scope.collection;
+  let nameBound = false;
+
+  // 0. Live-site evidence: a slot whose rendered values match exactly one field
+  //    is bound to that field outright (no guess, no warning).
+  if (scope.oracle) {
+    for (const n of nodes) {
+      if (n.wf.binding || n.wf.role === 'dyn-list') continue;
+      if (!(n.wf.bindEmpty || n.wf.boundBackground)) continue;
+      const hit = scope.oracle.slot(n, { page: scope.page, collection: c, source: scope.source, itemNode: scope.itemNode });
+      if (!hit) continue;
+      const binding = makeBinding(scope, hit.field, hit.kind, 1, hit.reason);
+      if (hit.format) binding.format = hit.format;
+      n.wf.binding = binding;
+      scope.used.add(hit.field.id);
+      if (hit.field.key === 'name') nameBound = true;
+    }
+  }
 
   // 1. Images and bound backgrounds -> main image field.
   const image = singleImageField(c);
   for (const n of nodes) {
+    if (n.wf.binding) continue;
     if (n.kind === 'image' && n.wf.bindEmpty) {
       if (image) bind(scope, n, image, 'image', 0.8, 'first single image field');
       else unbound(scope, n, 'collection has no image field');
@@ -368,9 +445,8 @@ function bindSlots(root: WfNode | WfNode[], scope: SlotScope): void {
 
   // 2. Headings -> Name (first only).
   const name = c.fields.find((f) => f.key === 'name');
-  let nameBound = false;
   for (const n of nodes) {
-    if (n.kind !== 'heading' || !n.wf.bindEmpty) continue;
+    if (n.kind !== 'heading' || !n.wf.bindEmpty || n.wf.binding) continue;
     if (name && !nameBound) {
       bind(scope, n, name, 'text', 0.85, 'heading -> Name');
       nameBound = true;
@@ -382,7 +458,7 @@ function bindSlots(root: WfNode | WfNode[], scope: SlotScope): void {
   // 3. Rich text -> first rich_text field.
   const rich = customFields(c).find((f) => f.type === 'rich_text');
   for (const n of nodes) {
-    if (n.wf.role !== 'rich-text' || !n.wf.bindEmpty) continue;
+    if (n.wf.role !== 'rich-text' || !n.wf.bindEmpty || n.wf.binding) continue;
     if (rich && !scope.used.has(rich.id)) bind(scope, n, rich, 'richText', 0.8, 'rich text slot -> rich-text field');
     else if (rich) bind(scope, n, rich, 'richText', 0.6, 'rich text slot -> rich-text field (already used)');
     else unbound(scope, n, 'collection has no rich-text field');
@@ -399,6 +475,14 @@ function bindSlots(root: WfNode | WfNode[], scope: SlotScope): void {
     const slots = descendants(nestedItem);
     const imageOnly = slots.length > 0 && slots.every((x) => x.kind === 'image' || (x.kind === 'box' && !x.wf.bindEmpty && !x.wf.role));
     if (scope.source === 'page' && !(multi && imageOnly)) continue;
+    // A template without a slot (no bound image, background or rich text) is a
+    // multi-reference Webflow renders as empty items: it stays unbound, so the
+    // page shows nothing there, exactly like the original. A gallery guessed
+    // onto it would invent content the export never had.
+    if (!slots.some((x) => x.wf.bindEmpty || x.wf.boundBackground || x.wf.role === 'rich-text')) {
+      unbound(scope, nestedItem, 'nested list without a slot in its template');
+      continue;
+    }
     if (!multi) {
       unbound(scope, nestedItem, 'nested list but the collection has no multi-image field');
       continue;
@@ -452,17 +536,47 @@ function bindSlots(root: WfNode | WfNode[], scope: SlotScope): void {
     if (chosen.field.key === 'name') nameBound = true;
   }
 
-  // 6. Links to the item's page.
+  // 6. Links to the item's page. Deterministic: Webflow exports an item's
+  //    link block with `href="#"`, and the only page it can lead to is the
+  //    collection's own page — no guess to report.
   if (scope.source === 'collection' && scope.dynamicPage) {
     for (const n of nodes) {
       if (n.kind !== 'link' || n.wf.binding) continue;
       const href = (n.link?.href ?? '').trim();
       if (href !== '' && href !== '#') continue;
       const slug = c.fields.find((f) => f.key === 'slug');
-      n.wf.binding = { kind: 'link', fieldId: slug?.id ?? c.slugFieldId, fieldType: 'text', fieldName: slug?.name ?? 'Slug', source: 'collection', collectionNodeId: scope.collectionNodeId, link: { pageId: scope.dynamicPage.pageId, collectionItemId: 'current-collection' }, confidence: 0.8, reason: 'item link -> current item page' };
-      scope.warn.add('binding_guess', `${scope.label}: ${describe(n)} -> link to the current ${c.name} item`, { page: scope.page.name, node: n.wf.id });
+      n.wf.binding = { kind: 'link', fieldId: slug?.id ?? c.slugFieldId, fieldType: 'text', fieldName: slug?.name ?? 'Slug', source: 'collection', collectionNodeId: scope.collectionNodeId, link: { pageId: scope.dynamicPage.pageId, collectionItemId: 'current-collection' }, confidence: 1, reason: 'item link -> current item page' };
     }
   }
+
+  // 7. Conditional visibility (widgets-extra.ts): now that the slots are bound,
+  //    a `.w-condition-invisible` element can get its rule back.
+  for (const n of nodes) {
+    if (n.wf.conditionInvisible && !n.wf.visibilityChecked) planConditionalVisibility(n, c, scope.source, scope.warn, { page: scope.page.name, label: scope.label });
+  }
+
+  // 8. Empty values collapse. Webflow's `components.css` hides a bound element
+  //    whose value is empty for the item (`.w-dyn-bind-empty { display: none
+  //    !important }`), margins included; ycode's counterpart is a visibility
+  //    rule "field is present" on the bound field.
+  for (const n of nodes) planEmptyValueVisibility(n, c, scope.source);
+}
+
+/** Binding kinds whose element Webflow hides while the value is empty (`w-dyn-bind-empty`). */
+const HIDES_WHEN_EMPTY = new Set<WfBinding['kind']>(['text', 'richText', 'image', 'background']);
+
+/**
+ * A slot that carried `w-dyn-bind-empty` and is now bound to a field gets the
+ * visibility rule Webflow applies at runtime: hidden while the field is empty.
+ * A rule reconstructed from `.w-condition-invisible` wins; pseudo fields of a
+ * multi-image list (`__asset_url`) always have a value.
+ */
+export function planEmptyValueVisibility(node: WfNode, collection: WfCollectionInfo, source: 'collection' | 'page'): WfVisibilityPlan | null {
+  const b = node.wf.binding;
+  if (!node.wf.bindEmpty || !b || node.wf.visibility || !HIDES_WHEN_EMPTY.has(b.kind) || b.fieldId.startsWith('__')) return null;
+  const plan: WfVisibilityPlan = { fieldId: b.fieldId, fieldType: b.fieldType, operator: 'is_present', source, reason: `w-dyn-bind-empty: hidden while ${collection.name}.${b.fieldName} is empty` };
+  node.wf.visibility = plan;
+  return plan;
 }
 
 // ─── Lists ────────────────────────────────────────────────────────────────────
@@ -488,7 +602,7 @@ function precedingHeading(index: PageIndex, list: WfNode): string | undefined {
   return undefined;
 }
 
-function listSettings(entry: ListEntry, c: WfCollectionInfo, used: Set<string>): { sortBy?: string; sortOrder?: 'asc' | 'desc'; limit?: number; filters?: { fieldId: string; fieldType: 'boolean'; value: 'true' }[] } {
+function listSettings(entry: ListEntry, c: WfCollectionInfo, used: Set<string>): Omit<WfCollectionBinding, 'collectionId' | 'confidence' | 'reason'> {
   const custom = customFields(c);
   const context = [...entry.wrapperClasses, entry.heading ?? ''].join(' ');
   const out: ReturnType<typeof listSettings> = {};
@@ -517,10 +631,12 @@ function listSettings(entry: ListEntry, c: WfCollectionInfo, used: Set<string>):
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 export function bindPages(deps: BindingDeps): void {
-  const { cms, pages, dynamicPageByCollection, warn } = deps;
+  const { cms, pages, dynamicPageByCollection, warn, oracle } = deps;
   if (cms.collections.length === 0) return;
   const indexes = pages.map(indexPage);
   const detailCollectionBySuffix = new Map<string, WfCollectionInfo>();
+  /** Collection page name -> the collection it shows. */
+  const pageCollection = new Map<string, string>();
 
   // Detail pages.
   for (const index of indexes) {
@@ -533,8 +649,9 @@ export function bindPages(deps: BindingDeps): void {
       continue;
     }
     detailCollectionBySuffix.set(suffix.toLowerCase(), choice.collection);
+    pageCollection.set(page.name, choice.collection.id);
     warn.add('collection_guess', `bound page ${page.name} to collection ${choice.collection.name} (confidence ${choice.confidence.toFixed(2)}: ${choice.reason})`, { page: page.name });
-    const scope: SlotScope = { source: 'page', collection: choice.collection, used: new Set(), page, index, warn, label: `page ${page.name}` };
+    const scope: SlotScope = { source: 'page', collection: choice.collection, used: new Set(), page, index, warn, label: `page ${page.name}`, oracle };
     bindSlots(page.roots, scope);
   }
 
@@ -550,7 +667,7 @@ export function bindPages(deps: BindingDeps): void {
       const wrapperClasses = [...list.wf.siteClasses, ...(parent?.wf.siteClasses ?? [])];
       const heading = precedingHeading(index, list);
       const entry: ListEntry = { index, list, item, heading, wrapperClasses, signature: templateSignature(item), choice: null };
-      entry.choice = chooseCollection('list', { page: index.page, list, heading, wrapperClasses }, cms);
+      entry.choice = oracle?.collection?.({ page: index.page, list }) ?? chooseCollection('list', { page: index.page, list, heading, wrapperClasses }, cms);
       entries.push(entry);
     }
   }
@@ -561,6 +678,15 @@ export function bindPages(deps: BindingDeps): void {
     const twin = confident.find((c) => c.signature === e.signature && c !== e);
     if (twin && twin.choice) e.choice = { collection: twin.choice.collection, confidence: 0.9, reason: `same item template as the ${twin.index.page.name} list bound to ${twin.choice.collection.name}` };
   }
+  // Live-site evidence against the fallback: a list the site rendered without
+  // identifiable items stays unbound rather than showing the largest collection.
+  for (const e of entries) {
+    if (!e.choice || e.choice.confidence >= 0.6 || !oracle?.vetoFallback) continue;
+    const why = oracle.vetoFallback({ page: e.index.page, list: e.list });
+    if (!why) continue;
+    warn.add('collection_guess', `list ${describe(e.list)} on ${e.index.page.name} left unbound: ${why}; not bound by "${e.choice.reason}" — choose its collection in the builder`, { page: e.index.page.name, node: e.list.wf.id });
+    e.choice = null;
+  }
   for (const e of entries) {
     const page = e.index.page;
     if (!e.choice) continue;
@@ -569,9 +695,55 @@ export function bindPages(deps: BindingDeps): void {
     warn.add('collection_guess', `bound ${label} to collection ${c.name} (confidence ${e.choice.confidence.toFixed(2)}: ${e.choice.reason})`, { page: page.name, node: e.list.wf.id });
     const used = new Set<string>();
     const settings = listSettings(e, c, used);
+    const live = oracle?.list?.({ page, list: e.list });
+    if (live?.filter) {
+      // The live items are exactly one condition's rows: that condition, no
+      // limit. A date filter sorts by its field (soonest first for upcoming,
+      // newest first for past) unless an explicit order field sorts the list.
+      const { field, operator, value } = live.filter;
+      const filter: WfListFilter | null =
+        field.type === 'boolean' && operator === 'is'
+          ? { fieldId: field.id, fieldType: 'boolean', operator, value: 'true' }
+          : (field.type === 'date' || field.type === 'date_only') && operator !== 'is'
+            ? { fieldId: field.id, fieldType: field.type, operator, value: '$today' }
+            : null;
+      if (filter) settings.filters = [filter];
+      delete settings.limit;
+      if (operator !== 'is' && (!settings.sortBy || settings.sortBy === 'manual' || settings.sortBy === field.id)) {
+        settings.sortBy = field.id;
+        settings.sortOrder = operator === 'is_after' ? 'asc' : 'desc';
+      }
+      warn.add('collection_guess', `${label}: filter ${field.name} ${operator} ${value} (${live.reason})`, { page: page.name, node: e.list.wf.id });
+    } else if (live?.offset !== undefined) {
+      settings.offset = live.offset;
+      delete settings.limit;
+      if (settings.filters) delete settings.filters;
+      warn.add('collection_guess', `${label}: offset ${live.offset} (${live.reason})`, { page: page.name, node: e.list.wf.id });
+    } else if (live?.limit !== undefined) {
+      settings.limit = live.limit;
+      if (live.exact && settings.filters) delete settings.filters;
+      warn.add('collection_guess', `${label}: limit ${live.limit} (${live.reason})`, { page: page.name, node: e.list.wf.id });
+    }
+    if (live?.sort && !live.filter) {
+      // Both lists of a split must share the sort that splits them.
+      settings.sortBy = live.sort.field.id;
+      settings.sortOrder = live.sort.order;
+    }
+    if (pageCollection.get(page.name) === c.id) {
+      // A list of the page's own collection on its collection page ("more works"):
+      // Webflow's "exclude current item" setting is not in the export, only the
+      // live pages show it.
+      if (live?.current?.mode === 'excluded') {
+        settings.excludeCurrentItem = true;
+        warn.add('collection_guess', `${label}: leaves out the current ${c.name} item (${live.current.reason})`, { page: page.name, node: e.list.wf.id });
+        if (live.current.follows) warn.add('collection_guess', `${label}: the live list shows the items that follow the current one; ycode has no such setting, the list shows the first ${settings.limit ?? 'n'} other items of its sort`, { page: page.name, node: e.list.wf.id });
+      } else if (live?.current?.mode !== 'shown') {
+        warn.add('collection_guess', `${label}: lists the page's own collection, and the export does not say whether the list leaves out the current item — it shows it too (set a "not the current item" filter in the builder if the live list does not)`, { page: page.name, node: e.list.wf.id });
+      }
+    }
     e.item.wf.collection = { collectionId: c.id, ...settings, confidence: e.choice.confidence, reason: e.choice.reason };
     const dynamicPage = dynamicPageByCollection.get(c.id);
-    const scope: SlotScope = { source: 'collection', collection: c, collectionNodeId: e.item.wf.id, used, dynamicPage: dynamicPage ? { pageId: dynamicPage.pageId } : undefined, page, index: e.index, warn, label };
+    const scope: SlotScope = { source: 'collection', collection: c, collectionNodeId: e.item.wf.id, used, dynamicPage: dynamicPage ? { pageId: dynamicPage.pageId } : undefined, page, index: e.index, warn, label, oracle, itemNode: e.item };
     bindSlots(e.item, scope);
   }
 

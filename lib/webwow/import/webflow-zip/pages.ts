@@ -363,11 +363,13 @@ export interface SiteSettingsInput {
   webClipAssetId?: string;
   /** Residual CSS + residual `@font-face` rules (already namespaced + neutralised). */
   residualCss: string;
+  /** IANA zone the CMS dates render in (live-site evidence or Webflow's year-only dates); applied over the default only. */
+  timezone?: string;
 }
 
-/** Merge the import's residual CSS into `custom_code_head` and set the site basics. */
-export async function saveSiteSettings(input: SiteSettingsInput): Promise<void> {
-  const current = await getSettingsByKeys(['custom_code_head', 'site_name']);
+/** Merge the import's residual CSS into `custom_code_head` and set the site basics. Reports whether the time zone was applied. */
+export async function saveSiteSettings(input: SiteSettingsInput): Promise<{ timezoneSet: boolean }> {
+  const current = await getSettingsByKeys(['custom_code_head', 'site_name', 'timezone']);
   const previous = typeof current.custom_code_head === 'string' ? current.custom_code_head : '';
   const stripped = previous.replace(new RegExp(`<style id="${RESIDUAL_STYLE_ID}"[\\s\\S]*?</style>`, 'gi'), '').trim();
 
@@ -384,5 +386,11 @@ export async function saveSiteSettings(input: SiteSettingsInput): Promise<void> 
   const siteName = typeof current.site_name === 'string' ? current.site_name.trim() : '';
   if (input.siteName && PLACEHOLDER_SITE_NAMES.has(siteName.toLowerCase())) updates.site_name = input.siteName;
 
+  // Dates render in `settings.timezone`; a zone the user chose stays, the
+  // default (UTC / unset) gives way to what the import found.
+  const timezone = typeof current.timezone === 'string' ? current.timezone.trim() : '';
+  if (input.timezone && (!timezone || timezone === 'UTC') && input.timezone !== timezone) updates.timezone = input.timezone;
+
   await setSettings(updates);
+  return { timezoneSet: typeof updates.timezone === 'string' };
 }

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { ImportConverter } from '@/lib/import/convert';
 import { MULTI_ASSET_COLLECTION_ID } from '@/lib/collection-field-utils';
 
-import { applyNodeLayerPostProcessing, convertPage, dropShadowedClasses, pinBackgroundBindingClasses, resolveShadowedChipClasses } from './convert-bridge';
+import { applyNodeLayerPostProcessing, convertPage, dropShadowedClasses, liftSelfBoundBackgrounds, pinBackgroundBindingClasses, resolveShadowedChipClasses } from './convert-bridge';
 import { mergeClassStack, resolveLayerClasses } from '@/lib/layer-style-resolve';
 
 import { parsePage, type HtmlContext } from './html';
@@ -29,6 +29,8 @@ function emptyStyles(): WfStyleModel {
     fontFaces: [],
     fontFamilies: [],
     boundBackgroundKeys: new Set(),
+    states: new Map(),
+    resting: new Map(),
   };
 }
 
@@ -260,7 +262,7 @@ test('a bound Werke item produces the documented collection / field / link shape
     collectionId: 'col-werke',
     sortBy: 'field-order',
     sortOrder: 'asc',
-    filters: [{ fieldId: 'field-feature', fieldType: 'boolean', value: 'true' }],
+    filters: [{ fieldId: 'field-feature', fieldType: 'boolean', value: 'true' }, { fieldId: 'field-datum', fieldType: 'date', operator: 'is_after', value: '$today' }],
     confidence: 0.9,
     reason: 'test',
   };
@@ -287,7 +289,10 @@ test('a bound Werke item produces the documented collection / field / link shape
     sort_by: 'field-order',
     sort_order: 'asc',
     filters: {
-      groups: [{ id: 'vc-g-1', conditions: [{ id: 'vc-1', source: 'collection_field', fieldId: 'field-feature', fieldType: 'boolean', operator: 'is', value: 'true' }] }],
+      groups: [{ id: 'vc-g-1', conditions: [
+        { id: 'vc-1', source: 'collection_field', fieldId: 'field-feature', fieldType: 'boolean', operator: 'is', value: 'true' },
+        { id: 'vc-2', source: 'collection_field', fieldId: 'field-datum', fieldType: 'date', operator: 'is_after', value: '$today' },
+      ] }],
     },
   });
 
@@ -317,6 +322,30 @@ test('a bound Werke item produces the documented collection / field / link shape
         },
       }],
     }],
+  });
+});
+
+test('a list that leaves out the current page item gets a self condition as a group of its own (ANDed with the field filters)', async () => {
+  const markup = doc(`
+    <div class="collection-list-wrapper w-dyn-list">
+      <div class="collection-list w-dyn-items"><div class="collection-item w-dyn-item"><div class="w-dyn-bind-empty"></div></div></div>
+    </div>`);
+  const current = { id: 'vc-g-current', conditions: [{ id: 'vc-current', source: 'self', operator: 'is_not_one_of', value: '[]', includesCurrentPageItem: true }] };
+
+  const only = parsePage(markup, ctxFor(fakeZip([])));
+  const onlyItem = nodeOf(only, (n) => n.wf.role === 'dyn-item');
+  onlyItem.wf.collection = { collectionId: 'col-werke', sortBy: 'manual', limit: 4, excludeCurrentItem: true, confidence: 1, reason: 'test' };
+  const a = await convertPage(only, converterFor());
+  applyNodeLayerPostProcessing(only, a.layerByNode, noAssets);
+  assert.deepEqual(a.layerByNode.get(onlyItem.wf.id)!.variables?.collection, { id: 'col-werke', sort_by: 'manual', limit: 4, filters: { groups: [current] } });
+
+  const both = parsePage(markup, ctxFor(fakeZip([])));
+  const bothItem = nodeOf(both, (n) => n.wf.role === 'dyn-item');
+  bothItem.wf.collection = { collectionId: 'col-werke', sortBy: 'manual', filters: [{ fieldId: 'field-feature', fieldType: 'boolean', value: 'true' }], excludeCurrentItem: true, confidence: 1, reason: 'test' };
+  const b = await convertPage(both, converterFor());
+  applyNodeLayerPostProcessing(both, b.layerByNode, noAssets);
+  assert.deepEqual((b.layerByNode.get(bothItem.wf.id)!.variables?.collection as { filters: unknown }).filters, {
+    groups: [{ id: 'vc-g-1', conditions: [{ id: 'vc-1', source: 'collection_field', fieldId: 'field-feature', fieldType: 'boolean', operator: 'is', value: 'true' }] }, current],
   });
 });
 
@@ -505,4 +534,44 @@ test('a w-node grid id survives when the residual stylesheet still selects it', 
   assert.equal(layers.get('p#1')!.settings?.id, 'w-node-abc');
   assert.equal(layers.get('p#2')!.settings?.id, undefined);
   assert.equal(layers.get('p#3')!.settings?.id, 'contact');
+});
+
+test('a collection layer whose own background reads its own item: the item element moves into a child, the collection layer becomes display:contents', () => {
+  const bg = { type: 'field', data: { field_id: 'werk', field_type: 'image', relationships: [], source: 'collection', collection_layer_id: 'lyr-item' } };
+  const inner: Layer = { id: 'lyr-inner', name: 'div', classes: 'flex' };
+  const item: Layer = {
+    id: 'lyr-item',
+    name: 'div',
+    customName: 'Collection item',
+    classes: 'h-[40vw] bg-[image:var(--bg-img)] wf-feature',
+    styleIds: ['sty-section', 'sty-feature'],
+    styleOverridesByStyle: { 'sty-feature': { classes: 'h-[40vw] bg-[image:var(--bg-img)]' } },
+    attributes: { role: 'listitem' },
+    settings: { tag: 'div' },
+    variables: { collection: { id: 'col', sort_by: 'manual', limit: 1 }, backgroundImage: { src: bg } } as Layer['variables'],
+    children: [inner],
+  };
+  // A child binding (the `/work` tiles) and a list without a background are left alone.
+  const tile: Layer = { id: 'lyr-tile', name: 'div', classes: '', variables: { backgroundImage: { src: { ...bg, data: { ...bg.data, collection_layer_id: 'lyr-list' } } } } as Layer['variables'] };
+  const list: Layer = { id: 'lyr-list', name: 'div', classes: '', variables: { collection: { id: 'col', sort_by: 'manual' } } as Layer['variables'], children: [tile] };
+  const layerByNode = new Map<string, Layer>([['n-item', item], ['n-inner', inner], ['n-list', list]]);
+  assert.equal(liftSelfBoundBackgrounds([item, list], layerByNode), 1);
+
+  assert.equal(item.id, 'lyr-item', 'the collection layer keeps its id (the bindings read its item)');
+  assert.equal(item.classes, 'contents');
+  assert.equal(item.styleIds, undefined);
+  assert.equal(item.attributes, undefined);
+  assert.deepEqual(Object.keys(item.variables ?? {}), ['collection']);
+  assert.equal(item.children?.length, 1);
+  const child = item.children![0];
+  assert.notEqual(child.id, 'lyr-item');
+  assert.deepEqual(child.styleIds, ['sty-section', 'sty-feature']);
+  assert.equal(child.styleOverridesByStyle?.['sty-feature']?.classes, 'h-[40vw] bg-[image:var(--bg-img)]');
+  assert.deepEqual(child.attributes, { role: 'listitem' });
+  assert.equal(child.variables?.collection, undefined);
+  assert.equal((child.variables?.backgroundImage?.src as { data: { collection_layer_id: string } }).data.collection_layer_id, 'lyr-item');
+  assert.deepEqual(child.children, [inner]);
+  assert.equal(layerByNode.get('n-item'), child, 'interactions target the element with the box');
+  assert.equal(list.children?.[0], tile);
+  assert.equal(list.classes, '');
 });

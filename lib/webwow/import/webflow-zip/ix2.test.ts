@@ -213,13 +213,19 @@ test('SCROLL_INTO_VIEW + OUT pair -> scroll-into-view with reverse toggle action
   const int = result.items[0].interaction;
   assert.equal(int.trigger, 'scroll-into-view');
   assert.deepEqual(int.timeline, { breakpoints: ['desktop', 'tablet', 'mobile'], repeat: 0, yoyo: false, scrollStart: 'top bottom', toggleActions: 'play reverse play reverse' });
-  assert.equal(int.tweens.length, 2);
-  const [grow, move] = int.tweens;
+  assert.equal(int.tweens.length, 3);
+  const [fade, grow, move] = int.tweens;
   assert.equal(grow.layer_id, `lyr-${card.wf.id}`);
-  assert.deepEqual({ from: grow.from, to: grow.to, ease: grow.ease, position: grow.position, duration: grow.duration }, {
-    from: { autoAlpha: '0', scale: '0' }, to: { autoAlpha: '100', scale: '1' }, ease: 'power3.out', position: 0, duration: 1,
+  // The hidden start state stays a position-0 tween painted by CSS (no flicker); the scale
+  // becomes its own tween 1 ms later with `on-trigger`, so neither the page CSS nor GSAP's
+  // immediate render paints `scale(0)` before ScrollTrigger measures the tile's real box.
+  assert.deepEqual({ from: fade.from, to: fade.to, ease: fade.ease, position: fade.position, duration: fade.duration, apply: fade.apply_styles }, {
+    from: { autoAlpha: '0' }, to: { autoAlpha: '100' }, ease: 'power3.out', position: 0, duration: 1, apply: { autoAlpha: 'on-load' },
   });
-  assert.deepEqual(grow.apply_styles, { scale: 'on-load', autoAlpha: 'on-load' });
+  assert.deepEqual({ from: grow.from, to: grow.to, ease: grow.ease, position: grow.position, duration: grow.duration, apply: grow.apply_styles }, {
+    from: { scale: '0' }, to: { scale: '1' }, ease: 'power3.out', position: 0.001, duration: 1, apply: { scale: 'on-trigger' },
+  });
+  assert.deepEqual(move.apply_styles, { y: 'on-load' }, 'a tween that does not hide the element keeps its geometry on-load');
   assert.deepEqual({ from: move.from, to: move.to, position: move.position, duration: move.duration, ease: move.ease }, { from: { y: '0px' }, to: { y: '10px' }, position: 1.2, duration: 0.3, ease: 'power1.out' });
   assert.equal(warn.list.length, 0);
 });
@@ -381,11 +387,13 @@ test('sample export: 2 definitions, hover and scroll tween shapes', { skip: !exi
 
   const scroll = scrolls[0].interaction;
   assert.deepEqual(scroll.timeline, { breakpoints: ['desktop', 'tablet', 'mobile'], repeat: 0, yoyo: false, scrollStart: 'top bottom', toggleActions: 'play reverse play reverse' });
-  assert.equal(scroll.tweens.length, 1);
-  const s = scroll.tweens[0];
-  assert.deepEqual({ from: s.from, to: s.to, ease: s.ease, duration: s.duration, position: s.position }, { from: { autoAlpha: '0', scale: '0' }, to: { autoAlpha: '100', scale: '1' }, ease: 'power3.out', duration: 1, position: 0 });
-  assert.deepEqual(s.apply_styles, { scale: 'on-load', autoAlpha: 'on-load' });
+  assert.equal(scroll.tweens.length, 2, 'hide at 0, grow 1 ms later');
+  const [s, g] = scroll.tweens;
+  assert.deepEqual({ from: s.from, to: s.to, ease: s.ease, duration: s.duration, position: s.position }, { from: { autoAlpha: '0' }, to: { autoAlpha: '100' }, ease: 'power3.out', duration: 1, position: 0 });
+  assert.deepEqual(s.apply_styles, { autoAlpha: 'on-load' });
+  assert.deepEqual({ from: g.from, to: g.to, position: g.position, apply: g.apply_styles }, { from: { scale: '0' }, to: { scale: '1' }, position: 0.001, apply: { scale: 'on-trigger' } });
   assert.equal(s.layer_id, scrolls[0].triggerLayerId);
+  assert.equal(g.layer_id, scrolls[0].triggerLayerId);
   assert.deepEqual(scrolls.map((i) => i.page).sort(), ['detail_werke', 'index', 'index', 'work']);
 
   assert.ok(warn.count('ix2_unsupported_action') >= 6, `STYLE_TEXT_COLOR items: ${warn.count('ix2_unsupported_action')}`);

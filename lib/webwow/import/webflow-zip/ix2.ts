@@ -427,7 +427,49 @@ function scrollStartOf(event: Ix2Event): string {
   return v === 0 ? 'top bottom' : `top bottom-=${v}px`;
 }
 
-const RESTING: Partial<Record<TweenPropertyKey, string>> = {
+/** Tween properties that change the element's box (what ScrollTrigger measures). */
+const GEOMETRY_KEYS = new Set<TweenPropertyKey>(['scale', 'x', 'y', 'rotation', 'skewX', 'skewY', 'width', 'height']);
+
+/** Where a deferred geometry tween starts: just after 0, so the runtime does not render its start state up front. */
+const DEFERRED_GEOMETRY_OFFSET = 0.001;
+
+/**
+ * Keep a scroll-into-view element's box untouched until its trigger fires.
+ *
+ * ycode's runtime measures the trigger with GSAP's ScrollTrigger, which reads
+ * the *transformed* box: a tile parked at `scale(0)` is a point at its centre,
+ * so it "enters the viewport" only once its centre does and leaves again as
+ * soon as the centre is out — the Werke tiles below the fold stayed invisible
+ * at scroll 0 and after scrolling past them. Two things paint that start state
+ * before the measurement: the page CSS for `apply_styles: on-load`
+ * (`generateInitialAnimationCSS`), and GSAP itself, because the runtime builds
+ * the timeline with `fromTo(…, { immediateRender: true })` for a tween at
+ * position 0. So, for a tween that also hides the element (opacity 0 / display
+ * none — what keeps the first paint flicker-free), the geometry moves to its
+ * own tween 1 ms later with `on-trigger`: the CSS keeps only the hiding, the
+ * runtime renders nothing of the geometry up front, and the box it measures is
+ * the tile's real one. When the trigger fires the two tweens play as one.
+ */
+function deferGeometry(t: PendingTween): (PendingTween & { deferred?: boolean })[] {
+  const hiddenAtRest = Number(t.from.autoAlpha ?? 100) === 0 || t.from.display === 'hidden';
+  const keys = Object.keys(t.to) as TweenPropertyKey[];
+  const geometry = keys.filter((k) => GEOMETRY_KEYS.has(k));
+  if (!hiddenAtRest || geometry.length === 0) return [t];
+  if (t.position !== 0 || geometry.length === keys.length) return [{ ...t, deferred: true }];
+  const pick = (values: TweenValues, wanted: TweenPropertyKey[]): TweenValues => {
+    const out: TweenValues = {};
+    for (const k of wanted) if (values[k] !== undefined) out[k] = values[k];
+    return out;
+  };
+  const rest = keys.filter((k) => !GEOMETRY_KEYS.has(k));
+  return [
+    { ...t, from: pick(t.from, rest), to: pick(t.to, rest) },
+    { ...t, position: DEFERRED_GEOMETRY_OFFSET, from: pick(t.from, geometry), to: pick(t.to, geometry), deferred: true },
+  ];
+}
+
+/** ycode's resting value per tween key (also the `from` of a state tween, states.ts). */
+export const RESTING: Partial<Record<TweenPropertyKey, string>> = {
   scale: '1',
   x: '0px',
   y: '0px',
@@ -574,9 +616,12 @@ class Ix2Mapper {
       if (!triggerLayer) continue;
       const pending = trigger === 'while-scrolling' ? this.continuousTweens(list, node, index) : this.sequentialTweens(list, node, index);
       if (pending.length === 0) continue;
-      const tweens: InteractionTween[] = mergeTweens(pending).map((t) => {
+      const prepared: (PendingTween & { deferred?: boolean })[] = mergeTweens(pending).flatMap((t) => (trigger === 'scroll-into-view' && applyMode === 'on-load' ? deferGeometry(t) : [t]));
+      const tweens: InteractionTween[] = prepared.map((t) => {
         const apply: InteractionTween['apply_styles'] = {};
-        for (const key of Object.keys(t.to) as TweenPropertyKey[]) apply[key] = applyMode;
+        for (const key of Object.keys(t.to) as TweenPropertyKey[]) {
+          apply[key] = t.deferred && GEOMETRY_KEYS.has(key) ? 'on-trigger' : applyMode;
+        }
         return {
           id: generateId('twn'),
           layer_id: t.layerId,

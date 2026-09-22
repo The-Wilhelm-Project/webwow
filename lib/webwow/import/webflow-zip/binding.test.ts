@@ -19,10 +19,10 @@ import { Warnings } from './warnings';
 import { buildStyleModel, type WfStyleModel } from './css';
 import { loadSvgIcons, parsePage, type HtmlContext } from './html';
 import type { WfZipBundle, WfZipFile } from './zip';
-import type { WfNode, WfPage } from './types';
+import type { WfBinding, WfNode, WfPage } from './types';
 import type { WfCmsResult, WfCollectionInfo, WfCollectionInfoField, WfCollectionPlan } from './cms';
 import { inferSchema, parseCsvFiles } from './cms';
-import { NAME_SYNONYMS, bindPages, chooseCollection, nameSimilarity, objectIdSeconds, similarity, templateSignature } from './binding';
+import { NAME_SYNONYMS, bindPages, chooseCollection, nameSimilarity, objectIdSeconds, planEmptyValueVisibility, similarity, templateSignature } from './binding';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -75,7 +75,7 @@ function fakeZip(): WfZipBundle {
 }
 
 function stylesWithBoundBg(...keys: string[]): WfStyleModel {
-  const m: WfStyleModel = { classes: new Map(), combos: new Map(), ids: new Map(), tags: new Map(), residual: { rules: [], classNames: new Set(), ids: new Set() }, residualCss: '', fontFaces: [], fontFamilies: [], boundBackgroundKeys: new Set(keys) };
+  const m: WfStyleModel = { classes: new Map(), combos: new Map(), ids: new Map(), tags: new Map(), residual: { rules: [], classNames: new Set(), ids: new Set() }, residualCss: '', fontFaces: [], fontFamilies: [], boundBackgroundKeys: new Set(keys), states: new Map(), resting: new Map() };
   for (const k of keys) if (!k.includes('.')) m.classes.set(k, { ref: { key: `wf:${k}`, name: k, classes: ['bg-cover'] }, boundBackground: true });
   return m;
 }
@@ -208,8 +208,27 @@ test('Werke template: background -> Werk, first text -> Name, thin x3 -> Datum/m
   assert.equal(link.wf.binding?.kind, 'link');
   assert.equal(find(page, (n) => n.wf.siteClasses[0] === 'thin' && !n.wf.bindEmpty)[0].wf.binding, undefined, 'static separator untouched');
   assert.equal(warn.count('collection_guess'), 1);
-  assert.ok(warn.count('binding_guess') >= 6);
+  assert.ok(warn.count('binding_guess') >= 5, 'background, Name, three thins — the item link is deterministic and reports no guess');
+  assert.equal(warn.list.filter((w) => w.code === 'binding_guess' && /link to the current/.test(w.message)).length, 0);
+  assert.equal(link.wf.binding?.confidence, 1);
   assert.equal(warn.count('binding_unbound'), 0);
+});
+
+test('a nested list whose template has no slot stays unbound (no multi-image guess), the sibling with an image slot still binds', () => {
+  const e = exhibitions();
+  const cms = cmsWith(werke(), e);
+  const card = EXHIBITIONS_CARD.replace('<div class="w-dyn-list"><div class="collection-list-2 w-dyn-items"><div class="w-dyn-item">', '<div class="w-dyn-list"><div class="w-dyn-items"><div class="w-dyn-item"></div></div></div><div class="w-dyn-list"><div class="collection-list-2 w-dyn-items"><div class="w-dyn-item">');
+  const page = pageFrom('exhibitions', card);
+  const warn = new Warnings();
+  bindPages({ cms, pages: [page], dynamicPageByCollection: new Map(), warn });
+  const items = find(page, (n) => n.wf.role === 'dyn-item');
+  assert.equal(items.length, 3);
+  const [, slotless, gallery] = items;
+  assert.equal(slotless.children?.length ?? 0, 0);
+  assert.equal(slotless.wf.collection, undefined);
+  assert.equal(gallery.wf.collection?.collectionId, '__multi_asset__');
+  assert.deepEqual(warn.list.filter((w) => w.code === 'binding_unbound').map((w) => w.message), ['list div.collection-list-wrapper-2 on exhibitions: div left unbound (nested list without a slot in its template)']);
+  assert.equal(warn.list.filter((w) => w.code === 'binding_guess' && w.message.includes('nested')).length, 1);
 });
 
 test('Exhibitions template: name/datum/location/description, rich text -> article, nested list -> multi-asset images + __asset_url', () => {
@@ -237,6 +256,33 @@ test('Exhibitions template: name/datum/location/description, rich text -> articl
   const img = find(page, (n) => n.kind === 'image')[0];
   assert.deepEqual({ field: img.wf.binding?.fieldId, type: img.wf.binding?.fieldType, node: img.wf.binding?.collectionNodeId, source: img.wf.binding?.source }, { field: '__asset_url', type: 'image', node: inner.wf.id, source: 'collection' });
   assert.equal(warn.count('binding_unbound'), 0);
+
+  // Every bound `w-dyn-bind-empty` slot collapses while its value is empty, like Webflow's
+  // `.w-dyn-bind-empty { display: none !important }`; the multi-image pseudo field always has a value.
+  const description = find(page, (n) => n.wf.tag === 'p' && n.wf.bindEmpty)[0];
+  assert.deepEqual(description.wf.visibility, { fieldId: field('description').id, fieldType: 'text', operator: 'is_present', source: 'collection', reason: 'w-dyn-bind-empty: hidden while Exhibitions.description is empty' });
+  assert.equal(rich.wf.visibility?.operator, 'is_present');
+  assert.equal(rich.wf.visibility?.fieldId, field('article').id);
+  assert.equal(img.wf.visibility, undefined);
+  for (const n of find(page, (n) => n.wf.bindEmpty && n.wf.binding !== undefined && n.kind !== 'image')) assert.equal(n.wf.visibility?.fieldId, n.wf.binding?.fieldId, `${n.wf.tag}.${n.wf.siteClasses[0] ?? ''}`);
+});
+
+test('planEmptyValueVisibility: bound slots only, a reconstructed condition wins, link bindings and unbound slots are left alone', () => {
+  const e = exhibitions();
+  const field = e.fields.find((f) => f.name === 'description')!;
+  const make = (extra: Partial<WfNode['wf']>, kind: WfNode['kind'] = 'text'): WfNode => ({ kind, tag: 'p', text: '', wf: { id: 'index#1', page: 'index', tag: 'p', classNames: [], siteClasses: [], attrs: {}, bindEmpty: true, ...extra } });
+  const binding = (kind: WfBinding['kind'], fieldId = field.id): WfBinding => ({ kind, fieldId, fieldType: 'text', fieldName: field.name, source: 'collection', confidence: 1, reason: 't' });
+
+  const slot = make({ binding: binding('text') });
+  assert.equal(planEmptyValueVisibility(slot, e, 'page')?.operator, 'is_present');
+  assert.equal(slot.wf.visibility?.source, 'page');
+  assert.equal(planEmptyValueVisibility(make({ binding: binding('text'), bindEmpty: false }), e, 'collection'), null, 'no w-dyn-bind-empty: Webflow never hides it');
+  assert.equal(planEmptyValueVisibility(make({}), e, 'collection'), null, 'unbound');
+  assert.equal(planEmptyValueVisibility(make({ binding: binding('link') }, 'link'), e, 'collection'), null, 'item links always have a target');
+  assert.equal(planEmptyValueVisibility(make({ binding: binding('image', '__asset_url') }, 'image'), e, 'collection'), null);
+  const conditioned = make({ binding: binding('text'), visibility: { fieldId: 'f-switch', fieldType: 'boolean', operator: 'is', value: 'true', source: 'collection', reason: 'switch' } });
+  assert.equal(planEmptyValueVisibility(conditioned, e, 'collection'), null);
+  assert.equal(conditioned.wf.visibility?.fieldId, 'f-switch', 'the .w-condition-invisible rule is kept');
 });
 
 test('feature list: filter on the boolean field, limit 1, headings -> Name, class similarity, unbound leftovers', () => {
@@ -374,13 +420,17 @@ test('sample export: every list and detail page binds to the expected collection
   bindPages({ cms, pages, dynamicPageByCollection: new Map([[w.id, { pageId: 'pg-werke', folderId: 'f1', slug: 'werke' }], [e.id, { pageId: 'pg-ex', folderId: 'f2', slug: 'exhibitions' }]]), warn });
 
   const byPage = (name: string) => pages.find((p) => p.name === name)!;
-  const topItems = (page: WfPage) => find(page, (n) => n.wf.role === 'dyn-item' && n.wf.collection?.collectionId !== '__multi_asset__');
+  // Top-level items: bound to a real collection (a nested list is a multi-asset pseudo collection or, without a slot, unbound).
+  const topItems = (page: WfPage) => find(page, (n) => n.wf.role === 'dyn-item' && n.wf.collection !== undefined && n.wf.collection.collectionId !== '__multi_asset__');
 
   // Detail pages: 0.95 through ObjectId proximity.
   const guesses = warn.list.filter((x) => x.code === 'collection_guess').map((x) => x.message);
   assert.ok(guesses.some((m) => m.startsWith('bound page detail_werke to collection Werke (confidence 0.95')));
   assert.ok(guesses.some((m) => m.startsWith('bound page detail_exhibitions to collection Exhibitions (confidence 0.95')));
-  assert.equal(warn.count('collection_guess'), 2 + 9, '2 pages + 9 top-level lists (index 4, work 1, exhibitions 2, catalog 1, detail_werke 1)');
+  assert.equal(warn.count('collection_guess'), 2 + 9 + 1, '2 pages + 9 top-level lists (index 4, work 1, exhibitions 2, catalog 1, detail_werke 1) + the detail_werke list of its own collection');
+  // Without the live site nothing says whether "Weitere Werke" leaves the page's own work out.
+  assert.ok(guesses.some((m) => /^list .* on detail_werke: lists the page's own collection, and the export does not say whether the list leaves out the current item/.test(m)), guesses.join('\n'));
+  assert.equal(topItems(byPage('detail_werke'))[0].wf.collection?.excludeCurrentItem, undefined);
 
   // Lists.
   const werkeLists = ['index', 'work', 'detail_werke', 'catalog'].flatMap((n) => topItems(byPage(n)).filter((i) => i.wf.collection?.collectionId === w.id));
@@ -405,8 +455,11 @@ test('sample export: every list and detail page binds to the expected collection
   assert.ok(exItems.every((i) => i.wf.collection?.sortBy === field(e, 'datum').id && i.wf.collection?.sortOrder === 'desc'));
   const exBindings = find(byPage('exhibitions'), (n) => n.wf.binding !== undefined).map((n) => `${n.wf.binding!.kind}:${n.wf.binding!.fieldName}`);
   assert.deepEqual(exBindings, ['text:Name', 'text:datum', 'text:location', 'text:description', 'text:Name', 'text:datum', 'text:location', 'text:description', 'image:images']);
+  // The Archive gallery has an image slot; the Upcoming template's nested list (multi-reference
+  // `werke`, no slot) stays unbound like Webflow renders it (empty items).
   const nestedItems = find(byPage('exhibitions'), (n) => n.wf.collection?.collectionId === '__multi_asset__');
-  assert.equal(nestedItems.length, 2);
+  assert.equal(nestedItems.length, 1);
+  assert.equal(warn.list.filter((w) => w.code === 'binding_unbound' && w.message.includes('nested list without a slot')).length, 1);
   assert.ok(nestedItems.every((n) => n.wf.collection?.multiAsset?.fieldId === field(e, 'images').id));
 
   const indexEx = find(byPage('index'), (n) => n.wf.role === 'rich-text')[0];
@@ -418,7 +471,7 @@ test('sample export: every list and detail page binds to the expected collection
   assert.deepEqual(pageBindings, ['image:Werk', 'text:Name', 'text:Datum', 'text:masse', 'text:technik', 'background:Werk', 'background:Werk', 'background:Werk', 'background:Werk'], 'cells 5/3/4 and div-block-16 carry the bound-background placeholder');
   const unbound = warn.list.filter((x) => x.code === 'binding_unbound' && x.page === 'detail_werke');
   assert.equal(unbound.reduce((n, x) => n + (x.count ?? 1), 0), 2, 'the two small h1s (identical messages merge into one entry with count 2)');
-  assert.equal(warn.count('binding_unbound'), 2, 'nothing else is left unbound on the sample');
+  assert.equal(warn.count('binding_unbound'), 3, 'nothing else is left unbound on the sample but the slotless Upcoming nested list (exhibitions)');
   assert.ok(unbound.every((x) => /previous\/next/.test(x.message)));
   assert.ok(find(detail, (n) => n.kind === 'link' && n.wf.binding?.link?.collectionItemId === 'current-collection').length >= 1);
   assert.ok(warn.count('binding_guess') >= 10);

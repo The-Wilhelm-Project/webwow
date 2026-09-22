@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractCrossPageComponents, regionSignature, type PageLayers, type RegionHint } from './components';
+import { componentizeKeepingMedia, extractCrossPageComponents, regionSignature, type PageLayers, type RegionHint } from './components';
+import { applyComponentOverrides } from '@/lib/resolve-components';
 import { Warnings } from './warnings';
 import type { ServerMaterializer } from './server-materializer';
 
-import type { Component, Layer } from '@/types';
+import type { Component, ComponentVariable, Layer } from '@/types';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -292,4 +293,68 @@ test('a hinted navbar wins over the repeated page wrapper that contains it', asy
   assert.equal(stub.created[0].name, 'Navbar');
   assert.equal(result.components, 1);
   assert.equal(result.instances, 2);
+});
+
+// ─── Repeated siblings with media ────────────────────────────────────────────
+
+class VariableStub {
+  readonly created: { name: string; layers: Layer[]; variables?: ComponentVariable[] }[] = [];
+  async createComponent(name: string, layers: Layer[], variables?: ComponentVariable[]): Promise<Component | null> {
+    this.created.push({ name, layers, variables });
+    return { id: `cmp-${this.created.length}`, name, layers, variables, is_published: false } as Component;
+  }
+}
+
+const asset = (asset_id: string) => ({ type: 'asset' as const, data: { asset_id } });
+
+/** A `/artist` tile: box > background video + caption. */
+function videoTile(video: string, poster: string, caption = 'Studio'): Layer {
+  return {
+    id: id('lyr'),
+    name: 'div',
+    classes: 'relative overflow-hidden',
+    children: [
+      { id: id('lyr'), name: 'video', classes: 'absolute inset-0', attributes: { autoplay: true, muted: true, loop: true, controls: false }, variables: { video: { src: asset(video), poster: asset(poster) } } },
+      { id: id('lyr'), name: 'text', classes: 'text-[14px]', variables: { text: { type: 'dynamic_text', data: { content: caption } } } },
+    ],
+  } as Layer;
+}
+
+test('repeated siblings with different background videos: one component, the video (src + poster) is a per-instance variable', async () => {
+  const stub = new VariableStub();
+  const out = await componentizeKeepingMedia([videoTile('natur', 'natur-poster'), videoTile('studio', 'studio-poster')], stub);
+  assert.equal(stub.created.length, 1);
+  const [{ layers, variables }] = stub.created;
+  assert.equal(variables?.length, 1);
+  const variable = variables![0];
+  assert.equal(variable.type, 'video');
+  assert.equal(variable.name, 'Video 1');
+  assert.deepEqual(variable.default_value, { src: asset('natur'), poster: asset('natur-poster'), autoplay: true, loop: true, muted: true, controls: false });
+  const templateVideo = layers[0].children![0];
+  assert.equal(templateVideo.variables?.image, undefined, 'no stand-in image left in the template');
+  assert.deepEqual(templateVideo.variables?.video?.src, { ...asset('natur'), id: variable.id });
+  assert.equal(out.length, 2);
+  assert.ok(out.every((l) => l.componentId === 'cmp-1'));
+  assert.equal(out[0].componentOverrides?.image, undefined);
+  // What ycode renders for the second instance: its own video and poster.
+  const rendered = applyComponentOverrides(layers, out[1].componentOverrides, variables);
+  assert.deepEqual((rendered[0].children![0].variables?.video?.src as { data: unknown }).data, { asset_id: 'studio' });
+  assert.deepEqual(rendered[0].children![0].variables?.video?.poster, asset('studio-poster'));
+  const first = applyComponentOverrides(layers, out[0].componentOverrides, variables);
+  assert.deepEqual((first[0].children![0].variables?.video?.src as { data: unknown }).data, { asset_id: 'natur' });
+});
+
+test('repeated siblings with the same video keep it as template content; a lone media layer is restored untouched', async () => {
+  const stub = new VariableStub();
+  const lone: Layer = { id: id('lyr'), name: 'icon', classes: '', variables: { icon: { src: { type: 'static_text', data: { content: '<svg/>' } } } } } as Layer;
+  const out = await componentizeKeepingMedia([videoTile('natur', 'p', 'A'), videoTile('natur', 'p', 'B'), lone], stub);
+  assert.equal(stub.created.length, 1);
+  const { layers, variables } = stub.created[0];
+  assert.deepEqual(variables?.map((v) => v.type), ['rich_text'], 'only the caption differs');
+  assert.deepEqual(layers[0].children![0].variables?.video, { src: asset('natur'), poster: asset('p') });
+  assert.deepEqual(out[2].variables, { icon: { src: { type: 'static_text', data: { content: '<svg/>' } } } });
+  // Poster alone differs: still two different looks.
+  const stub2 = new VariableStub();
+  await componentizeKeepingMedia([videoTile('natur', 'p1'), videoTile('natur', 'p2')], stub2);
+  assert.equal(stub2.created[0].variables?.[0]?.type, 'video');
 });

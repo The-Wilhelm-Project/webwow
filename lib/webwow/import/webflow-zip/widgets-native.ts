@@ -48,6 +48,36 @@ export interface WfWidgetFlags {
   columns: boolean;
   /** Rich-text inline marks (bold / italic / underline / strike / code) via `richtext.ts`. */
   richText: boolean;
+
+  // ── widgets-extra.ts ──
+  /** `.w-video` / `.w-embed-youtubevideo` -> `video` (YouTube) or `iframe` layer. */
+  video: boolean;
+  /** `.w-lottie` -> `htmlEmbed` with `<lottie-player>`. */
+  lottie: boolean;
+  /** `.w-code-block` -> `<pre>` div + `<code>` text with verbatim whitespace. */
+  codeBlock: boolean;
+  /** `.w-file-upload` -> the `input[type=file]` + label, upload state boxes dropped. */
+  fileUpload: boolean;
+  /** `.w-widget-map` -> `map` layer. */
+  map: boolean;
+  /** `form[action="/search"]` -> normal form + `widget_unsupported`. */
+  search: boolean;
+  /** `.w-locales-list` -> `localeSelector` layer. */
+  locales: boolean;
+  /** `.w-pagination-wrapper` -> `variables.collection.pagination` + ycode's pagination layers. */
+  pagination: boolean;
+  /** `.w-condition-invisible` -> `variables.conditionalVisibility` when the rule can be reconstructed. */
+  conditionalVisibility: boolean;
+  /** `.w-background-video--control` -> button layer + constant runtime line. */
+  bgVideoControl: boolean;
+  /** `.w-icon-*` glyphs -> inline SVG icon layers. */
+  iconFont: boolean;
+  /** Same region with different classes on another page -> component variant instead of `component_skipped`. */
+  navbarVariants: boolean;
+  /** `.w-users-*` / `.w-commerce-*` -> `widget_unsupported` once per page (instead of `html_unmapped` per class). */
+  unsupportedWidgets: boolean;
+  /** `.w-webflow-badge` removed. */
+  badge: boolean;
 }
 
 export const DEFAULT_WIDGET_FLAGS: WfWidgetFlags = {
@@ -57,6 +87,20 @@ export const DEFAULT_WIDGET_FLAGS: WfWidgetFlags = {
   form: true,
   columns: true,
   richText: true,
+  video: true,
+  lottie: true,
+  codeBlock: true,
+  fileUpload: true,
+  map: true,
+  search: true,
+  locales: true,
+  pagination: true,
+  conditionalVisibility: true,
+  bgVideoControl: true,
+  iconFont: true,
+  navbarVariants: true,
+  unsupportedWidgets: true,
+  badge: true,
 };
 
 export function resolveWidgetFlags(overrides?: Partial<WfWidgetFlags>): WfWidgetFlags {

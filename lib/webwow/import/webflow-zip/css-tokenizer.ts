@@ -529,13 +529,24 @@ function parseCompound(text: string): Compound {
  * Split a selector into compounds at top-level combinators (descendant space,
  * `>`, `+`, `~`). Strings, parens and attribute brackets are respected.
  */
-function splitCompounds(selector: string): string[] {
+/**
+ * Split a selector into its compounds and the combinators between them
+ * (`'.a > .b .c'` -> compounds `['.a', '.b', '.c']`, combinators `['>', ' ']`).
+ * Whitespace around `>`, `+`, `~` is folded into that combinator.
+ */
+export function splitCompoundsWithCombinators(selector: string): { compounds: string[]; combinators: string[] } {
   const compounds: string[] = [];
+  const combinators: string[] = [];
   let current = '';
+  let pending: string | null = null;
   let depth = 0;
   let quote: string | null = null;
   const flush = () => {
-    if (current.trim()) compounds.push(current.trim());
+    if (current.trim()) {
+      if (compounds.length > 0) combinators.push(pending ?? ' ');
+      compounds.push(current.trim());
+      pending = null;
+    }
     current = '';
   };
   for (let i = 0; i < selector.length; i++) {
@@ -559,12 +570,17 @@ function splitCompounds(selector: string): string[] {
     else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
     if (depth === 0 && (ch === ' ' || ch === '\t' || ch === '\n' || ch === '>' || ch === '+' || ch === '~')) {
       flush();
+      if (ch === '>' || ch === '+' || ch === '~') pending = ch;
       continue;
     }
     current += ch;
   }
   flush();
-  return compounds;
+  return { compounds, combinators };
+}
+
+function splitCompounds(selector: string): string[] {
+  return splitCompoundsWithCombinators(selector).compounds;
 }
 
 /**

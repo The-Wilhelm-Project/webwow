@@ -44,6 +44,39 @@ export async function up(knex: Knex): Promise<void> {
   await knex.schema.raw('CREATE INDEX IF NOT EXISTS idx_asset_folders_asset_folder_id ON asset_folders(asset_folder_id, is_published) WHERE deleted_at IS NULL');
   await knex.schema.raw('CREATE INDEX IF NOT EXISTS idx_asset_folders_name ON asset_folders(name, is_published) WHERE deleted_at IS NULL');
 
+  // Enable Row Level Security
+  await knex.schema.raw('ALTER TABLE asset_folders ENABLE ROW LEVEL SECURITY');
+
+  // Create RLS policies
+  // Single SELECT policy: public can view published OR authenticated can view all
+  await knex.schema.raw(`
+    CREATE POLICY "Asset folders are viewable"
+      ON asset_folders FOR SELECT
+      USING (
+        (is_published = true AND deleted_at IS NULL)
+        OR (SELECT auth.uid()) IS NOT NULL
+      )
+  `);
+
+  // Authenticated users can INSERT/UPDATE/DELETE
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can modify asset folders"
+      ON asset_folders FOR INSERT
+      WITH CHECK ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can update asset folders"
+      ON asset_folders FOR UPDATE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
+  await knex.schema.raw(`
+    CREATE POLICY "Authenticated users can delete asset folders"
+      ON asset_folders FOR DELETE
+      USING ((SELECT auth.uid()) IS NOT NULL)
+  `);
+
   // Add asset_folder_id column to assets table
   await knex.schema.alterTable('assets', (table) => {
     table.uuid('asset_folder_id').nullable();
@@ -69,6 +102,12 @@ export async function down(knex: Knex): Promise<void> {
   await knex.schema.alterTable('assets', (table) => {
     table.dropColumn('asset_folder_id');
   });
+
+  // Drop policies
+  await knex.schema.raw('DROP POLICY IF EXISTS "Asset folders are viewable" ON asset_folders');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can modify asset folders" ON asset_folders');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can update asset folders" ON asset_folders');
+  await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can delete asset folders" ON asset_folders');
 
   // Drop unique index
   await knex.schema.raw('DROP INDEX IF EXISTS idx_asset_folders_draft_id_unique');

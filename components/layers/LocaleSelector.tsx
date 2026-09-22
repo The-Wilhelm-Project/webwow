@@ -7,6 +7,12 @@ interface LocaleSelectorProps {
   availableLocales: Locale[];
   currentPageSlug: string;
   isPublished: boolean;
+  /**
+   * Pre-computed relative URLs per locale ID, resolved server-side with
+   * translated folder/page/CMS slugs. When available, these take precedence
+   * over naive prefix manipulation so translated slugs are preserved.
+   */
+  localizedPageUrls?: Record<string, string>;
 }
 
 /**
@@ -18,9 +24,10 @@ export default function LocaleSelector({
   availableLocales,
   currentPageSlug,
   isPublished,
+  localizedPageUrls,
 }: LocaleSelectorProps) {
   // Detect if we're in preview mode
-  const isPreviewMode = typeof window !== 'undefined' && window.location.pathname.startsWith('/webwow/preview');
+  const isPreviewMode = typeof window !== 'undefined' && window.location.pathname.startsWith('/ycode/preview');
 
   // Get default locale (fallback when no locale is detected)
   const defaultLocale = availableLocales.find(l => l.is_default) || availableLocales[0];
@@ -30,13 +37,16 @@ export default function LocaleSelector({
     const selectedLocaleId = event.target.value;
     const selectedLocale = availableLocales.find(l => l.id === selectedLocaleId);
 
-    if (selectedLocale) {
-      // Build the new URL for the selected locale
-      const newUrl = buildLocalizedUrl(currentPageSlug, selectedLocale, currentLocale || null, isPreviewMode);
+    if (!selectedLocale) return;
 
-      // Redirect to the new URL
-      window.location.href = newUrl;
-    }
+    // Prefer the server-resolved URL (translated slugs); fall back to naive prefixing
+    const precomputed = localizedPageUrls?.[selectedLocaleId];
+    const newUrl = precomputed
+      ? (isPreviewMode ? `/ycode/preview${precomputed}` : precomputed)
+      : buildLocalizedUrl(currentPageSlug, selectedLocale, currentLocale || null, isPreviewMode);
+
+    // Redirect to the new URL
+    window.location.href = newUrl;
   };
 
   return (
@@ -89,6 +99,6 @@ function buildLocalizedUrl(
     : pathWithoutLocale ? `${targetLocale.code}/${pathWithoutLocale}` : targetLocale.code;
 
   // Add appropriate prefix
-  const prefix = isPreviewMode ? '/webwow/preview' : '';
+  const prefix = isPreviewMode ? '/ycode/preview' : '';
   return localizedPath ? `${prefix}/${localizedPath}` : (prefix || '/');
 }

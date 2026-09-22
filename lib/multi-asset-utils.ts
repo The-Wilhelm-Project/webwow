@@ -6,7 +6,7 @@
  */
 
 import type { Asset } from '@/types';
-import { formatFileSize } from './asset-utils';
+import { formatFileSize, getAssetProxyUrl } from './asset-utils';
 import { MULTI_ASSET_VIRTUAL_FIELDS } from './collection-field-utils';
 
 /**
@@ -16,7 +16,10 @@ import { MULTI_ASSET_VIRTUAL_FIELDS } from './collection-field-utils';
 export function buildAssetVirtualValues(asset: Asset): Record<string, string> {
   return {
     [MULTI_ASSET_VIRTUAL_FIELDS.FILENAME]: asset.filename || '',
-    [MULTI_ASSET_VIRTUAL_FIELDS.URL]: asset.public_url || '',
+    // Prefer the cached `/a/` proxy URL over the raw Supabase Storage URL so
+    // these multi-asset values (backgrounds/video/audio bound to __asset_url)
+    // are served through the CDN-cached proxy instead of direct Storage egress.
+    [MULTI_ASSET_VIRTUAL_FIELDS.URL]: getAssetProxyUrl(asset) || asset.public_url || '',
     [MULTI_ASSET_VIRTUAL_FIELDS.FILE_SIZE]: formatFileSize(asset.file_size || 0),
     [MULTI_ASSET_VIRTUAL_FIELDS.MIME_TYPE]: asset.mime_type || '',
     [MULTI_ASSET_VIRTUAL_FIELDS.WIDTH]: asset.width?.toString() || '',

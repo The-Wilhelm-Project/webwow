@@ -40,7 +40,8 @@
   "exclude": [
     "node_modules",
     "tools",
-    "import"
+    "import",
+    "uploads"
   ],
   "ts-node": {
     "transpileOnly": true,

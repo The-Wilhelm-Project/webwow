@@ -2,16 +2,49 @@
  * Utilities for pages and folders
  */
 
-import { IconProps } from '@/components/ui/icon';
+import type { IconProps } from '@/components/ui/icon';
 import type { Page, PageFolder, PageSettings, FieldVariable, Translation, Locale } from '../types';
-import { getTranslatableKey } from './localisation-utils';
+import { getTranslatableKey } from './locale-runtime';
 import { getTiptapTextContent } from '@/lib/text-format-utils';
+import { buildPasswordFormSubtree } from '@/lib/password-form-template';
+
+/**
+ * Build a revision key from a page's effective password protection (its own
+ * settings plus any ancestor folder settings). Used by the builder to reload
+ * the preview iframe when password settings change but the URL stays the same.
+ */
+export function buildPreviewAuthRevision(
+  page: Page | null | undefined,
+  folders: PageFolder[],
+): string {
+  if (!page) return '';
+
+  const parts: string[] = [
+    page.updated_at,
+    String(page.settings?.auth?.enabled ?? false),
+    page.settings?.auth?.password ?? '',
+  ];
+
+  let folderId = page.page_folder_id;
+  while (folderId) {
+    const folder = folders.find((f) => f.id === folderId);
+    if (!folder) break;
+    parts.push(
+      folder.updated_at,
+      String(folder.settings?.auth?.enabled ?? false),
+      folder.settings?.auth?.password ?? '',
+    );
+    folderId = folder.page_folder_id;
+  }
+
+  return parts.join('|');
+}
 
 /**
  * Reserved slugs that cannot be used at the root level (null parent folder)
  * These conflict with the app's routing structure
  */
-export const RESERVED_ROOT_SLUGS = ['webwow'] as const;
+export const RESERVED_ROOT_SLUGS = ['ycode'] as const;
 
 /**
  * Check if a slug is reserved at root level
@@ -49,6 +82,15 @@ export function findHomepage(pages: Page[]): Page | null {
  */
 export function isHomepage(page: Page): boolean {
   return page.is_index && page.page_folder_id === null;
+}
+
+/**
+ * Strip leading/trailing slashes from a single slug segment so it doesn't
+ * collapse into an empty path or introduce double slashes when joined.
+ * Preserves interior slashes (legacy nested slugs like `foo/bar`).
+ */
+export function normalizeSlugSegment(slug: string | null | undefined): string {
+  return (slug ?? '').replace(/^\/+|\/+$/g, '');
 }
 
 /**
@@ -92,7 +134,9 @@ export function buildSlugPath(
     }
   }
 
-  return '/' + slugParts.filter(Boolean).join('/');
+  // Legacy data sometimes stores an index page slug as the literal `/`. Without
+  // normalisation that produces paths like `/blog//` when concatenated.
+  return '/' + slugParts.map(normalizeSlugSegment).filter(Boolean).join('/');
 }
 
 /**
@@ -222,9 +266,12 @@ export function buildLocalizedSlugPath(
     }
   }
 
-  // Add locale code prefix
-  const pathWithoutLocale = '/' + slugParts.filter(Boolean).join('/');
-  return `/${locale.code}${pathWithoutLocale}`;
+  // Add locale code prefix. Index pages have no slug segments, so the localized
+  // homepage is `/<locale>` (no trailing slash) to match its canonical URL.
+  const localizedSegments = slugParts.map(normalizeSlugSegment).filter(Boolean);
+  return localizedSegments.length > 0
+    ? `/${locale.code}/${localizedSegments.join('/')}`
+    : `/${locale.code}`;
 }
 
 /**
@@ -265,6 +312,64 @@ export function buildLocalizedDynamicPageUrl(
 
   // Replace {slug} placeholder with the actual slug value
   return patternPath.replace(/\{slug\}/g, collectionItemSlug);
+}
+
+/**
+ * Slug context for a dynamic (CMS-driven) page, used to resolve the translated
+ * item slug per locale.
+ */
+export interface LocalizedDynamicSlug {
+  /** Collection item ID (translation `source_id`). */
+  itemId: string;
+  /** Translation `content_key` for the slug field (e.g. `field:key:slug`). */
+  contentKey: string;
+  /** Default-locale slug value, used as the fallback. */
+  defaultValue: string;
+}
+
+/**
+ * Build relative localized URLs for a page across every locale, keyed by locale ID.
+ * Reuses translated folder/page slugs and, for dynamic pages, the translated CMS
+ * item slug. Powers the locale selector so switching language preserves the
+ * correct translated path.
+ *
+ * @param translationsByLocale - Per-locale translation maps keyed by translatable key
+ * @param dynamicSlug - Slug context for dynamic pages (omit for static pages)
+ *
+ * @example
+ * buildLocalizedPageUrls(page, folders, locales, translationsByLocale, dynamicSlug)
+ * // { 'locale-en': '/solutions/structured-websites', 'locale-fr': '/fr/solutions/sites-structures' }
+ */
+export function buildLocalizedPageUrls(
+  page: Page,
+  allFolders: PageFolder[],
+  locales: Locale[],
+  translationsByLocale: Record<string, Record<string, Translation> | undefined>,
+  dynamicSlug?: LocalizedDynamicSlug | null
+): Record<string, string> {
+  const urls: Record<string, string> = {};
+
+  for (const locale of locales) {
+    const isDefaultLocale = locale.is_default;
+    const localeArg = isDefaultLocale ? null : locale;
+    const translations = isDefaultLocale ? undefined : translationsByLocale[locale.id];
+
+    if (dynamicSlug) {
+      const translatedSlug = isDefaultLocale
+        ? dynamicSlug.defaultValue
+        : translations?.[getTranslatableKey({
+          source_type: 'cms',
+          source_id: dynamicSlug.itemId,
+          content_key: dynamicSlug.contentKey,
+        })]?.content_value || dynamicSlug.defaultValue;
+
+      urls[locale.id] = buildLocalizedDynamicPageUrl(page, allFolders, translatedSlug, localeArg, translations);
+    } else {
+      urls[locale.id] = buildLocalizedSlugPath(page, allFolders, 'page', localeArg, translations);
+    }
+  }
+
+  return urls;
 }
 
 /**
@@ -342,7 +447,7 @@ export function matchPageWithTranslatedSlugs(
     slugParts.push(translatedSlug);
   }
 
-  const constructedPath = '/' + slugParts.filter(Boolean).join('/');
+  const constructedPath = '/' + slugParts.map(normalizeSlugSegment).filter(Boolean).join('/');
   return constructedPath === targetPath;
 }
 
@@ -380,7 +485,7 @@ export function matchDynamicPageWithTranslatedSlugs(
   // Add {slug} placeholder for dynamic page
   slugParts.push('{slug}');
 
-  const patternPath = '/' + slugParts.filter(Boolean).join('/');
+  const patternPath = '/' + slugParts.map(normalizeSlugSegment).filter(Boolean).join('/');
 
   // Replace {slug} with regex capture group
   const patternRegex = patternPath.replace(/\{slug\}/g, '([^/]+)');
@@ -621,6 +726,43 @@ export function buildPageTree(
   sortChildren(rootFolders);
 
   return rootFolders;
+}
+
+/**
+ * Filter a page tree by a case-insensitive name query.
+ * Matching pages keep their ancestor folders so hierarchy stays visible.
+ * A folder whose name matches is kept with all of its children.
+ */
+export function filterPageTree(nodes: PageTreeNode[], query: string): PageTreeNode[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return nodes;
+
+  const filterNodes = (list: PageTreeNode[]): PageTreeNode[] => {
+    const result: PageTreeNode[] = [];
+
+    for (const node of list) {
+      const name = node.type === 'folder'
+        ? (node.data as PageFolder).name
+        : (node.data as Page).name;
+      const nameMatches = name.toLowerCase().includes(needle);
+
+      if (nameMatches) {
+        result.push(node);
+        continue;
+      }
+
+      if (node.children && node.children.length > 0) {
+        const filteredChildren = filterNodes(node.children);
+        if (filteredChildren.length > 0) {
+          result.push({ ...node, children: filteredChildren });
+        }
+      }
+    }
+
+    return result;
+  };
+
+  return filterNodes(nodes);
 }
 
 /**
@@ -1358,7 +1500,15 @@ export interface ErrorPageConfig {
 
 /**
  * Default error pages configuration
- * Used for seeding database and creating new error pages
+ * Used for seeding database and creating new error pages.
+ *
+ * The 401 page ships with a password-protected form layer
+ * (`settings.form.form_type === 'password_protected'`). At runtime,
+ * `LayerRendererPublic` detects this marker and wires its submit handler to
+ * `/api/page-auth/verify` instead of the standard form-submissions endpoint.
+ * The form/input/button layers are marked `restrictions: { copy: false, delete: false }`
+ * so the structure cannot be removed (only restyled). If the form is missing on
+ * an existing 401 page, `PageRenderer` falls back to the hardcoded `PasswordForm`.
  */
 export const DEFAULT_ERROR_PAGES: ErrorPageConfig[] = [
   {
@@ -1382,39 +1532,59 @@ export const DEFAULT_ERROR_PAGES: ErrorPageConfig[] = [
             id: 'layer-1762789137823-g2cdo46ld',
             name: 'section',
             design: {
-              layout: { display: 'Flex', isActive: true, flexDirection: 'column' },
-              sizing: { height: '100vh', isActive: true },
-              spacing: { isActive: true, paddingTop: '3rem', paddingBottom: '3rem' },
+              layout: { display: 'Flex', isActive: true, flexDirection: 'column', alignItems: 'center', justifyContent: 'center' },
+              sizing: { isActive: true, minHeight: '100vh' },
+              spacing: { isActive: true, paddingTop: '4rem', paddingBottom: '4rem', paddingLeft: '1rem', paddingRight: '1rem' },
             },
-            classes: 'flex flex-col gap-[1rem] py-[3rem] h-[100vh]',
+            classes: 'flex flex-col items-center justify-center min-h-[100vh] px-[1rem] py-[4rem]',
             children: [
               {
                 id: 'layer-1762789141753-zpz5jyobc',
                 name: 'div',
                 design: {
-                  sizing: { height: '100vh', isActive: true, maxWidth: '80rem' },
-                  spacing: { isActive: true, marginLeft: 'auto', marginRight: 'auto', paddingLeft: '1rem', paddingRight: '1rem' },
+                  layout: { isActive: true, display: 'Flex', flexDirection: 'column', alignItems: 'center', gap: '16' },
+                  sizing: { isActive: true, width: '100%', maxWidth: '32rem' },
+                  typography: { isActive: true, textAlign: 'center' },
                 },
-                classes: 'max-w-[80rem] mx-auto px-[1rem] h-[100vh]',
+                classes: 'w-full max-w-[32rem] flex flex-col items-center text-center gap-[16px]',
                 children: [
                   {
-                    id: 'layer-1762789168560-icft8ynp5',
+                    id: 'layer-1762789150900-pw-icon',
+                    name: 'icon',
+                    settings: { tag: 'div' },
+                    design: {
+                      sizing: { isActive: true, width: '32', height: '32' },
+                      typography: { isActive: true, color: '#9ca3af' },
+                    },
+                    classes: 'text-[#9ca3af] w-[32px] h-[32px]',
+                    children: [],
+                    customName: 'Lock icon',
+                    variables: {
+                      icon: {
+                        src: {
+                          type: 'static_text',
+                          data: {
+                            content: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+                          },
+                        },
+                      },
+                    },
+                  },
+                  {
+                    id: 'layer-1762789150930-pw-text-block',
                     name: 'div',
                     design: {
-                      layout: { gap: '6', display: 'flex', isActive: true, alignItems: 'center', flexDirection: 'column', justifyContent: 'center' },
-                      sizing: { height: '100%', isActive: true },
-                      typography: { isActive: true, textAlign: 'center' },
+                      layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' },
+                      sizing: { isActive: true, width: '100%' },
                     },
-                    classes: 'items-center text-center h-full flex flex-col justify-center gap-[6px]',
+                    classes: 'w-full flex flex-col items-center gap-[0.5rem]',
                     children: [
                       {
                         id: 'layer-1762789150944-5qezgblbe',
                         name: 'heading',
-                        settings: {
-                          tag: 'h1',
-                        },
+                        settings: { tag: 'h1' },
                         design: {
-                          typography: { color: '#111827', fontSize: '30', isActive: true, fontWeight: '700' },
+                          typography: { isActive: true, color: '#111827', fontSize: '30', fontWeight: '700' },
                         },
                         classes: 'font-[700] text-[#111827] text-[30px]',
                         children: [],
@@ -1424,58 +1594,35 @@ export const DEFAULT_ERROR_PAGES: ErrorPageConfig[] = [
                           text: {
                             type: 'dynamic_rich_text',
                             data: {
-                              content: getTiptapTextContent('401')
-                            }
-                          }
+                              content: getTiptapTextContent('Password protected'),
+                            },
+                          },
                         },
                       },
                       {
                         id: 'layer-1762789197005-7z2wy597y',
                         name: 'text',
-                        settings: {
-                          tag: 'p',
-                        },
+                        settings: { tag: 'p' },
                         design: {
-                          typography: { fontSize: '12', color: '#111827', isActive: true },
+                          typography: { isActive: true, fontSize: '12', color: '#111827' },
                         },
                         classes: 'text-[12px] text-[#111827]',
                         children: [],
-                        customName: 'Text',
+                        customName: 'Subtitle',
                         restrictions: { editText: true },
                         variables: {
                           text: {
                             type: 'dynamic_rich_text',
                             data: {
-                              content: getTiptapTextContent('Password protected')
-                            }
-                          }
-                        },
-                      },
-                      {
-                        id: 'layer-1762789197006-7z2wy597z',
-                        name: 'text',
-                        settings: {
-                          tag: 'p',
-                        },
-                        design: {
-                          typography: { fontSize: '12', color: '#111827', isActive: true },
-                        },
-                        classes: 'text-[12px] text-[#111827]',
-                        children: [],
-                        customName: 'Text',
-                        restrictions: { editText: true },
-                        variables: {
-                          text: {
-                            type: 'dynamic_rich_text',
-                            data: {
-                              content: getTiptapTextContent('Enter the password to access this page.')
-                            }
-                          }
+                              content: getTiptapTextContent('To access this page, please enter the required password below.'),
+                            },
+                          },
                         },
                       },
                     ],
-                    customName: 'Container',
+                    customName: 'Text block',
                   },
+                  buildPasswordFormSubtree(),
                 ],
                 customName: 'Container',
               },

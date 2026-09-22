@@ -3,26 +3,18 @@
 /**
  * TemplateGallery Component
  *
- * Displays a grid of available templates for selection with category filtering.
+ * Displays a grid of available templates for selection.
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { TemplateCard } from './TemplateCard';
 import { TemplateApplyDialog } from './TemplateApplyDialog';
 import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import Icon from '@/components/ui/icon';
 import { Label } from '@/components/ui/label';
 import BuilderLoading from '@/components/BuilderLoading';
-
 interface Template {
   id: string;
   name: string;
@@ -30,12 +22,6 @@ interface Template {
   preview: string;
   categoryId: string | null;
   livePreviewUrl: string | null;
-}
-
-interface Category {
-  id: string;
-  name: string;
-  order: number;
 }
 
 interface TemplateGalleryProps {
@@ -53,13 +39,11 @@ export function TemplateGallery({
 }: TemplateGalleryProps) {
   const router = useRouter();
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(
     null
   );
-  const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [showApplyDialog, setShowApplyDialog] = useState(false);
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
@@ -79,7 +63,6 @@ export function TemplateGallery({
 
         const data = await response.json();
         setTemplates(data.templates || []);
-        setCategories(data.categories || []);
       } catch (err) {
         console.error('[TemplateGallery] Error fetching data:', err);
         setError(
@@ -92,26 +75,6 @@ export function TemplateGallery({
 
     fetchData();
   }, []);
-
-  // Filter templates by selected category
-  const filteredTemplates = useMemo(() => {
-    if (selectedCategory === 'all') {
-      return templates;
-    }
-    return templates.filter((t) => t.categoryId === selectedCategory);
-  }, [templates, selectedCategory]);
-
-  // Clear selected template when category changes and template is no longer visible
-  useEffect(() => {
-    if (selectedTemplate) {
-      const isStillVisible = filteredTemplates.some(
-        (t) => t.id === selectedTemplate.id
-      );
-      if (!isStillVisible) {
-        setSelectedTemplate(null);
-      }
-    }
-  }, [filteredTemplates, selectedTemplate]);
 
   const handleApplyImmediately = async (template: Template) => {
     setApplying(true);
@@ -130,7 +93,7 @@ export function TemplateGallery({
       }
 
       onApplySuccess?.();
-      window.location.href = '/webwow';
+      window.location.href = '/ycode';
     } catch (err) {
       console.error('[TemplateGallery] Apply error:', err);
       setApplyError(
@@ -159,7 +122,7 @@ export function TemplateGallery({
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Spinner className="h-8 w-8" />
+        <Spinner />
       </div>
     );
   }
@@ -206,25 +169,6 @@ export function TemplateGallery({
         </div>
       )}
 
-      {/* Category Filter Dropdown */}
-      {categories.length > 0 && (
-        <div className="mb-6">
-          <Select value={selectedCategory} onValueChange={setSelectedCategory}>
-            <SelectTrigger className="w-[200px]">
-              <SelectValue placeholder="Select category" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Categories</SelectItem>
-              {categories.map((category) => (
-                <SelectItem key={category.id} value={category.id}>
-                  {category.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
-
       {/* Template Grid */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {startFromScratchHref && (
@@ -239,7 +183,7 @@ export function TemplateGallery({
             <Label>Start from scratch</Label>
           </button>
         )}
-        {filteredTemplates.map((template) => (
+        {templates.map((template) => (
           <TemplateCard
             key={template.id}
             name={template.name}
@@ -250,15 +194,6 @@ export function TemplateGallery({
           />
         ))}
       </div>
-
-      {/* Empty state for filtered results */}
-      {filteredTemplates.length === 0 && templates.length > 0 && (
-        <EmptyState
-          icon="layout-template"
-          title="No templates in this category"
-          description="Try selecting a different category."
-        />
-      )}
 
       {/* Apply Confirmation Dialog (only when not in immediate mode) */}
       {!applyImmediately && (

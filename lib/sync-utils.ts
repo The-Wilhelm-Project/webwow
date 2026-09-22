@@ -5,8 +5,8 @@
  * Both operations follow the same pattern with inverted is_published values.
  */
 
-import { getKnexClient } from '@/lib/knex-client';
-import { DB_QUERY_LIMIT, DB_WRITE_BATCH_SIZE } from '@/lib/db-constants';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { SUPABASE_QUERY_LIMIT, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 
 /** Direction of the sync operation */
 export type SyncDirection = 'publish' | 'revert';
@@ -31,20 +31,30 @@ export async function syncTableRows(
   direction: SyncDirection,
   options?: { ids?: string[]; excludeColumns?: string[] }
 ): Promise<number> {
-  const db = await getKnexClient();
-  const { source, target } = getSyncFlags(direction);
+  const client = await getSupabaseAdmin();
 
-  let query = db(tableName)
-    .select('*')
-    .where('is_published', source)
-    .whereNull('deleted_at')
-    .limit(DB_QUERY_LIMIT);
-
-  if (options?.ids && options.ids.length > 0) {
-    query = query.whereIn('id', options.ids);
+  if (!client) {
+    throw new Error('Supabase not configured');
   }
 
-  const sourceRows = await query;
+  const { source, target } = getSyncFlags(direction);
+
+  let query = client
+    .from(tableName)
+    .select('*')
+    .eq('is_published', source)
+    .is('deleted_at', null)
+    .limit(SUPABASE_QUERY_LIMIT);
+
+  if (options?.ids && options.ids.length > 0) {
+    query = query.in('id', options.ids);
+  }
+
+  const { data: sourceRows, error: fetchError } = await query;
+
+  if (fetchError) {
+    throw new Error(`Failed to fetch ${tableName} rows: ${fetchError.message}`);
+  }
 
   if (!sourceRows || sourceRows.length === 0) {
     return 0;
@@ -58,12 +68,15 @@ export async function syncTableRows(
     return mapped;
   });
 
-  for (let i = 0; i < targetRows.length; i += DB_WRITE_BATCH_SIZE) {
-    const batch = targetRows.slice(i, i + DB_WRITE_BATCH_SIZE);
-    await db(tableName)
-      .insert(batch)
-      .onConflict(['id', 'is_published'])
-      .merge();
+  for (let i = 0; i < targetRows.length; i += SUPABASE_WRITE_BATCH_SIZE) {
+    const batch = targetRows.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
+    const { error: upsertError } = await client
+      .from(tableName)
+      .upsert(batch, { onConflict: 'id,is_published' });
+
+    if (upsertError) {
+      throw new Error(`Failed to sync ${tableName}: ${upsertError.message}`);
+    }
   }
 
   return targetRows.length;
@@ -95,21 +108,38 @@ export async function cleanupOrphanedRows(
     collectColumns?: string[];
   }
 ): Promise<CleanupResult> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+
+  if (!client) {
+    throw new Error('Supabase not configured');
+  }
+
   const { source, target } = getSyncFlags(direction);
 
-  const sourceRows = await db(tableName)
+  // Get all source IDs
+  const { data: sourceRows, error: sourceError } = await client
+    .from(tableName)
     .select('id')
-    .where('is_published', source)
-    .whereNull('deleted_at')
-    .limit(DB_QUERY_LIMIT);
+    .eq('is_published', source)
+    .is('deleted_at', null)
+    .limit(SUPABASE_QUERY_LIMIT);
+
+  if (sourceError) {
+    throw new Error(`Failed to fetch source ${tableName} IDs: ${sourceError.message}`);
+  }
 
   const sourceIds = new Set((sourceRows || []).map(r => r.id));
 
-  const targetRows = await db(tableName)
+  // Get all target rows
+  const { data: targetRows, error: targetError } = await client
+    .from(tableName)
     .select('*')
-    .where('is_published', target)
-    .limit(DB_QUERY_LIMIT);
+    .eq('is_published', target)
+    .limit(SUPABASE_QUERY_LIMIT);
+
+  if (targetError) {
+    throw new Error(`Failed to fetch target ${tableName} IDs: ${targetError.message}`);
+  }
 
   const orphanedIds: string[] = [];
   const preservedIds: string[] = [];
@@ -147,13 +177,19 @@ export async function cleanupOrphanedRows(
     return { deleted: 0, preservedIds, collected };
   }
 
+  // Delete orphaned rows in batches
   let deletedCount = 0;
-  for (let i = 0; i < orphanedIds.length; i += DB_WRITE_BATCH_SIZE) {
-    const batch = orphanedIds.slice(i, i + DB_WRITE_BATCH_SIZE);
-    await db(tableName)
-      .where('is_published', target)
-      .whereIn('id', batch)
-      .delete();
+  for (let i = 0; i < orphanedIds.length; i += SUPABASE_WRITE_BATCH_SIZE) {
+    const batch = orphanedIds.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
+    const { error: deleteError } = await client
+      .from(tableName)
+      .delete()
+      .eq('is_published', target)
+      .in('id', batch);
+
+    if (deleteError) {
+      throw new Error(`Failed to cleanup orphaned ${tableName}: ${deleteError.message}`);
+    }
 
     deletedCount += batch.length;
   }
@@ -178,19 +214,29 @@ export async function syncTableRowsByParent(
 ): Promise<number> {
   if (parentIds.length === 0) return 0;
 
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+
+  if (!client) {
+    throw new Error('Supabase not configured');
+  }
+
   const { source, target } = getSyncFlags(direction);
   const now = new Date().toISOString();
   let totalSynced = 0;
 
-  for (let i = 0; i < parentIds.length; i += DB_WRITE_BATCH_SIZE) {
-    const batchIds = parentIds.slice(i, i + DB_WRITE_BATCH_SIZE);
+  for (let i = 0; i < parentIds.length; i += SUPABASE_WRITE_BATCH_SIZE) {
+    const batchIds = parentIds.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
 
-    const sourceRows = await db(tableName)
+    const { data: sourceRows, error: fetchError } = await client
+      .from(tableName)
       .select('*')
-      .where('is_published', source)
-      .whereNull('deleted_at')
-      .whereIn(parentColumn, batchIds);
+      .eq('is_published', source)
+      .is('deleted_at', null)
+      .in(parentColumn, batchIds);
+
+    if (fetchError) {
+      throw new Error(`Failed to fetch ${tableName} by ${parentColumn}: ${fetchError.message}`);
+    }
 
     if (!sourceRows || sourceRows.length === 0) continue;
 
@@ -200,12 +246,15 @@ export async function syncTableRowsByParent(
       updated_at: now,
     }));
 
-    for (let j = 0; j < targetRows.length; j += DB_WRITE_BATCH_SIZE) {
-      const batch = targetRows.slice(j, j + DB_WRITE_BATCH_SIZE);
-      await db(tableName)
-        .insert(batch)
-        .onConflict(['id', 'is_published'])
-        .merge();
+    for (let j = 0; j < targetRows.length; j += SUPABASE_WRITE_BATCH_SIZE) {
+      const batch = targetRows.slice(j, j + SUPABASE_WRITE_BATCH_SIZE);
+      const { error: upsertError } = await client
+        .from(tableName)
+        .upsert(batch, { onConflict: 'id,is_published' });
+
+      if (upsertError) {
+        throw new Error(`Failed to sync ${tableName} by ${parentColumn}: ${upsertError.message}`);
+      }
     }
 
     totalSynced += targetRows.length;
@@ -224,21 +273,30 @@ export async function cleanupOrphanedChildRows(
   parentColumn: string,
   parentTable: string
 ): Promise<number> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+
+  if (!client) {
+    throw new Error('Supabase not configured');
+  }
+
   const { source, target } = getSyncFlags(direction);
 
-  const sourceParents = await db(parentTable)
+  // Get all source parent IDs (active parents)
+  const { data: sourceParents } = await client
+    .from(parentTable)
     .select('id')
-    .where('is_published', source)
-    .whereNull('deleted_at')
-    .limit(DB_QUERY_LIMIT);
+    .eq('is_published', source)
+    .is('deleted_at', null)
+    .limit(SUPABASE_QUERY_LIMIT);
 
   const sourceParentIds = new Set((sourceParents || []).map(r => r.id));
 
-  const targetChildren = await db(tableName)
+  // Get target child rows and find ones with orphaned parents
+  const { data: targetChildren } = await client
+    .from(tableName)
     .select('*')
-    .where('is_published', target)
-    .limit(DB_QUERY_LIMIT);
+    .eq('is_published', target)
+    .limit(SUPABASE_QUERY_LIMIT);
 
   const orphanedIds = (targetChildren || [])
     .filter(row => !sourceParentIds.has((row as Record<string, unknown>)[parentColumn] as string))
@@ -247,13 +305,17 @@ export async function cleanupOrphanedChildRows(
   if (orphanedIds.length === 0) return 0;
 
   let deletedCount = 0;
-  for (let i = 0; i < orphanedIds.length; i += DB_WRITE_BATCH_SIZE) {
-    const batch = orphanedIds.slice(i, i + DB_WRITE_BATCH_SIZE);
-    await db(tableName)
-      .where('is_published', target)
-      .whereIn('id', batch)
-      .delete();
+  for (let i = 0; i < orphanedIds.length; i += SUPABASE_WRITE_BATCH_SIZE) {
+    const batch = orphanedIds.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
+    const { error } = await client
+      .from(tableName)
+      .delete()
+      .eq('is_published', target)
+      .in('id', batch);
 
+    if (error) {
+      throw new Error(`Failed to cleanup orphaned ${tableName}: ${error.message}`);
+    }
     deletedCount += batch.length;
   }
 
@@ -261,25 +323,82 @@ export async function cleanupOrphanedChildRows(
 }
 
 /**
+ * Soft-deleted draft rows that still have a published counterpart, with names.
+ */
+export async function getDeletedDraftSummaries(
+  tableName: string,
+  nameColumn: 'name' | 'filename' = 'name'
+): Promise<Array<{ id: string; name: string }>> {
+  const client = await getSupabaseAdmin();
+  if (!client) throw new Error('Supabase not configured');
+
+  const deletedQuery = nameColumn === 'filename'
+    ? client.from(tableName).select('id, filename')
+    : client.from(tableName).select('id, name');
+
+  const { data: deletedDrafts, error: draftError } = await deletedQuery
+    .eq('is_published', false)
+    .not('deleted_at', 'is', null)
+    .limit(SUPABASE_QUERY_LIMIT);
+
+  if (draftError) {
+    throw new Error(`Failed to fetch deleted drafts from ${tableName}: ${draftError.message}`);
+  }
+
+  if (!deletedDrafts || deletedDrafts.length === 0) return [];
+
+  const drafts = deletedDrafts as Array<{ id: string; name?: string | null; filename?: string | null }>;
+
+  const { data: publishedRows, error: pubError } = await client
+    .from(tableName)
+    .select('id')
+    .in('id', drafts.map((draft) => draft.id))
+    .eq('is_published', true);
+
+  if (pubError) {
+    throw new Error(`Failed to fetch published rows pending deletion in ${tableName}: ${pubError.message}`);
+  }
+
+  const publishedIds = new Set((publishedRows || []).map((row) => row.id));
+
+  return drafts
+    .filter((draft) => publishedIds.has(draft.id))
+    .map((draft) => ({
+      id: draft.id,
+      name: (nameColumn === 'filename' ? draft.filename : draft.name)?.trim() || 'Untitled',
+    }));
+}
+
+/**
  * Count soft-deleted draft rows that still have a published counterpart.
  * Works for any table with (id, is_published, deleted_at) columns.
  */
 export async function getDeletedDraftCount(tableName: string): Promise<number> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) throw new Error('Supabase not configured');
 
-  const deletedDrafts = await db(tableName)
+  const { data: deletedDrafts, error: draftError } = await client
+    .from(tableName)
     .select('id')
-    .where('is_published', false)
-    .whereNotNull('deleted_at')
-    .limit(DB_QUERY_LIMIT);
+    .eq('is_published', false)
+    .not('deleted_at', 'is', null)
+    .limit(SUPABASE_QUERY_LIMIT);
+
+  if (draftError) {
+    throw new Error(`Failed to fetch deleted drafts from ${tableName}: ${draftError.message}`);
+  }
 
   if (!deletedDrafts || deletedDrafts.length === 0) return 0;
 
-  const result = await db(tableName)
-    .count('* as count')
-    .whereIn('id', deletedDrafts.map(d => d.id))
-    .where('is_published', true)
-    .first();
+  const { count, error: pubError } = await client
+    .from(tableName)
+    .select('id', { count: 'exact', head: true })
+    .in('id', deletedDrafts.map(d => d.id))
+    .eq('is_published', true);
 
-  return Number(result?.count ?? 0);
+  if (pubError) {
+    throw new Error(`Failed to count published rows pending deletion in ${tableName}: ${pubError.message}`);
+  }
+
+  return count ?? 0;
 }

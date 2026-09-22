@@ -8,13 +8,16 @@
  * to prevent flickering. This component only handles animation triggers.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { SplitText } from 'gsap/SplitText';
 
-import { buildGsapProps, addTweenToTimeline, createSplitTextAnimation } from '@/lib/animation-utils';
-import { getCurrentBreakpoint } from '@/lib/breakpoint-utils';
+import { ITEMS_INJECTED_EVENT, type ItemsInjectedDetail } from '@/components/FilterableCollection';
+import { buildGsapProps, addTweenToTimeline, createSplitTextAnimation, generateInitialAnimationCSS, getEffectiveApplyStyle, setColorVariableResolver } from '@/lib/animation-utils';
+import { BREAKPOINT_VALUES, getCurrentBreakpoint } from '@/lib/breakpoint-utils';
+import { remapLayerIdsForCollectionItem } from '@/lib/collection-utils';
+import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import type { Layer, LayerInteraction, Breakpoint } from '@/types';
 
 // Register GSAP plugins
@@ -24,6 +27,7 @@ if (typeof window !== 'undefined') {
 
 interface AnimationInitializerProps {
   layers: Layer[];
+  injectInitialCSS?: boolean;
 }
 
 interface CollectedInteraction {
@@ -64,6 +68,36 @@ function getElement(layerId: string): HTMLElement | null {
 }
 
 /**
+ * Whether a mutated node lives inside a Swiper slider. Swiper reshuffles
+ * existing slide nodes on transition/loop (childList mutations), which must
+ * not trigger an animation rebind — real new content arrives via the
+ * ITEMS_INJECTED_EVENT path instead.
+ */
+function isInsideSlider(node: Node | null): boolean {
+  const el = node instanceof Element ? node : node?.parentElement ?? null;
+  return !!el?.closest('[data-slider-id], .swiper-wrapper');
+}
+
+/**
+ * Pre-paint each tween's `from` state so the element rests in its intended
+ * initial appearance before the trigger fires. CSS via generateInitialAnimationCSS()
+ * only covers intro triggers (load, scroll-into-view); for hover/click we apply
+ * inline styles here so the layer's CSS default doesn't bleed through as the
+ * `to` state.
+ */
+function applyInitialFromState(interaction: LayerInteraction): void {
+  (interaction.tweens || []).forEach(tween => {
+    if (tween.splitText) return;
+    const el = getElement(tween.layer_id);
+    if (!el) return;
+    const { from } = buildGsapProps(tween);
+    if (Object.keys(from).length > 0) {
+      gsap.set(el, from);
+    }
+  });
+}
+
+/**
  * Collect info about elements that should start hidden based on interactions
  * Returns a map of layerId -> breakpoints (null means all breakpoints)
  */
@@ -74,14 +108,43 @@ function collectHiddenLayerInfo(interactions: CollectedInteraction[]): Map<strin
     const breakpoints = interaction.timeline?.breakpoints || null;
 
     (interaction.tweens || []).forEach((tween) => {
-      // Check if this tween has display: hidden with on-load apply style
-      if (tween.from?.display === 'hidden' && tween.apply_styles?.display === 'on-load') {
+      // Hide if display:hidden with effective on-load mode (explicit, or implicit
+      // for intro triggers like load/scroll-into-view).
+      if (
+        tween.from?.display === 'hidden' &&
+        getEffectiveApplyStyle(interaction.trigger, 'display', tween.apply_styles) === 'on-load'
+      ) {
         hiddenMap.set(tween.layer_id, breakpoints);
       }
     });
   });
 
   return hiddenMap;
+}
+
+/**
+ * Layer IDs whose visibility is toggled by a user interaction (click/hover).
+ * Their live show/hide state must persist across breakpoint changes instead of
+ * reverting to the on-load default when animations reset on resize.
+ */
+function collectInteractiveDisplayTargets(interactions: CollectedInteraction[]): Set<string> {
+  const targets = new Set<string>();
+  interactions.forEach(({ interaction }) => {
+    if (interaction.trigger !== 'click' && interaction.trigger !== 'hover') return;
+    (interaction.tweens || []).forEach((tween) => {
+      if (tween.from?.display || tween.to?.display) targets.add(tween.layer_id);
+    });
+  });
+  return targets;
+}
+
+/**
+ * Whether an on-load hide applies uniformly to every breakpoint (or not at all).
+ * Breakpoint-specific hides carry responsive intent that the per-breakpoint
+ * reset must honor, so a user toggle should not be preserved over them.
+ */
+function isUniformOnLoadHide(breakpoints: string[] | null | undefined): boolean {
+  return breakpoints == null || BREAKPOINT_VALUES.every((bp) => breakpoints.includes(bp));
 }
 
 /**
@@ -284,11 +347,113 @@ function buildTimeline(interaction: LayerInteraction): gsap.core.Timeline | null
   return timeline;
 }
 
-export default function AnimationInitializer({ layers }: AnimationInitializerProps) {
+export default function AnimationInitializer({ layers, injectInitialCSS }: AnimationInitializerProps) {
   const cleanupRef = useRef<(() => void)[]>([]);
   const timelinesRef = useRef<Map<string, gsap.core.Timeline>>(new Map());
+  // ScrollTriggers for one-shot `scroll-into-view` intros, keyed by
+  // interaction id. Tracked separately so effect re-runs can detach a played
+  // trigger without killing its in-flight timeline (see detachAnimations).
+  const scrollTriggersRef = useRef<Map<string, ScrollTrigger>>(new Map());
   const prevBreakpointRef = useRef<Breakpoint | null>(null);
   const [currentBreakpoint, setCurrentBreakpoint] = useState<Breakpoint>(() => getCurrentBreakpoint());
+  const styleRef = useRef<HTMLStyleElement | null>(null);
+
+  // Tracks interaction ids whose one-shot animation (`load` or
+  // `scroll-into-view`) has already played. Keyed by interaction id, which
+  // is stable across effect re-runs for the same logical element:
+  // - Page-level layers keep their original id.
+  // - Filter/load-more items get `-fc-${itemId}` appended, so the same item
+  //   re-injected later (e.g. filter toggled) keeps the same id and is
+  //   skipped — no replay.
+  // Cleared on breakpoint changes since `resetAnimationStates` restores
+  // initial styles and animations need to re-run for the new breakpoint.
+  const playedOneShotInteractionsRef = useRef<Set<string>>(new Set());
+
+  // Extra layers built from collection items injected client-side (filter
+  // refetch, load-more). Indexed by collection layer id so a filter
+  // deactivation can drop just that collection's extras. Each value uses the
+  // `-fc-${itemId}` suffix that mirrors the server-side filter renderer.
+  const [extrasByCollection, setExtrasByCollection] = useState<Record<string, Layer[]>>({});
+
+  // Forces the bind effect to re-run when tracked DOM elements get remounted
+  // (e.g. when dynamic-imported wrappers like LoadMoreCollection finish loading
+  // and React replaces the Suspense fallback with their real subtree). Without
+  // this, gsap.set() and listeners attached on first paint die with the old
+  // nodes and the new ones never animate until the next state change.
+  const [rebindTick, setRebindTick] = useState(0);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ItemsInjectedDetail>).detail;
+      const { collectionLayerId, layerTemplate, itemIds, append, collectionLayer } = detail || {};
+      if (!collectionLayerId || !collectionLayer || !layerTemplate) return;
+
+      setExtrasByCollection(prev => {
+        // Empty itemIds = filter deactivated, drop this collection's extras.
+        if (!append && (!itemIds || itemIds.length === 0)) {
+          if (!(collectionLayerId in prev)) return prev;
+          const next = { ...prev };
+          delete next[collectionLayerId];
+          return next;
+        }
+        // Rebuild the full collection layer per item so interactions on the
+        // wrapper itself are bound, then remap ids once.
+        const newLayers: Layer[] = itemIds.map(itemId => {
+          const fullLayer: Layer = { ...collectionLayer, children: layerTemplate };
+          return remapLayerIdsForCollectionItem(fullLayer, `-fc-${itemId}`);
+        });
+        if (append) {
+          return {
+            ...prev,
+            [collectionLayerId]: [...(prev[collectionLayerId] || []), ...newLayers],
+          };
+        }
+        return { ...prev, [collectionLayerId]: newLayers };
+      });
+    };
+    window.addEventListener(ITEMS_INJECTED_EVENT, handler);
+    return () => window.removeEventListener(ITEMS_INJECTED_EVENT, handler);
+  }, []);
+
+  const effectiveLayers = useMemo(() => {
+    const extras = Object.values(extrasByCollection).flat();
+    return extras.length > 0 ? [...layers, ...extras] : layers;
+  }, [layers, extrasByCollection]);
+
+  // Register a color variable resolver so backgroundColor tweens that
+  // reference color variables (e.g. "color:var(--id)") can be resolved to a
+  // concrete rgba value GSAP can interpolate.
+  useEffect(() => {
+    setColorVariableResolver((id) => useColorVariablesStore.getState().getVariableById(id)?.value);
+    return () => setColorVariableResolver(null);
+  }, []);
+
+  // Inject initial animation CSS for subtrees not covered by the page-level style tag
+  // (e.g. components embedded in rich text whose layer IDs are namespaced differently)
+  useEffect(() => {
+    if (!injectInitialCSS) return;
+    const { css, hiddenLayerInfo } = generateInitialAnimationCSS(effectiveLayers);
+    if (css) {
+      const style = document.createElement('style');
+      style.textContent = css;
+      document.head.appendChild(style);
+      styleRef.current = style;
+
+      // Apply data-gsap-hidden to elements that should start hidden
+      hiddenLayerInfo.forEach(({ layerId, breakpoints }) => {
+        const el = getElement(layerId);
+        if (el) {
+          el.setAttribute('data-gsap-hidden', breakpoints || '');
+        }
+      });
+    }
+    return () => {
+      if (styleRef.current) {
+        styleRef.current.remove();
+        styleRef.current = null;
+      }
+    };
+  }, [injectInitialCSS, effectiveLayers]);
 
   // Listen for breakpoint changes on resize
   useEffect(() => {
@@ -302,29 +467,87 @@ export default function AnimationInitializer({ layers }: AnimationInitializerPro
   }, []);
 
   useEffect(() => {
-    const collectedInteractions = collectInteractions(layers);
+    const collectedInteractions = collectInteractions(effectiveLayers);
     const hiddenLayerInfo = collectHiddenLayerInfo(collectedInteractions);
     const isBreakpointChange = prevBreakpointRef.current !== null && prevBreakpointRef.current !== currentBreakpoint;
 
     // Reset animation states when breakpoint changes
     if (isBreakpointChange) {
+      // Snapshot user-toggled show/hide state (e.g. tab switchers) before the
+      // reset wipes it, so a resize crossing a breakpoint doesn't revert
+      // click/hover toggles back to their on-load default.
+      const interactiveDisplayTargets = collectInteractiveDisplayTargets(collectedInteractions);
+      const toggledDisplayState = new Map<string, string | null>();
+      interactiveDisplayTargets.forEach((layerId) => {
+        // Skip breakpoint-specific on-load hides so responsive intent still resets.
+        if (!isUniformOnLoadHide(hiddenLayerInfo.get(layerId))) return;
+        const el = getElement(layerId);
+        if (el) toggledDisplayState.set(layerId, el.getAttribute('data-gsap-hidden'));
+      });
+
       resetAnimationStates(collectedInteractions, hiddenLayerInfo, currentBreakpoint);
+
+      // Restore the captured visibility so the user's current selection survives.
+      toggledDisplayState.forEach((value, layerId) => {
+        const el = getElement(layerId);
+        if (!el) return;
+        if (value === null) {
+          el.removeAttribute('data-gsap-hidden');
+        } else {
+          el.setAttribute('data-gsap-hidden', value);
+        }
+      });
+
+      playedOneShotInteractionsRef.current = new Set();
     }
 
     // Update previous breakpoint reference
     prevBreakpointRef.current = currentBreakpoint;
 
-    // Clean up previous animations
+    // Detach animations from the previous run. One-shot intros (load,
+    // scroll-into-view) that have already played keep their timeline so
+    // effect re-runs (filter/load-more state changes, Suspense resolution)
+    // don't freeze a mid-flight animation. The early break in the
+    // per-trigger switch below avoids rebuilding their timelines/triggers.
+    //
+    // `scrollTrigger.kill()` defaults to also killing its linked timeline,
+    // so a played trigger must be detached with `kill(false, true)` to keep
+    // the animation running. Defined as a closure so the unmount/return
+    // cleanup can reuse it.
+    const detachAnimations = () => {
+      const playedIds = playedOneShotInteractionsRef.current;
+      scrollTriggersRef.current.forEach((st, interactionId) => {
+        // allowAnimation = played → don't kill the in-flight timeline.
+        st.kill(false, playedIds.has(interactionId));
+        scrollTriggersRef.current.delete(interactionId);
+      });
+      timelinesRef.current.forEach((tl, interactionId) => {
+        if (!playedIds.has(interactionId)) {
+          tl.kill();
+          timelinesRef.current.delete(interactionId);
+        }
+      });
+    };
+
     cleanupRef.current.forEach((cleanup) => cleanup());
     cleanupRef.current = [];
-    timelinesRef.current.forEach((tl) => tl.kill());
-    timelinesRef.current.clear();
+    detachAnimations();
 
     collectedInteractions.forEach(({ triggerLayerId, interaction }) => {
       const triggerElement = getElement(triggerLayerId);
       if (!triggerElement) return;
 
       const { trigger } = interaction;
+
+      // Intro triggers (load, scroll-into-view) get their `from` state via
+      // server-emitted CSS. For hover/click, paint the `from` state inline so
+      // the resting appearance matches the author's intent instead of the
+      // layer's CSS default.
+      if (trigger === 'hover' || trigger === 'click') {
+        if (shouldRunOnBreakpoint(interaction, currentBreakpoint)) {
+          applyInitialFromState(interaction);
+        }
+      }
 
       // Helper to get or create timeline (always lazy to avoid GSAP setting inline styles)
       // Initial styles are handled by CSS via generateInitialAnimationCSS()
@@ -339,8 +562,13 @@ export default function AnimationInitializer({ layers }: AnimationInitializerPro
 
       switch (trigger) {
         case 'load': {
-          // Skip if breakpoint restriction not met
           if (!shouldRunOnBreakpoint(interaction, currentBreakpoint)) break;
+          // Skip if this interaction has already played. Stops effect
+          // re-runs (caused by filter/load-more state changes) from
+          // re-playing load animations on existing elements, and also
+          // prevents re-playing for filter items that get re-injected.
+          if (playedOneShotInteractionsRef.current.has(interaction.id)) break;
+          playedOneShotInteractionsRef.current.add(interaction.id);
 
           const timeline = getTimeline();
           timeline?.play();
@@ -372,7 +600,7 @@ export default function AnimationInitializer({ layers }: AnimationInitializerPro
               }
               isForward = !isForward;
             } else {
-              timeline.restart();
+              timeline.invalidate().restart();
             }
           };
 
@@ -405,13 +633,15 @@ export default function AnimationInitializer({ layers }: AnimationInitializerPro
         }
 
         case 'scroll-into-view': {
-          // Skip if breakpoint restriction not met
           if (!shouldRunOnBreakpoint(interaction, currentBreakpoint)) break;
+          // Already fired in a previous effect run — don't recreate the
+          // trigger (which would re-fire `play` if the element is still in
+          // viewport after a filter/load-more state change).
+          if (playedOneShotInteractionsRef.current.has(interaction.id)) break;
 
           const scrollStart = interaction.timeline?.scrollStart || 'top 80%';
           const toggleActions = interaction.timeline?.toggleActions || 'play none none none';
 
-          // toggleActions requires timeline upfront
           const timeline = getTimeline();
           if (!timeline) break;
 
@@ -420,9 +650,14 @@ export default function AnimationInitializer({ layers }: AnimationInitializerPro
             start: scrollStart,
             toggleActions,
             animation: timeline as any,
+            onEnter: () => {
+              playedOneShotInteractionsRef.current.add(interaction.id);
+            },
           });
 
-          cleanupRef.current.push(() => scrollTrigger.kill());
+          // Tracked in scrollTriggersRef (not cleanupRef) so a played trigger
+          // can be detached on re-run without killing its in-flight timeline.
+          scrollTriggersRef.current.set(interaction.id, scrollTrigger);
           break;
         }
 
@@ -452,16 +687,71 @@ export default function AnimationInitializer({ layers }: AnimationInitializerPro
       }
     });
 
+    // Watch for tracked elements being remounted (e.g. dynamic chunk loading
+    // for LoadMoreCollection/FilterableCollection replaces the Suspense fallback
+    // with the real subtree). When a node carrying a tracked data-layer-id
+    // appears in the DOM, bump rebindTick to re-run this effect against the
+    // fresh nodes — re-applying gsap.set() and rebinding listeners.
+    const trackedLayerIds = new Set<string>();
+    collectedInteractions.forEach(({ triggerLayerId, interaction }) => {
+      trackedLayerIds.add(triggerLayerId);
+      (interaction.tweens || []).forEach(t => trackedLayerIds.add(t.layer_id));
+    });
+
+    let rebindTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRebind = () => {
+      if (rebindTimer) return;
+      rebindTimer = setTimeout(() => {
+        rebindTimer = null;
+        setRebindTick(t => t + 1);
+      }, 50);
+    };
+
+    const containsTrackedId = (node: Node): boolean => {
+      if (!(node instanceof Element)) return false;
+      const id = node.getAttribute('data-layer-id');
+      if (id && trackedLayerIds.has(id)) return true;
+      // Check descendants — items often nest deeply
+      const descendants = node.querySelectorAll('[data-layer-id]');
+      for (const el of descendants) {
+        const cid = el.getAttribute('data-layer-id');
+        if (cid && trackedLayerIds.has(cid)) return true;
+      }
+      return false;
+    };
+
+    const remountObserver = new MutationObserver(mutations => {
+      for (const m of mutations) {
+        if (m.type !== 'childList') continue;
+        // Skip Swiper's internal slide reshuffling (loop/transition) so a
+        // slide change doesn't rebind animations and reset user-toggled
+        // click/hover states (e.g. an open nav menu) elsewhere on the page.
+        if (isInsideSlider(m.target)) continue;
+        for (const n of m.addedNodes) {
+          if (containsTrackedId(n)) {
+            scheduleRebind();
+            return;
+          }
+        }
+      }
+    });
+    remountObserver.observe(document.body, { childList: true, subtree: true });
+
     // Capture ref values for cleanup
     const cleanups = cleanupRef.current;
-    const timelines = timelinesRef.current;
 
     return () => {
+      if (rebindTimer) clearTimeout(rebindTimer);
+      remountObserver.disconnect();
       cleanups.forEach((cleanup) => cleanup());
-      timelines.forEach((tl) => tl.kill());
+      // Detach played one-shots without killing their timeline (see note at
+      // top of effect), then sweep any remaining triggers. Preserved
+      // timelines have already been unlinked via kill(false, true), so the
+      // sweep below can't touch them.
+      detachAnimations();
       ScrollTrigger.getAll().forEach((st) => st.kill());
     };
-  }, [layers, currentBreakpoint]);
+  }, [effectiveLayers, currentBreakpoint, rebindTick]);
 
   return null;
 }

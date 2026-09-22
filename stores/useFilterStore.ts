@@ -188,9 +188,9 @@ export const useFilterStore = create<FilterStoreState>((set, get) => ({
     // Add current filter values with friendly names
     for (const filterLayerValues of Object.values(values)) {
       for (const [inputLayerId, value] of Object.entries(filterLayerValues)) {
-        if (value) {
-          url.searchParams.set(getUrlParamName(inputLayerId, nameMap), value);
-        }
+        if (!value) continue;
+        if (/-(cb|rb)-.+-input$/.test(inputLayerId)) continue;
+        url.searchParams.set(getUrlParamName(inputLayerId, nameMap), value);
       }
     }
 

@@ -44,7 +44,8 @@ body:
         - Design Properties
         - Settings
         - API
-        - Self-hosting / Deployment
+        - Self-hosting / Deployment (Docker, Postgres)
+        - Webflow import
         - Other
     validations:
       required: true

@@ -125,19 +125,19 @@ async function deliverToWebhook(webhook: Webhook, event: WebhookEvent): Promise<
   // Build headers
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'User-Agent': 'Webwow-Webhook/1.0',
-    'X-Webwow-Event': event.type,
+    'User-Agent': 'Ycode-Webhook/1.0',
+    'X-Ycode-Event': event.type,
   };
 
   // Add delivery ID header if available
   if (deliveryId) {
-    headers['X-Webwow-Delivery'] = deliveryId;
+    headers['X-Ycode-Delivery'] = deliveryId;
   }
 
   // Add HMAC signature if secret is configured
   if (webhook.secret) {
     const signature = generateWebhookSignature(payloadString, webhook.secret);
-    headers['X-Webwow-Signature'] = `sha256=${signature}`;
+    headers['X-Ycode-Signature'] = `sha256=${signature}`;
   }
 
   const startTime = Date.now();

@@ -29,7 +29,7 @@ function TabsList({
     <TabsPrimitive.List
       data-slot="tabs-list"
       className={cn(
-        'bg-input text-muted-foreground rounded-lg p-[2px]',
+        'bg-input text-muted-foreground rounded-lg p-[3px] pt-[2px]',
         orientation === 'horizontal'
           ? 'inline-flex h-8 w-fit items-center justify-center'
           : 'flex flex-col w-fit h-fit',

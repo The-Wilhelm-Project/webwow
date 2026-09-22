@@ -1,0 +1,147 @@
+/*
+ * Slim Tailwind bundle for published & preview pages (the `(site)` route group).
+ *
+ * Why this exists: `app/globals.css` defines the full builder UI theme —
+ * shadcn color variables, dark-mode tokens, ProseMirror, Sonner toasts, etc.
+ * Public pages never reference any of it; per-page utilities used by user
+ * layers are inlined as `<style id="ycode-styles">` by `PageRenderer.tsx`.
+ *
+ * To keep this bundle small we let Tailwind scan the project as usual but
+ * exclude the heavy builder UI route group. Files like `lib/templates/**`,
+ * `lib/page-utils.ts`, `lib/text-format-utils.ts` and the public renderer
+ * components stay in scope so all the arbitrary-value classes they carry
+ * (gap-[20px], leading-[1.5], etc.) end up in the bundle.
+ */
+
+@import "tailwindcss";
+
+/* Builder UI is not rendered on published pages — drop ~150 KiB of
+   sidebar/modal/dropdown utilities by excluding the route group. */
+@source not "../app/(builder)";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  /* `--font-inter` is only defined inside the builder layout. On public
+     published pages the variable is undefined and these fall back to the
+     system font stacks — keeps marketing sites from downloading Inter just
+     because something used the generic `font-sans` class. */
+  --font-sans: var(--font-inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif);
+  --font-mono: var(--font-inter, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace);
+
+  /* Used by ShimmerSkeleton (shown in collection layouts while items load). */
+  --animate-shimmer: shimmer 2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* Icon SVG styling — exclude `.hidden` so Tailwind's `display: none` always
+   wins for hidden icons. Mirrors the editor rules in `globals.css`/`canvas.css`
+   so icons whose inline <svg> carries only a viewBox (no width/height) still
+   fill their sized container instead of collapsing to 0×0. */
+[data-icon]:not(.hidden) {
+  display: inline-block;
+}
+
+[data-icon] svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Force inline SVG fill/stroke attributes (even on nested nodes) to inherit
+   the icon layer's text color — matches the legacy `<i>` wrapper behavior so
+   migrated icons with hard-coded colors still tint with `text-*` utilities.
+   Note: must not blanket-apply `fill: currentColor` to the root <svg>, since
+   that would override `fill="none"` and solid-fill stroke-only icons. */
+[data-icon] [fill]:not([fill="none"]) {
+  fill: currentColor;
+}
+
+[data-icon] [stroke]:not([stroke="none"]),
+[data-icon] [stroke-width] {
+  stroke: currentColor;
+}
+
+/* Swiper needs a definite container width. When a slider ends up shrink-to-fit
+   (e.g. an `align-items:center` flex parent, or an `aspect-ratio` wrapper with
+   no definite width), its `width:100%` slides create a circular layout that
+   blows the width up to the browser max — Swiper then measures that and sizes
+   every slide to it, and any `aspect-ratio` ancestor amplifies it into a runaway
+   height. `contain: inline-size` decouples the slider's width from its contents
+   so it resolves from its containing block instead, breaking the cycle without
+   forcing a width — explicit widths still win. */
+[data-slider-id] {
+  contain: inline-size;
+}
+
+/* Slides never shrink in the slider flex row. */
+[data-slider-id] > .swiper-wrapper > .swiper-slide {
+  flex-shrink: 0;
+}
+
+/* Pre-init slide sizing for numeric multi-view sliders (per-view > 1): size
+   slides by the configured per-view before Swiper JS initializes, preventing a
+   flash where every full-width (`w-full`) slide shows one-per-view on load.
+   Only sliders with per-view > 1 carry `data-slider-presize` (see LayerRenderer)
+   so these rules intentionally override the slide's own width utility. Per-view
+   1 sliders are NOT marked, so their own slide width wins — e.g. a custom-width
+   peek carousel `w-[80%]` with slidesPerView 'auto'. Swiper sets exact inline
+   widths on init which override these. Values resolved per breakpoint
+   (desktop-first) into CSS vars on the slider root by LayerRenderer. */
+[data-slider-presize] > .swiper-wrapper > .swiper-slide {
+  width: calc(100% / var(--ycode-spv-mobile, 1));
+}
+
+@media (min-width: 768px) {
+  [data-slider-presize] > .swiper-wrapper > .swiper-slide {
+    width: calc(100% / var(--ycode-spv-tablet, var(--ycode-spv-mobile, 1)));
+  }
+}
+
+@media (min-width: 1024px) {
+  [data-slider-presize] > .swiper-wrapper > .swiper-slide {
+    width: calc(100% / var(--ycode-spv-desktop, var(--ycode-spv-tablet, var(--ycode-spv-mobile, 1))));
+  }
+}
+
+/* Hide slider nav buttons and pagination until Swiper initializes so they don't
+   flash in a pre-init state (enabled buttons that become locked/disabled, or a
+   single bullet template that expands to N bullets). SliderInitializer sets
+   data-slider-initialized on the root after mounting. Slides are pre-sized above
+   so they render correctly without waiting; only these controls are deferred.
+   visibility (not display) keeps layout stable — no shift when they appear. */
+[data-slider-id]:not([data-slider-initialized]) [data-slider-prev],
+[data-slider-id]:not([data-slider-initialized]) [data-slider-next],
+[data-slider-id]:not([data-slider-initialized]) [data-slider-pagination] {
+  visibility: hidden;
+}
+
+/* Hide locked nav buttons and pagination synchronously. Swiper adds
+   `swiper-button-lock` / `swiper-pagination-lock` during init when there's only
+   one page (all slides fit), but the rules that hide them live in
+   swiper-minimal.css which is injected by JS afterwards — that async gap let a
+   locked control blink into view once the initialized gate above released.
+   Duplicating the rules here (loaded at first paint) closes that gap and hides
+   the pagination when there's nothing to paginate. */
+[data-slider-id] .swiper-button-lock,
+[data-slider-id] .swiper-pagination-lock {
+  display: none !important;
+}
+
+/* Custom dropdown chevron for native <select> elements on published pages.
+   The native arrow is removed by the inline `ycode-form-reset` styles in
+   PageRenderer.tsx; this rule restores a consistent chevron. */
+#ybody select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px 16px;
+}

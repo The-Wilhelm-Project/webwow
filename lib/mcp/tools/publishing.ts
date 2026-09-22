@@ -1,12 +1,17 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+// Webwow: the hardDeleteSoftDeleted* / cleanupDeletedCollections / syncLayerStyleChangesToDrafts
+// imports below are the fork's addition - see the deletion and style-sync blocks in the publish handler.
 import { getUnpublishedPages, getAllDraftPages, hardDeleteSoftDeletedPages } from '@/lib/repositories/pageRepository';
-import { getUnpublishedLayerStyles, publishLayerStyles, hardDeleteSoftDeletedLayerStyles } from '@/lib/repositories/layerStyleRepository';
+import { getUnpublishedLayerStyles, publishLayerStyles, hardDeleteSoftDeletedLayerStyles, syncLayerStyleChangesToDrafts } from '@/lib/repositories/layerStyleRepository';
 import { getUnpublishedComponents, publishComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
 import { getAllCollections, getUnpublishedCollections } from '@/lib/repositories/collectionRepository';
 import { getItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
 import { getUnpublishedAssets, publishAssets, hardDeleteSoftDeletedAssets } from '@/lib/repositories/assetRepository';
 import { getUnpublishedAssetFolders, publishAssetFolders, hardDeleteSoftDeletedAssetFolders } from '@/lib/repositories/assetFolderRepository';
 import { getUnpublishedFonts, publishFonts } from '@/lib/repositories/fontRepository';
+import { getAllLocales } from '@/lib/repositories/localeRepository';
+import { getUnpublishedTranslationsCount } from '@/lib/repositories/translationRepository';
+import { getUnpublishedGlobalVariables, publishGlobalVariables, hardDeleteSoftDeletedGlobalVariables } from '@/lib/repositories/globalVariableRepository';
 import { publishPages } from '@/lib/services/pageService';
 import { publishCollectionWithItems, cleanupDeletedCollections } from '@/lib/services/collectionService';
 import { publishLocalisation } from '@/lib/services/localisationService';
@@ -15,13 +20,23 @@ import { publishCSS, savePublishedAt } from '@/lib/services/settingsService';
 import { generateAndSaveDraftCSS } from '@/lib/server/cssGenerator';
 import { clearAllCache } from '@/lib/services/cacheService';
 
+/** Count draft locales not yet present in the published set (new languages awaiting publish). */
+async function countUnpublishedLocales(): Promise<number> {
+  const [draft, published] = await Promise.all([
+    getAllLocales(false),
+    getAllLocales(true),
+  ]);
+  const publishedIds = new Set(published.map((l) => l.id));
+  return draft.filter((l) => !publishedIds.has(l.id)).length;
+}
+
 export function registerPublishingTools(server: McpServer) {
   server.tool(
     'get_unpublished_changes',
-    'Check what changes are pending and need to be published. Reports unpublished pages, styles, components, collections, fonts, and assets.',
+    'Check what changes are pending and need to be published. Reports unpublished pages, styles, components, collections, fonts, assets, translations, and locales.',
     {},
     async () => {
-      const [pages, styles, components, collections, fonts, assets, assetFolders] = await Promise.all([
+      const [pages, styles, components, collections, fonts, assets, assetFolders, translations, locales, globals] = await Promise.all([
         getUnpublishedPages().catch(() => []),
         getUnpublishedLayerStyles().catch(() => []),
         getUnpublishedComponents().catch(() => []),
@@ -29,10 +44,14 @@ export function registerPublishingTools(server: McpServer) {
         getUnpublishedFonts().catch(() => []),
         getUnpublishedAssets().catch(() => []),
         getUnpublishedAssetFolders().catch(() => []),
+        getUnpublishedTranslationsCount().catch(() => 0),
+        countUnpublishedLocales().catch(() => 0),
+        getUnpublishedGlobalVariables().catch(() => []),
       ]);
 
       const hasChanges = pages.length > 0 || styles.length > 0 || components.length > 0
-        || collections.length > 0 || fonts.length > 0 || assets.length > 0 || assetFolders.length > 0;
+        || collections.length > 0 || fonts.length > 0 || assets.length > 0 || assetFolders.length > 0
+        || translations > 0 || locales > 0 || globals.length > 0;
 
       return {
         content: [{
@@ -46,6 +65,9 @@ export function registerPublishingTools(server: McpServer) {
             unpublished_fonts: fonts.map((f) => ({ id: f.id, family: f.family })),
             unpublished_assets: assets.length,
             unpublished_asset_folders: assetFolders.length,
+            unpublished_translations: translations,
+            unpublished_locales: locales,
+            unpublished_global_variables: globals.map((g) => ({ id: g.id, name: g.name })),
           }, null, 2),
         }],
       };
@@ -106,20 +128,33 @@ export function registerPublishingTools(server: McpServer) {
       } catch { changes.components = 0; }
 
       // Publish layer styles
+      let changedLayerStyleIds: string[] = []; // Webwow: input of the style sync below
       try {
         const unpublished = await getUnpublishedLayerStyles();
         if (unpublished.length > 0) {
           const result = await publishLayerStyles(unpublished.map((s) => s.id));
           changes.layer_styles = result.count;
+          changedLayerStyleIds = result.changedStyleIds;
         } else {
           changes.layer_styles = 0;
         }
       } catch { changes.layer_styles = 0; }
 
-      // Propagate draft deletions to published versions (pages, components,
-      // styles, collections) — mirrors the full-publish path in
-      // app/webwow/api/publish/route.ts; without this, deleted pages keep
-      // serving as published zombies.
+      // Webwow: propagate changed style values into the denormalized layer classes of every
+      // draft page/component that uses them, then republish those, like the HTTP publish route
+      // (app/(builder)/ycode/api/publish/route.ts). Without it an `update_style` went live only
+      // in the style row: published pages kept the old classes.
+      if (changedLayerStyleIds.length > 0) {
+        try {
+          const sync = await syncLayerStyleChangesToDrafts(changedLayerStyleIds);
+          if (sync.affectedComponentIds.length > 0) await publishComponents(sync.affectedComponentIds);
+          if (sync.affectedPageIds.length > 0) await publishPages(sync.affectedPageIds);
+        } catch { /* non-fatal */ }
+      }
+
+      // Webwow: propagate draft deletions to the published copies. Without this a page
+      // deleted through MCP keeps serving after `publish` (zombie page); the HTTP publish
+      // route does the same in app/(builder)/ycode/api/publish/route.ts.
       try { await hardDeleteSoftDeletedPages(); } catch { /* non-fatal */ }
       try { await hardDeleteSoftDeletedComponents(); } catch { /* non-fatal */ }
       try { await hardDeleteSoftDeletedLayerStyles(); } catch { /* non-fatal */ }
@@ -148,6 +183,13 @@ export function registerPublishingTools(server: McpServer) {
       // Publish fonts
       try { await publishFonts(); } catch { /* non-fatal */ }
 
+      // Publish global variables
+      try {
+        const globalsResult = await publishGlobalVariables();
+        changes.globalVariables = globalsResult.count;
+        await hardDeleteSoftDeletedGlobalVariables();
+      } catch { /* non-fatal */ }
+
       // Publish locales and translations
       try {
         const locResult = await publishLocalisation();
@@ -161,11 +203,15 @@ export function registerPublishingTools(server: McpServer) {
         await publishCSS();
       } catch { /* non-fatal */ }
 
-      // Clear cache
-      try { await clearAllCache(); } catch { /* non-fatal */ }
-
-      // Save published_at timestamp
+      // Save published_at before clearing the cache so re-rendered pages
+      // read the new publish date rather than the previous one.
       try { await savePublishedAt(publishedAt); } catch { /* non-fatal */ }
+
+      // Clear cache. No warming here: MCP is invoked over JSON-RPC, not HTTP,
+      // so there's no Request/host header to build absolute URLs from. The
+      // builder's HTTP publish endpoint warms after publish — this AI tool
+      // path is rare enough that a cold next-visit is acceptable.
+      try { await clearAllCache(); } catch { /* non-fatal */ }
 
       const total = Object.values(changes).reduce((sum, n) => sum + n, 0);
 

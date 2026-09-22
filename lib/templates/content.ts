@@ -116,7 +116,7 @@ export const contentTemplates: Record<string, BlockTemplate> = {
                     { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Item C' }] }] },
                   ],
                 },
-                { type: 'paragraph', content: [{ type: 'text', marks: [{ type: 'richTextLink', attrs: { href: '#', linkType: 'url' } }], text: 'Text link' }] },
+                { type: 'paragraph', content: [{ type: 'text', marks: [{ type: 'richTextLink', attrs: { type: 'url', url: { type: 'dynamic_text', data: { content: '#' } } } }], text: 'Text link' }] },
                 { type: 'paragraph', content: [{ type: 'text', marks: [{ type: 'bold' }], text: 'Bold text' }] },
                 { type: 'paragraph', content: [{ type: 'text', marks: [{ type: 'italic' }], text: 'Italic text' }] },
               ],

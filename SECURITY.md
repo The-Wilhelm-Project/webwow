@@ -1,5 +1,12 @@
 # Security Policy
 
+> **Webwow** is a fork of [ycode](https://github.com/ycode/ycode). Report anything that only
+> affects Webwow (the PostgreSQL/local-disk compatibility layer in `lib/webwow/**`, the Docker
+> deployment, the Webflow ZIP importer, multi-site, the `?edit` editor) through a private
+> security advisory on the Webwow repository:
+> <https://github.com/The-Wilhelm-Project/webwow/security/advisories/new>.
+> Vulnerabilities in the upstream builder itself go to ycode, as described below.
+
 ## Supported Versions
 
 | Version | Supported          |
@@ -8,11 +15,11 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Webwow, please report it responsibly.
+If you discover a security vulnerability in Ycode, please report it responsibly.
 
 **Do not open a public issue.** Instead, email us at:
 
-**info@webwow.com**
+**info@ycode.com**
 
 Please include:
 
@@ -39,4 +46,4 @@ We will credit reporters in the release notes (unless you prefer to remain anony
 
 ## Scope
 
-This policy applies to the Webwow application code in this repository. For issues related to third-party services (Supabase, Vercel), please report to those providers directly.
+This policy applies to the Ycode application code in this repository. For issues related to third-party services (Supabase, Vercel), please report to those providers directly.

@@ -1,35 +1,35 @@
 /* Editor-specific styles - using outline to prevent conflicts with user box-shadow */
-.webwow-selected {
+.ycode-selected {
   outline: 1px solid #0b7efd !important;
   outline-offset: -1px;
 }
 
-.webwow-selected-purple {
+.ycode-selected-purple {
   outline: 2px solid #a855f7 !important;
   outline-offset: -2px;
 }
 
-.webwow-hover {
+.ycode-hover {
   outline: 1px solid #0b7efd !important;
   outline-offset: -1px;
 }
 
-.webwow-hover-purple {
+.ycode-hover-purple {
   outline: 1px solid rgba(168, 85, 247, 0.3) !important;
   outline-offset: -1px;
 }
 
-.webwow-component-hover {
+.ycode-component-hover {
   outline: 2px solid rgba(168, 85, 247, 0.5) !important;
   outline-offset: -2px;
 }
 
-.webwow-editing {
+.ycode-editing {
   outline: 1px solid #0b7efd !important;
   outline-offset: -1px;
 }
 
-.webwow-drop-target {
+.ycode-drop-target {
   outline: 2px solid #3b82f6 !important;
   outline-offset: -2px;
   background-color: rgba(59, 130, 246, 0.05) !important;
@@ -39,13 +39,13 @@
 /* Force default cursor on all elements in canvas edit mode */
 #canvas-body,
 #canvas-body *,
-.webwow-layer,
-.webwow-layer * {
+.ycode-layer,
+.ycode-layer * {
   cursor: default !important;
 }
 
 /* Empty element styling (exclude void/form elements and layers with visible border/background) */
-.webwow-layer:empty:not(input):not(select):not(textarea):not(img):not(br):not(hr):not([data-has-visual])::before {
+.ycode-layer:empty:not(input):not(select):not(textarea):not(img):not(br):not(hr):not([data-has-visual])::before {
   content: ' ';
   display: block;
   background-color: rgb(191 219 254 / 0.1);
@@ -60,8 +60,10 @@
   min-height: 3rem;
 }
 
-/* Icon SVG styling */
-[data-icon] {
+/* Icon SVG styling — exclude `.hidden` so Tailwind's `display: none` always
+   wins for hidden icons. This author rule is unlayered and would otherwise
+   beat any layered `.hidden` utility from the Tailwind Browser CDN. */
+[data-icon]:not(.hidden) {
   display: inline-block;
 }
 
@@ -69,7 +71,20 @@
   width: 100%;
   height: 100%;
   display: block;
+}
+
+/* Force inline SVG fill/stroke attributes (even on nested nodes) to inherit
+   the icon layer's text color — matches the legacy `<i>` wrapper behavior so
+   migrated icons with hard-coded colors still tint with `text-*` utilities.
+   Note: must not blanket-apply `fill: currentColor` to the root <svg>, since
+   that would override `fill="none"` and solid-fill stroke-only icons. */
+[data-icon] [fill]:not([fill="none"]) {
   fill: currentColor;
+}
+
+[data-icon] [stroke]:not([stroke="none"]),
+[data-icon] [stroke-width] {
+  stroke: currentColor;
 }
 
 /* GSAP animation hidden state */
@@ -113,20 +128,20 @@
 }
 
 /* Text editing input */
-.webwow-text-editor {
+.ycode-text-editor {
   width: 100%;
   outline: 1px solid #0b7efd !important;
   outline-offset: 0 !important;
   cursor: text !important;
 }
 
-.webwow-text-editor * {
+.ycode-text-editor * {
   cursor: text !important;
 }
 
 /* Hide ProseMirror trailing breaks in text editor */
-.webwow-text-editor img.ProseMirror-separator,
-.webwow-text-editor br.ProseMirror-trailingBreak {
+.ycode-text-editor img.ProseMirror-separator,
+.ycode-text-editor br.ProseMirror-trailingBreak {
   display: inline !important;
 }
 

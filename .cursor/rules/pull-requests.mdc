@@ -13,7 +13,13 @@ Use the same format as commit messages:
 <type>: <concise summary in imperative mood>
 ```
 
-Examples: `feat: add custom domain management`, `fix: prevent primary domain deletion`
+**Keep titles user-friendly, not too technical.** PR titles often surface in changelogs and release notes, so they should be understandable to non-engineers. Describe the user-facing change or outcome, not the implementation detail.
+
+Examples:
+
+- `feat: add custom domain management` (not `feat: wire Vercel SDK into domain repository`)
+- `fix: prevent primary domain deletion` (not `fix: add guard clause in deleteDomain handler`)
+- `feat: support drag and drop for page reordering` (not `feat: integrate @dnd-kit into PageList`)
 
 ## Body Format
 
@@ -36,7 +42,10 @@ Examples: `feat: add custom domain management`, `fix: prevent primary domain del
 
 ## Rules
 
+- **Branch detection**: use `git branch --show-current` to determine the current branch unless the user explicitly specifies it
 - **Base branch**: always create PRs against the `develop` branch
+- **Assignee**: always assign the PR to the current GitHub user (`gh api user --jq '.login'`)
+- **Labels**: apply a label based on PR type — `Bug` for `fix:` PRs, `Feature request` for `feat:` PRs, `Improvement` for `refactor:` or `perf:` PRs, `Documentation` for `docs:` PRs. Skip labels for other types (chore, style, test)
 - **No AI attribution**: never mention Cursor, AI, copilot, or assistant
 - **Summary over detail**: reviewers read the diff — the PR describes intent
 - **Imperative mood** throughout: "Add", "Fix", "Remove", not past tense
@@ -44,6 +53,7 @@ Examples: `feat: add custom domain management`, `fix: prevent primary domain del
 - **Link issues** when applicable: "Closes #123" in the summary
 - **Keep it scannable**: bullets over paragraphs, short lines
 - **Test plan is mandatory**: always include at least one verification step
+- **No trailer parameters**: do not use `--trailer` flags in git commit commands
 
 ## Example
 

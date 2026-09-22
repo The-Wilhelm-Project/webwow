@@ -54,6 +54,11 @@ const TEXT_STYLE_KEY_TO_GROUP: Record<string, string> = {
   listItem: 'list',
 
   link: 'button',
+
+  table: 'table',
+  tableHeader: 'table',
+  tableCell: 'table',
+  tableRow: 'table',
 };
 
 /**

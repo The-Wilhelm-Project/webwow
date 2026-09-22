@@ -1,0 +1,164 @@
+import { notFound } from 'next/navigation';
+import type { Metadata } from 'next';
+import { fetchPageByPath, fetchErrorPage } from '@/lib/page-fetcher';
+import PageRenderer from '@/components/PageRenderer';
+import PasswordForm from '@/components/PasswordForm';
+import { getSettingsByKeys } from '@/lib/repositories/settingsRepository';
+import { generateColorVariablesCss } from '@/lib/repositories/colorVariableRepository';
+
+import { generatePageMetadata } from '@/lib/generate-page-metadata';
+import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
+
+async function fetchPreviewDraftCss() {
+  const settings = await getSettingsByKeys(['draft_css']);
+  return (settings.draft_css as string) || undefined;
+}
+
+// Force dynamic rendering - no caching for preview
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
+export default async function Page({ params }: { params: Promise<{ slug: string | string[] }> }) {
+  // Await params (Next.js 15 requirement)
+  const { slug } = await params;
+
+  // Handle catch-all slug (join array into path)
+  const slugPath = Array.isArray(slug) ? slug.join('/') : slug;
+
+  // Fetch draft page and layers data (no caching)
+  const data = await fetchPageByPath(slugPath, false);
+
+  // Fetch draft CSS and color variables
+  const [draftCSS, colorVariablesCss] = await Promise.all([
+    fetchPreviewDraftCss(),
+    generateColorVariablesCss(),
+  ]);
+
+  // If page not found, try to show custom 404 error page
+  if (!data) {
+    const errorPageData = await fetchErrorPage(404, false);
+
+    if (errorPageData) {
+      const { page, pageLayers, components } = errorPageData;
+
+      return (
+        <PageRenderer
+          page={page}
+          layers={pageLayers.layers || []}
+          components={components}
+          generatedCss={draftCSS}
+          colorVariablesCss={colorVariablesCss || undefined}
+          isPreview={true}
+        />
+      );
+    }
+
+    // No custom 404 page, use default Next.js 404
+    notFound();
+  }
+
+  const { page, pageLayers, components, collectionItem, collectionFields, pageCollectionSortedItemIds, pageCollectionSortedItemSlugs, locale, availableLocales, translations } = data;
+
+  // Check password protection for this page (using all folders for preview)
+  const folders = await fetchFoldersForAuth(false);
+  const authCookie = await parseAuthCookie();
+  const protection = getPasswordProtection(page, folders, authCookie);
+
+  // If page is protected and not unlocked, show 401 error page
+  if (protection.isProtected && !protection.isUnlocked) {
+    const errorPageData = await fetchErrorPage(401, false);
+
+    if (errorPageData) {
+      const { page: errorPage, pageLayers: errorPageLayers, components: errorComponents } = errorPageData;
+
+      return (
+        <PageRenderer
+          page={errorPage}
+          layers={errorPageLayers.layers || []}
+          components={errorComponents}
+          generatedCss={draftCSS}
+          colorVariablesCss={colorVariablesCss || undefined}
+          isPreview={true}
+          passwordProtection={{
+            pageId: protection.protectedBy === 'page' ? protection.protectedById : undefined,
+            folderId: protection.protectedBy === 'folder' ? protection.protectedById : undefined,
+            redirectUrl: `/ycode/preview/${slugPath}`,
+            isPublished: false,
+          }}
+        />
+      );
+    }
+
+    // Inline fallback if no custom 401 page exists
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-white">
+        <div className="text-center max-w-md px-4">
+          <h1 className="text-6xl font-bold text-gray-900 mb-4">401</h1>
+          <h2 className="text-2xl font-semibold text-gray-800 mb-4">Password Protected</h2>
+          <p className="text-gray-600 mb-8">Enter the password to continue.</p>
+          <PasswordForm
+            pageId={protection.protectedBy === 'page' ? protection.protectedById : undefined}
+            folderId={protection.protectedBy === 'folder' ? protection.protectedById : undefined}
+            redirectUrl={`/ycode/preview/${slugPath}`}
+            isPublished={false}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Render the preview page (draft version)
+  return (
+    <PageRenderer
+      page={page}
+      layers={pageLayers.layers || []}
+      components={components}
+      generatedCss={draftCSS}
+      colorVariablesCss={colorVariablesCss || undefined}
+      collectionItem={collectionItem}
+      collectionFields={collectionFields}
+      pageCollectionSortedItemIds={pageCollectionSortedItemIds}
+      pageCollectionSortedItemSlugs={pageCollectionSortedItemSlugs}
+      locale={locale}
+      availableLocales={availableLocales}
+      isPreview={true}
+      translations={translations}
+    />
+  );
+}
+
+// Generate metadata
+export async function generateMetadata({ params }: { params: Promise<{ slug: string | string[] }> }): Promise<Metadata> {
+  const { slug } = await params;
+
+  // Handle catch-all slug (join array into path)
+  const slugPath = Array.isArray(slug) ? slug.join('/') : slug;
+
+  // Fetch draft page to get name and SEO settings
+  const data = await fetchPageByPath(slugPath, false);
+
+  if (!data) {
+    return {
+      title: 'Preview - Page Not Found',
+    };
+  }
+
+  // Check password protection - don't leak metadata for protected pages
+  const folders = await fetchFoldersForAuth(false);
+  const authCookie = await parseAuthCookie();
+  const protection = getPasswordProtection(data.page, folders, authCookie);
+
+  if (protection.isProtected && !protection.isUnlocked) {
+    return {
+      title: 'Preview - Password Protected',
+      description: 'This page is password protected.',
+      robots: { index: false, follow: false },
+    };
+  }
+
+  return generatePageMetadata(data.page, {
+    isPreview: true,
+    collectionItem: data.collectionItem,
+    translations: data.translations,
+  });
+}

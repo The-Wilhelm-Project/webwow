@@ -2,8 +2,49 @@
  * Animation utility functions and constants for GSAP interactions
  */
 
-import type { InteractionTween, TweenProperties, Layer, Breakpoint } from '@/types';
+import type { InteractionTween, LayerInteraction, TweenProperties, Layer, Breakpoint, ApplyStyles, TweenPropertyKey } from '@/types';
 import { BREAKPOINTS } from '@/lib/breakpoint-utils';
+
+/**
+ * One-shot intro triggers where the `from` state should be applied on initial
+ * paint to avoid the element flashing in its `to` state before JS runs.
+ */
+const IMPLICIT_ON_LOAD_TRIGGERS: ReadonlyArray<LayerInteraction['trigger']> = ['load', 'scroll-into-view'];
+
+/**
+ * Returns the effective apply mode for a tween property. Honors an explicit
+ * `apply_styles` choice; otherwise falls back to `on-load` for intro
+ * triggers (load, scroll-into-view) so new intro animations stay
+ * flicker-free, and `on-trigger` for everything else.
+ */
+export function getEffectiveApplyStyle(
+  trigger: LayerInteraction['trigger'],
+  propertyKey: TweenPropertyKey,
+  applyStyles: InteractionTween['apply_styles'] | undefined
+): ApplyStyles {
+  const explicit = applyStyles?.[propertyKey];
+  if (explicit) return explicit;
+  if (IMPLICIT_ON_LOAD_TRIGGERS.includes(trigger)) return 'on-load';
+  return 'on-trigger';
+}
+
+/**
+ * Default `apply_styles` for a new tween based on the interaction trigger.
+ * Intro triggers default every property to `on-load` to avoid flicker.
+ */
+export function getDefaultApplyStyles(trigger: LayerInteraction['trigger']): InteractionTween['apply_styles'] {
+  const mode: ApplyStyles = IMPLICIT_ON_LOAD_TRIGGERS.includes(trigger) ? 'on-load' : 'on-trigger';
+  return {
+    x: mode,
+    y: mode,
+    rotation: mode,
+    scale: mode,
+    skewX: mode,
+    skewY: mode,
+    autoAlpha: mode,
+    display: mode,
+  };
+}
 
 /**
  * Creates a SplitText instance with responsive animation support
@@ -49,7 +90,7 @@ export function createSplitTextAnimation(
 
 // Types
 export type TriggerType = 'click' | 'hover' | 'scroll-into-view' | 'while-scrolling' | 'load';
-export type PropertyType = 'position-x' | 'position-y' | 'scale' | 'rotation' | 'skew-x' | 'skew-y' | 'opacity' | 'display' | 'split-text';
+export type PropertyType = 'position-x' | 'position-y' | 'scale' | 'rotation' | 'skew-x' | 'skew-y' | 'opacity' | 'width' | 'height' | 'background-color' | 'display' | 'split-text' | 'blur' | 'brightness' | 'grayscale';
 
 export interface PropertyConfig {
   key: keyof TweenProperties;
@@ -60,12 +101,96 @@ export interface PropertyConfig {
   options?: Array<{ value: string; label: string }>;
   /** If true, only show the "to" value in UI (no "from" input) */
   toOnly?: boolean;
+  /** Available units for this property — enables unit selector in UI */
+  units?: string[];
 }
 
 export interface PropertyOption {
   type: PropertyType;
   label: string;
   properties: PropertyConfig[];
+}
+
+// Unit constants
+const POSITION_UNITS = ['px', '%', 'rem', 'em', 'vw', 'vh', 'svh', 'dvh'];
+const ANGLE_UNITS = ['deg', 'rad', 'turn'];
+const SIZE_UNITS = ['px', '%', 'rem', 'em', 'vh', 'svh', 'dvh'];
+
+export interface ParsedAnimationValue {
+  number: string;
+  unit: string;
+}
+
+/** Splits a CSS value into number and unit parts. Falls back to defaultUnit for bare numbers. */
+export function parseAnimationValue(value: string | null | undefined, defaultUnit: string): ParsedAnimationValue {
+  if (!value) return { number: '', unit: defaultUnit };
+
+  const trimmed = value.trim();
+  if (!trimmed) return { number: '', unit: defaultUnit };
+
+  // Special non-numeric values (auto, etc.) — return as-is with empty unit
+  if (!/^-?[\d.]/.test(trimmed)) return { number: trimmed, unit: '' };
+
+  // Match number followed by optional unit
+  const match = trimmed.match(/^(-?[\d.]+)\s*(.*)$/);
+  if (!match) return { number: trimmed, unit: defaultUnit };
+
+  const num = match[1];
+  const unitPart = match[2] || defaultUnit;
+
+  return { number: num, unit: unitPart };
+}
+
+/** Combines a number and unit into a single CSS value string */
+export function formatAnimationValue(number: string, unit: string): string {
+  if (!number) return '';
+  if (!unit) return number;
+  return `${number}${unit}`;
+}
+
+// Optional module-level resolver for ColorPicker color variable references
+// (e.g. "color:var(--{id})"). Consumers can register a resolver so GSAP
+// receives raw rgba values that it can interpolate; without one, the CSS
+// `var(--id)` form is emitted instead (suitable for static initial CSS where
+// the browser resolves it natively).
+let _colorVariableResolver: ((id: string) => string | undefined) | null = null;
+
+/** Register a resolver mapping a color variable id to its raw value
+ * ("#hex" or "#hex/opacity"). Pass null to clear. */
+export function setColorVariableResolver(
+  resolver: ((id: string) => string | undefined) | null
+): void {
+  _colorVariableResolver = resolver;
+}
+
+/**
+ * Convert a ColorPicker-formatted color (`#hex`, `#hex/opacity`, or
+ * `color:var(--id)`) to a CSS-tweenable string. Plain hex strings are
+ * returned as-is.
+ */
+function colorToCss(value: string): string {
+  if (!value) return value;
+
+  const varMatch = value.match(/^color:var\(--([^)]+)\)$/);
+  if (varMatch) {
+    const id = varMatch[1];
+    const raw = _colorVariableResolver?.(id);
+    if (raw) return colorToCss(raw);
+    // Fallback: emit a plain CSS var() — the browser resolves it natively
+    // (e.g. for SSR-injected initial animation styles).
+    return `var(--${id})`;
+  }
+
+  const parts = value.split('/');
+  if (parts.length < 2) return value;
+  const hex = parts[0];
+  const opacity = parseInt(parts[1], 10) / 100;
+  if (Number.isNaN(opacity)) return hex;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  if ([r, g, b].some(Number.isNaN)) return hex;
+  return `rgba(${r},${g},${b},${opacity})`;
 }
 
 // Constants
@@ -76,9 +201,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'x',
       unit: 'px',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '100',
+      units: POSITION_UNITS,
+      defaultFrom: '0px',
+      defaultFromAfterCurrent: '0px',
+      defaultTo: '100px',
     }],
   },
   {
@@ -87,9 +213,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'y',
       unit: 'px',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '100',
+      units: POSITION_UNITS,
+      defaultFrom: '0px',
+      defaultFromAfterCurrent: '0px',
+      defaultTo: '100px',
     }],
   },
   {
@@ -109,9 +236,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'rotation',
       unit: 'deg',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '45',
+      units: ANGLE_UNITS,
+      defaultFrom: '0deg',
+      defaultFromAfterCurrent: '0deg',
+      defaultTo: '45deg',
     }],
   },
   {
@@ -120,9 +248,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'skewX',
       unit: 'deg',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '30',
+      units: ANGLE_UNITS,
+      defaultFrom: '0deg',
+      defaultFromAfterCurrent: '0deg',
+      defaultTo: '30deg',
     }],
   },
   {
@@ -131,9 +260,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'skewY',
       unit: 'deg',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '30',
+      units: ANGLE_UNITS,
+      defaultFrom: '0deg',
+      defaultFromAfterCurrent: '0deg',
+      defaultTo: '30deg',
     }],
   },
   {
@@ -145,6 +275,41 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
       defaultFrom: '100',
       defaultFromAfterCurrent: '100',
       defaultTo: '0',
+    }],
+  },
+  {
+    type: 'height',
+    label: 'Height',
+    properties: [{
+      key: 'height',
+      unit: 'px',
+      units: SIZE_UNITS,
+      defaultFrom: '0px',
+      defaultFromAfterCurrent: '0px',
+      defaultTo: '100px',
+    }],
+  },
+  {
+    type: 'width',
+    label: 'Width',
+    properties: [{
+      key: 'width',
+      unit: 'px',
+      units: SIZE_UNITS,
+      defaultFrom: '0px',
+      defaultFromAfterCurrent: '0px',
+      defaultTo: '100px',
+    }],
+  },
+  {
+    type: 'background-color',
+    label: 'Background color',
+    properties: [{
+      key: 'backgroundColor',
+      unit: '',
+      defaultFrom: '#ffffff',
+      defaultFromAfterCurrent: '#ffffff',
+      defaultTo: '#000000',
     }],
   },
   {
@@ -162,7 +327,75 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
       ],
     }],
   },
+  {
+    type: 'blur',
+    label: 'Blur',
+    properties: [{
+      key: 'filterBlur',
+      unit: 'px',
+      defaultFrom: '0',
+      defaultFromAfterCurrent: '0',
+      defaultTo: '5',
+    }],
+  },
+  {
+    type: 'brightness',
+    label: 'Brightness',
+    properties: [{
+      key: 'filterBrightness',
+      unit: '',
+      defaultFrom: '1',
+      defaultFromAfterCurrent: '1',
+      defaultTo: '1.15',
+    }],
+  },
+  {
+    type: 'grayscale',
+    label: 'Grayscale',
+    properties: [{
+      key: 'filterGrayscale',
+      unit: '%',
+      defaultFrom: '0',
+      defaultFromAfterCurrent: '0',
+      defaultTo: '100',
+    }],
+  },
 ];
+
+/** Keys whose values participate in the combined CSS `filter` property */
+export const FILTER_PROPERTY_KEYS = ['filterBlur', 'filterBrightness', 'filterGrayscale'] as const;
+export type FilterPropertyKey = typeof FILTER_PROPERTY_KEYS[number];
+
+/** Map a filter sub-property key to its CSS function name */
+const FILTER_CSS_FUNCTIONS: Record<FilterPropertyKey, string> = {
+  filterBlur: 'blur',
+  filterBrightness: 'brightness',
+  filterGrayscale: 'grayscale',
+};
+
+/** Check if a tween property key contributes to the combined CSS `filter` property */
+export function isFilterPropertyKey(key: string): key is FilterPropertyKey {
+  return (FILTER_PROPERTY_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * Build the CSS `filter` string from a set of sub-property values.
+ * Only includes defined functions; returns `null` if none are set.
+ */
+export function buildFilterString(values: Partial<Record<FilterPropertyKey, string | null | undefined>>): string | null {
+  const parts: string[] = [];
+  for (const key of FILTER_PROPERTY_KEYS) {
+    const raw = values[key];
+    if (raw === null || raw === undefined || raw === '') continue;
+    const cfg = PROPERTY_OPTIONS
+      .flatMap((opt) => opt.properties)
+      .find((p) => p.key === key);
+    if (!cfg) continue;
+    const cssVal = resolveCssValue(raw, cfg);
+    parts.push(`${FILTER_CSS_FUNCTIONS[key]}(${cssVal})`);
+  }
+  return parts.length > 0 ? parts.join(' ') : null;
+}
 
 export const TRIGGER_LABELS: Record<TriggerType, string> = {
   'click': 'Click',
@@ -224,15 +457,28 @@ export function calculateTweenStartTime(tweens: InteractionTween[], index: numbe
   return 0;
 }
 
+/**
+ * Resolve a stored value into a CSS-compatible string.
+ * Multi-unit properties store value with unit (e.g. "100px"); bare numbers get the default unit.
+ */
+export function resolveCssValue(value: string, prop: PropertyConfig): string {
+  if (prop.units) {
+    if (/^-?[\d.]+$/.test(value)) return `${value}${prop.unit}`;
+    return value;
+  }
+  return prop.unit ? `${value}${prop.unit}` : value;
+}
+
 /** Convert a property value to GSAP-compatible format */
 export function toGsapValue(value: string | null | undefined, prop: PropertyConfig): string | number | undefined {
   if (value === null || value === undefined) return undefined;
-  // autoAlpha is stored as percentage (0-100), convert to decimal (0-1) for GSAP
   if (prop.key === 'autoAlpha') {
     return Number(value) / 100;
   }
-  // For other properties with units, append the unit
-  return prop.unit ? `${value}${prop.unit}` : value;
+  if (prop.key === 'backgroundColor') {
+    return colorToCss(value);
+  }
+  return resolveCssValue(value, prop);
 }
 
 /** Get all property options that are set in a tween (check both from and to) */
@@ -297,9 +543,42 @@ export interface EditorHiddenLayerInfo {
 }
 
 /**
+ * Whether a tween's on-load `from` state leaves the element hidden, so the
+ * editor should hide it by default and reveal it on selection. Covers explicit
+ * `display: hidden` (any trigger) plus toggle triggers (hover/click) whose
+ * resting state hides via opacity, scale-to-zero, or a translate that moves the
+ * element away (e.g. a slide-out dropdown clipped by an `overflow-hidden`
+ * wrapper). Intro triggers (load/scroll-into-view) reveal permanent content, so
+ * their transform/opacity `from` states must NOT hide it in the editor.
+ */
+function tweenHidesOnLoad(interaction: LayerInteraction, tween: InteractionTween): boolean {
+  const { trigger } = interaction;
+  const from = tween.from;
+  if (!from) return false;
+  const apply = tween.apply_styles;
+
+  if (from.display === 'hidden' && getEffectiveApplyStyle(trigger, 'display', apply) === 'on-load') {
+    return true;
+  }
+
+  if (trigger !== 'hover' && trigger !== 'click') return false;
+
+  const isOnLoad = (key: TweenPropertyKey) => getEffectiveApplyStyle(trigger, key, apply) === 'on-load';
+  const num = (v: unknown) => (v === null || v === undefined ? NaN : parseFloat(String(v)));
+
+  if (from.autoAlpha != null && isOnLoad('autoAlpha') && num(from.autoAlpha) === 0) return true;
+  if (from.scale != null && isOnLoad('scale') && num(from.scale) === 0) return true;
+  if (from.x != null && isOnLoad('x') && num(from.x) !== 0) return true;
+  if (from.y != null && isOnLoad('y') && num(from.y) !== 0) return true;
+
+  return false;
+}
+
+/**
  * Collect layer IDs that should be visually hidden on canvas in edit mode
- * These are layers with display: hidden animation and apply_styles: on-load
- * Returns a Map of layerId -> breakpoints (empty = all breakpoints)
+ * (display: hidden, or a toggle's on-load hidden resting state) so they're
+ * revealed only when selected. Returns a Map of layerId -> breakpoints
+ * (empty = all breakpoints).
  */
 export function collectEditorHiddenLayerIds(layers: Layer[]): Map<string, Breakpoint[]> {
   const hiddenLayerMap = new Map<string, Breakpoint[]>();
@@ -309,11 +588,7 @@ export function collectEditorHiddenLayerIds(layers: Layer[]): Map<string, Breakp
       if (layer.interactions) {
         layer.interactions.forEach((interaction) => {
           (interaction.tweens || []).forEach((tween) => {
-            // Check if display: hidden with on-load apply style
-            if (
-              tween.from?.display === 'hidden' &&
-              tween.apply_styles?.display === 'on-load'
-            ) {
+            if (tweenHidesOnLoad(interaction, tween)) {
               const breakpoints = interaction.timeline?.breakpoints || [];
               const existing = hiddenLayerMap.get(tween.layer_id);
 
@@ -451,37 +726,54 @@ export function generateInitialAnimationCSS(layers: Layer[]): InitialAnimationRe
           const breakpointValue = interaction.timeline?.breakpoints?.join(' ') || null;
 
           (interaction.tweens || []).forEach((tween) => {
+            // SplitText tweens target child elements (.word/.char/.line) created at
+            // run-time, not the parent layer. Painting the `from` state on the parent
+            // would offset/hide the whole element and never be cleared.
+            if (tween.splitText) return;
+
             const styles: string[] = [];
             const transforms: string[] = [];
+            const filterValues: Partial<Record<FilterPropertyKey, string>> = {};
 
-            // Build CSS from 'from' properties that have apply_styles: 'on-load'
+            // Build CSS from 'from' properties whose effective apply mode is 'on-load'.
+            // Intro triggers (load, scroll-into-view) are implicitly on-load to prevent flicker.
             PROPERTY_OPTIONS.forEach((opt) => {
               opt.properties.forEach((prop) => {
-                // Only apply styles for properties with apply_styles: 'on-load'
-                if (tween.apply_styles?.[prop.key] !== 'on-load') return;
+                if (getEffectiveApplyStyle(interaction.trigger, prop.key, tween.apply_styles) !== 'on-load') return;
 
                 const value = tween.from[prop.key];
                 if (value === null || value === undefined) return;
 
+                const cssVal = resolveCssValue(value, prop);
+
                 // Convert to CSS property - collect transforms separately to combine them
                 if (prop.key === 'x') {
-                  transforms.push(`translateX(${value}${prop.unit})`);
+                  transforms.push(`translateX(${cssVal})`);
                 } else if (prop.key === 'y') {
-                  transforms.push(`translateY(${value}${prop.unit})`);
+                  transforms.push(`translateY(${cssVal})`);
                 } else if (prop.key === 'rotation') {
-                  transforms.push(`rotate(${value}${prop.unit})`);
+                  transforms.push(`rotate(${cssVal})`);
                 } else if (prop.key === 'scale') {
                   transforms.push(`scale(${value})`);
                 } else if (prop.key === 'skewX') {
-                  transforms.push(`skewX(${value}${prop.unit})`);
+                  transforms.push(`skewX(${cssVal})`);
                 } else if (prop.key === 'skewY') {
-                  transforms.push(`skewY(${value}${prop.unit})`);
+                  transforms.push(`skewY(${cssVal})`);
                 } else if (prop.key === 'autoAlpha') {
                   const opacity = Number(value) / 100;
                   styles.push(`opacity: ${opacity}`);
                   if (opacity === 0) {
                     styles.push(`visibility: hidden`);
                   }
+                } else if (prop.key === 'width') {
+                  styles.push(`width: ${cssVal}`);
+                } else if (prop.key === 'height') {
+                  styles.push(`height: ${cssVal}`);
+                } else if (prop.key === 'backgroundColor') {
+                  styles.push(`background-color: ${colorToCss(value)}`);
+                } else if (isFilterPropertyKey(prop.key)) {
+                  // Accumulate; combined into a single `filter` declaration below
+                  filterValues[prop.key] = value;
                 } else if (prop.key === 'display') {
                   // Track elements that should start hidden using data attribute
                   if (value === 'hidden') {
@@ -497,6 +789,12 @@ export function generateInitialAnimationCSS(layers: Layer[]): InitialAnimationRe
             // Combine all transforms into a single property
             if (transforms.length > 0) {
               styles.push(`transform: ${transforms.join(' ')}`);
+            }
+
+            // Combine accumulated filter sub-properties into a single CSS declaration
+            const filterStr = buildFilterString(filterValues);
+            if (filterStr !== null) {
+              styles.push(`filter: ${filterStr}`);
             }
 
             if (styles.length > 0) {
@@ -549,6 +847,9 @@ export function buildGsapProps(tween: InteractionTween): GsapAnimationProps {
         return;
       }
 
+      // Filter sub-properties are combined into a single CSS `filter` string below
+      if (isFilterPropertyKey(prop.key)) return;
+
       const fromVal = toGsapValue(tween.from[prop.key], prop);
       const toVal = toGsapValue(tween.to[prop.key], prop);
 
@@ -560,6 +861,14 @@ export function buildGsapProps(tween: InteractionTween): GsapAnimationProps {
       }
     });
   });
+
+  // Combine filter sub-properties into a single CSS `filter` string so GSAP
+  // can tween it as one property (otherwise multiple `filter` writes would
+  // overwrite each other).
+  const fromFilter = buildFilterString(tween.from);
+  const toFilter = buildFilterString(tween.to);
+  if (fromFilter !== null) fromProps.filter = fromFilter;
+  if (toFilter !== null) toProps.filter = toFilter;
 
   return { from: fromProps, to: toProps, displayStart, displayEnd };
 }

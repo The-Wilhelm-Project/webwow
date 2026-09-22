@@ -6,12 +6,18 @@
  * Supports draft/published workflow with content hash-based change detection
  */
 
-import { getKnexClient } from '@/lib/knex-client';
-import { jsonb } from '@/lib/knex-helpers';
-import type { Component, Layer } from '@/types';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+import {
+  displayChangeName,
+  sortUnpublishedChanges,
+  type UnpublishedChange,
+} from '@/lib/publish-changes';
+import { getDeletedDraftSummaries } from '@/lib/sync-utils';
+import type { Component, ComponentVariant, Layer } from '@/types';
 import { generateComponentContentHash } from '../hash-utils';
 import { deleteTranslationsInBulk, markTranslationsIncomplete } from '@/lib/repositories/translationRepository';
 import { extractLayerContentMap } from '../localisation-utils';
+import { generateId } from '../utils';
 
 /**
  * Input data for creating a new component
@@ -20,19 +26,37 @@ export interface CreateComponentData {
   name: string;
   layers: Layer[];
   variables?: any[]; // Component variables for exposed properties
+  variants?: ComponentVariant[]; // Optional explicit variants; defaults to a single "Default"
+}
+
+/**
+ * Build a variants array from a layers tree. Used when seeding a new component
+ * or when persisting a `variants` change so the legacy `layers` column always
+ * mirrors `variants[0].layers`.
+ */
+function defaultVariantsFromLayers(layers: Layer[]): ComponentVariant[] {
+  return [{ id: generateId('cmpvar'), name: 'Default', layers }];
 }
 
 /**
  * Get all components (draft by default, excludes soft deleted)
  */
 export async function getAllComponents(isPublished: boolean = false): Promise<Component[]> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const data = await db('components')
+  const { data, error } = await client
+    .from('components')
     .select('*')
-    .where('is_published', isPublished)
-    .whereNull('deleted_at')
-    .orderBy('created_at', 'desc');
+    .eq('is_published', isPublished)
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch components: ${error.message}`);
+  }
 
   return data || [];
 }
@@ -42,16 +66,27 @@ export async function getAllComponents(isPublished: boolean = false): Promise<Co
  * With composite primary key, we need to specify is_published to get a single row
  */
 export async function getComponentById(id: string, isPublished: boolean = false): Promise<Component | null> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const data = await db('components')
+  const { data, error } = await client
+    .from('components')
     .select('*')
-    .where('id', id)
-    .where('is_published', isPublished)
-    .whereNull('deleted_at')
-    .first();
+    .eq('id', id)
+    .eq('is_published', isPublished)
+    .is('deleted_at', null)
+    .single();
 
-  return data || null;
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return null; // Not found
+    }
+    throw new Error(`Failed to fetch component: ${error.message}`);
+  }
+
+  return data;
 }
 
 /**
@@ -62,21 +97,29 @@ export async function getComponentsByIds(
   ids: string[],
   isPublished: boolean = false
 ): Promise<Record<string, Component>> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   if (ids.length === 0) {
     return {};
   }
 
-  const data = await db('components')
+  const { data, error } = await client
+    .from('components')
     .select('*')
-    .whereIn('id', ids)
-    .where('is_published', isPublished)
-    .whereNull('deleted_at');
+    .in('id', ids)
+    .eq('is_published', isPublished)
+    .is('deleted_at', null);
+
+  if (error) {
+    throw new Error(`Failed to fetch components: ${error.message}`);
+  }
 
   // Convert array to map for O(1) lookup
   const componentMap: Record<string, Component> = {};
-  (data || []).forEach(component => {
+  data?.forEach(component => {
     componentMap[component.id] = component;
   });
 
@@ -89,42 +132,70 @@ export async function getComponentsByIds(
 export async function createComponent(
   componentData: CreateComponentData
 ): Promise<Component> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  // Calculate content hash
+  // Variants are the source of truth; seed a "Default" variant from `layers`
+  // when none was provided so older callers keep working.
+  const variants: ComponentVariant[] = componentData.variants && componentData.variants.length > 0
+    ? componentData.variants
+    : defaultVariantsFromLayers(componentData.layers);
+  const primaryLayers = variants[0]?.layers ?? componentData.layers;
+
+  // Calculate content hash — includes every variant so non-primary variant
+  // edits are detected by `getUnpublishedComponents`.
   const contentHash = generateComponentContentHash({
     name: componentData.name,
-    layers: componentData.layers,
+    layers: primaryLayers,
     variables: componentData.variables,
+    variants,
   });
 
   const insertData: any = {
     name: componentData.name,
-    layers: jsonb(componentData.layers),
+    layers: primaryLayers,
+    variants,
     content_hash: contentHash,
     is_published: false,
   };
 
   // Include variables if provided
   if (componentData.variables?.length) {
-    insertData.variables = jsonb(componentData.variables);
+    insertData.variables = componentData.variables;
   }
 
-  const [data] = await db('components')
+  const { data, error } = await client
+    .from('components')
     .insert(insertData)
-    .returning('*');
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create component: ${error.message}`);
+  }
 
   return data;
 }
 
 /**
- * Update a component and recalculate content hash
+ * Update a component and recalculate content hash.
+ *
+ * `variants` is the source of truth for the layer trees. When `variants` is
+ * provided, the legacy `layers` column is mirrored to `variants[0].layers` so
+ * any reader that has not been migrated to variants still works. When only
+ * `layers` is provided, `variants[0].layers` is updated in place and the rest
+ * of the variants are preserved.
  */
 export async function updateComponent(
   id: string,
-  updates: Partial<Pick<Component, 'name' | 'layers' | 'variables'>>
+  updates: Partial<Pick<Component, 'name' | 'layers' | 'variables' | 'variants'>>
 ): Promise<Component> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // Get current component to merge with updates
   const current = await getComponentById(id);
@@ -132,53 +203,71 @@ export async function updateComponent(
     throw new Error('Component not found');
   }
 
-  // Detect removed and changed layer content if layers are being updated
-  if (updates.layers !== undefined) {
-    const oldContentMap = extractLayerContentMap(current.layers || [], 'component', id);
-    const newContentMap = extractLayerContentMap(updates.layers, 'component', id);
+  // Reconcile variants and layers so they stay in sync regardless of which one
+  // the caller updated.
+  const currentVariants: ComponentVariant[] = current.variants && current.variants.length > 0
+    ? current.variants
+    : defaultVariantsFromLayers(current.layers || []);
 
-    // Find removed keys (exist in old but not in new)
+  let finalVariants: ComponentVariant[] = currentVariants;
+  if (updates.variants !== undefined) {
+    finalVariants = updates.variants.length > 0
+      ? updates.variants
+      : defaultVariantsFromLayers([]);
+  } else if (updates.layers !== undefined) {
+    finalVariants = currentVariants.map((v, i) => (i === 0 ? { ...v, layers: updates.layers! } : v));
+  }
+  const finalLayers = finalVariants[0]?.layers ?? (updates.layers ?? current.layers ?? []);
+
+  // Detect removed and changed layer content for translation bookkeeping.
+  // We only consider the primary variant layers because translations for the
+  // other variants will be tracked through their own update events.
+  const oldPrimaryLayers = current.layers || [];
+  if (oldPrimaryLayers !== finalLayers) {
+    const oldContentMap = extractLayerContentMap(oldPrimaryLayers, 'component', id);
+    const newContentMap = extractLayerContentMap(finalLayers, 'component', id);
+
     const removedKeys = Object.keys(oldContentMap).filter(key => !(key in newContentMap));
-
-    // Find changed keys (exist in both but value differs)
     const changedKeys = Object.keys(newContentMap).filter(
       key => key in oldContentMap && oldContentMap[key] !== newContentMap[key]
     );
 
-    // Delete translations for removed content
     if (removedKeys.length > 0) {
       await deleteTranslationsInBulk('component', id, removedKeys);
     }
-
-    // Mark translations as incomplete for changed content
     if (changedKeys.length > 0) {
       await markTranslationsIncomplete('component', id, changedKeys);
     }
   }
 
-  // Merge current data with updates for hash calculation
-  const finalData = {
-    name: updates.name !== undefined ? updates.name : current.name,
-    layers: updates.layers !== undefined ? updates.layers : current.layers,
-    variables: updates.variables !== undefined ? updates.variables : current.variables,
-  };
+  // Recalculate content hash from the final, merged data.
+  const finalName = updates.name !== undefined ? updates.name : current.name;
+  const finalVariables = updates.variables !== undefined ? updates.variables : current.variables;
+  const contentHash = generateComponentContentHash({
+    name: finalName,
+    layers: finalLayers,
+    variables: finalVariables,
+    variants: finalVariants,
+  });
 
-  // Recalculate content hash
-  const contentHash = generateComponentContentHash(finalData);
-
-  const { layers, variables, ...restUpdates } = updates;
-
-  const [data] = await db('components')
-    .where('id', id)
-    .where('is_published', false)
+  const { data, error } = await client
+    .from('components')
     .update({
-      ...restUpdates,
-      ...(layers !== undefined && { layers: jsonb(layers) }),
-      ...(variables !== undefined && { variables: jsonb(variables) }),
+      ...(updates.name !== undefined ? { name: updates.name } : {}),
+      ...(updates.variables !== undefined ? { variables: updates.variables } : {}),
+      layers: finalLayers,
+      variants: finalVariants,
       content_hash: contentHash,
       updated_at: new Date().toISOString(),
     })
-    .returning('*');
+    .eq('id', id)
+    .eq('is_published', false) // Update draft version only
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update component: ${error.message}`);
+  }
 
   return data;
 }
@@ -188,15 +277,26 @@ export async function updateComponent(
  * Used to find the published version of a draft component
  */
 export async function getPublishedComponentById(id: string): Promise<Component | null> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const data = await db('components')
+  const { data, error } = await client
+    .from('components')
     .select('*')
-    .where('id', id)
-    .where('is_published', true)
-    .first();
+    .eq('id', id)
+    .eq('is_published', true)
+    .single();
 
-  return data || null;
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return null; // Not found
+    }
+    throw new Error(`Failed to fetch published component: ${error.message}`);
+  }
+
+  return data;
 }
 
 /**
@@ -205,7 +305,10 @@ export async function getPublishedComponentById(id: string): Promise<Component |
  * Uses composite primary key (id, is_published) - same ID for draft and published versions
  */
 export async function publishComponent(draftComponentId: string): Promise<Component> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // Get the draft component
   const draftComponent = await getComponentById(draftComponentId);
@@ -214,63 +317,108 @@ export async function publishComponent(draftComponentId: string): Promise<Compon
   }
 
   // Upsert published version - composite key handles insert/update automatically
-  const [data] = await db('components')
-    .insert({
-      id: draftComponent.id,
+  const { data, error } = await client
+    .from('components')
+    .upsert({
+      id: draftComponent.id, // Same ID for draft and published versions
       name: draftComponent.name,
-      layers: jsonb(draftComponent.layers),
-      variables: jsonb(draftComponent.variables ?? null),
-      content_hash: draftComponent.content_hash,
+      layers: draftComponent.layers,
+      variants: draftComponent.variants,
+      variables: draftComponent.variables,
+      content_hash: draftComponent.content_hash, // Copy hash from draft
       is_published: true,
       updated_at: new Date().toISOString(),
+    }, {
+      onConflict: 'id,is_published',
     })
-    .onConflict(['id', 'is_published'])
-    .merge()
-    .returning('*');
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to publish component: ${error.message}`);
+  }
 
   return data;
 }
 
 /**
  * Publish multiple components in batch
- * Uses batch upsert for efficiency
+ * Only upserts components whose content_hash actually changed.
+ * Returns the IDs of components that were modified.
  */
-export async function publishComponents(componentIds: string[]): Promise<{ count: number }> {
+export async function publishComponents(componentIds: string[]): Promise<{ count: number; changedComponentIds: string[] }> {
   if (componentIds.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedComponentIds: [] };
   }
 
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // Batch fetch all draft components (excluding soft deleted)
-  const draftComponents = await db('components')
+  const { data: draftComponents, error: fetchError } = await client
+    .from('components')
     .select('*')
-    .whereIn('id', componentIds)
-    .where('is_published', false)
-    .whereNull('deleted_at');
+    .in('id', componentIds)
+    .eq('is_published', false)
+    .is('deleted_at', null);
 
-  if (!draftComponents || draftComponents.length === 0) {
-    return { count: 0 };
+  if (fetchError) {
+    throw new Error(`Failed to fetch draft components: ${fetchError.message}`);
   }
 
-  // Prepare components for batch upsert
-  const componentsToUpsert = draftComponents.map(draft => ({
-    id: draft.id,
-    name: draft.name,
-    layers: jsonb(draft.layers),
-    variables: jsonb(draft.variables ?? null),
-    content_hash: draft.content_hash,
-    is_published: true,
-    updated_at: new Date().toISOString(),
-  }));
+  if (!draftComponents || draftComponents.length === 0) {
+    return { count: 0, changedComponentIds: [] };
+  }
 
-  // Batch upsert all components
-  await db('components')
-    .insert(componentsToUpsert)
-    .onConflict(['id', 'is_published'])
-    .merge();
+  // Fetch existing published versions to compare hashes
+  const { data: publishedComponents } = await client
+    .from('components')
+    .select('id, content_hash')
+    .in('id', draftComponents.map(d => d.id))
+    .eq('is_published', true);
 
-  return { count: componentsToUpsert.length };
+  const publishedHashById = new Map<string, string>();
+  if (publishedComponents) {
+    for (const pub of publishedComponents) {
+      if (pub.content_hash) publishedHashById.set(pub.id, pub.content_hash);
+    }
+  }
+
+  // Only upsert components that are new or have changed
+  const componentsToUpsert = draftComponents
+    .filter(draft => {
+      const pubHash = publishedHashById.get(draft.id);
+      return !pubHash || pubHash !== draft.content_hash;
+    })
+    .map(draft => ({
+      id: draft.id,
+      name: draft.name,
+      layers: draft.layers,
+      variants: draft.variants,
+      variables: draft.variables,
+      content_hash: draft.content_hash,
+      is_published: true,
+      updated_at: new Date().toISOString(),
+    }));
+
+  if (componentsToUpsert.length > 0) {
+    const { error: upsertError } = await client
+      .from('components')
+      .upsert(componentsToUpsert, {
+        onConflict: 'id,is_published',
+      });
+
+    if (upsertError) {
+      throw new Error(`Failed to publish components: ${upsertError.message}`);
+    }
+  }
+
+  return {
+    count: componentsToUpsert.length,
+    changedComponentIds: componentsToUpsert.map(c => c.id),
+  };
 }
 
 /**
@@ -280,14 +428,22 @@ export async function publishComponents(componentIds: string[]): Promise<{ count
  * - Its draft content_hash differs from published content_hash (needs republishing)
  */
 export async function getUnpublishedComponents(): Promise<Component[]> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // Get all draft components (excluding soft deleted)
-  const draftComponents = await db('components')
+  const { data: draftComponents, error } = await client
+    .from('components')
     .select('*')
-    .where('is_published', false)
-    .whereNull('deleted_at')
-    .orderBy('created_at', 'desc');
+    .eq('is_published', false)
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch draft components: ${error.message}`);
+  }
 
   if (!draftComponents || draftComponents.length === 0) {
     return [];
@@ -297,10 +453,15 @@ export async function getUnpublishedComponents(): Promise<Component[]> {
 
   // Batch fetch all published components for the draft IDs
   const draftIds = draftComponents.map(c => c.id);
-  const publishedComponents = await db('components')
+  const { data: publishedComponents, error: publishedError } = await client
+    .from('components')
     .select('*')
-    .whereIn('id', draftIds)
-    .where('is_published', true);
+    .in('id', draftIds)
+    .eq('is_published', true);
+
+  if (publishedError) {
+    throw new Error(`Failed to fetch published components: ${publishedError.message}`);
+  }
 
   // Build lookup map
   const publishedById = new Map<string, Component>();
@@ -327,15 +488,86 @@ export async function getUnpublishedComponents(): Promise<Component[]> {
 }
 
 /**
+ * Named components pending publish: new, modified, and deleted.
+ * Selects only id/name/hash — not layer trees.
+ */
+export async function getUnpublishedComponentChanges(): Promise<UnpublishedChange[]> {
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
+
+  const [draftResult, deleted] = await Promise.all([
+    client
+      .from('components')
+      .select('id, name, content_hash')
+      .eq('is_published', false)
+      .is('deleted_at', null),
+    getDeletedDraftSummaries('components'),
+  ]);
+
+  if (draftResult.error) {
+    throw new Error(`Failed to fetch draft components: ${draftResult.error.message}`);
+  }
+
+  const drafts = draftResult.data || [];
+  const publishedHashById = new Map<string, string | null>();
+
+  if (drafts.length > 0) {
+    const { data: publishedRows, error } = await client
+      .from('components')
+      .select('id, content_hash')
+      .in('id', drafts.map((component) => component.id))
+      .eq('is_published', true);
+
+    if (error) {
+      throw new Error(`Failed to fetch published components: ${error.message}`);
+    }
+
+    for (const published of publishedRows || []) {
+      publishedHashById.set(published.id, published.content_hash);
+    }
+  }
+
+  const changed: UnpublishedChange[] = [];
+  for (const draft of drafts) {
+    if (!publishedHashById.has(draft.id)) {
+      changed.push({ id: draft.id, name: displayChangeName(draft.name), status: 'new' });
+      continue;
+    }
+
+    if (draft.content_hash !== publishedHashById.get(draft.id)) {
+      changed.push({ id: draft.id, name: displayChangeName(draft.name), status: 'modified' });
+    }
+  }
+
+  const deletedChanges: UnpublishedChange[] = deleted.map((component) => ({
+    id: component.id,
+    name: displayChangeName(component.name),
+    status: 'deleted',
+  }));
+
+  return sortUnpublishedChanges([...changed, ...deletedChanges]);
+}
+
+/**
  * Hard-delete soft-deleted draft components and their published counterparts.
  */
 export async function hardDeleteSoftDeletedComponents(): Promise<{ count: number }> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const deletedDrafts = await db('components')
+  const { data: deletedDrafts, error } = await client
+    .from('components')
     .select('id')
-    .where('is_published', false)
-    .whereNotNull('deleted_at');
+    .eq('is_published', false)
+    .not('deleted_at', 'is', null);
+
+  if (error) {
+    throw new Error(`Failed to fetch deleted draft components: ${error.message}`);
+  }
 
   if (!deletedDrafts || deletedDrafts.length === 0) {
     return { count: 0 };
@@ -343,20 +575,26 @@ export async function hardDeleteSoftDeletedComponents(): Promise<{ count: number
 
   const ids = deletedDrafts.map(c => c.id);
 
-  try {
-    await db('components')
-      .whereIn('id', ids)
-      .where('is_published', true)
-      .delete();
-  } catch (pubError) {
+  const { error: pubError } = await client
+    .from('components')
+    .delete()
+    .in('id', ids)
+    .eq('is_published', true);
+
+  if (pubError) {
     console.error('Failed to delete published components:', pubError);
   }
 
-  await db('components')
-    .whereIn('id', ids)
-    .where('is_published', false)
-    .whereNotNull('deleted_at')
-    .delete();
+  const { error: draftError } = await client
+    .from('components')
+    .delete()
+    .in('id', ids)
+    .eq('is_published', false)
+    .not('deleted_at', 'is', null);
+
+  if (draftError) {
+    throw new Error(`Failed to delete draft components: ${draftError.message}`);
+  }
 
   return { count: deletedDrafts.length };
 }
@@ -393,23 +631,32 @@ export interface SoftDeleteResult {
  * Find all pages and components that use a specific component
  */
 export async function findEntitiesUsingComponent(componentId: string): Promise<AffectedEntity[]> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   const affectedEntities: AffectedEntity[] = [];
 
   // Find all page_layers records that contain this component
-  const pageLayersRecords = await db('page_layers')
-    .select('id', 'page_id', 'layers', 'is_published')
-    .whereNull('deleted_at')
-    .where('is_published', false);
+  const { data: pageLayersRecords, error: pageError } = await client
+    .from('page_layers')
+    .select('id, page_id, layers, is_published')
+    .is('deleted_at', null)
+    .eq('is_published', false); // Only draft versions
+
+  if (pageError) {
+    throw new Error(`Failed to fetch page layers: ${pageError.message}`);
+  }
 
   // Get page names for better UX
-  const pageIds = (pageLayersRecords || []).map(r => r.page_id).filter(Boolean);
+  const pageIds = pageLayersRecords?.map(r => r.page_id).filter(Boolean) || [];
   let pageNames: Record<string, string> = {};
   if (pageIds.length > 0) {
-    const pages = await db('pages')
-      .select('id', 'name')
-      .whereIn('id', pageIds);
+    const { data: pages } = await client
+      .from('pages')
+      .select('id, name')
+      .in('id', pageIds);
     pageNames = (pages || []).reduce((acc, p) => ({ ...acc, [p.id]: p.name }), {});
   }
 
@@ -429,11 +676,16 @@ export async function findEntitiesUsingComponent(componentId: string): Promise<A
   }
 
   // Find all components (draft versions) that contain this component
-  const componentRecords = await db('components')
-    .select('id', 'name', 'layers')
-    .whereNull('deleted_at')
-    .where('is_published', false)
-    .where('id', '!=', componentId);
+  const { data: componentRecords, error: compError } = await client
+    .from('components')
+    .select('id, name, layers')
+    .is('deleted_at', null)
+    .eq('is_published', false)
+    .neq('id', componentId); // Exclude the component being deleted
+
+  if (compError) {
+    throw new Error(`Failed to fetch components: ${compError.message}`);
+  }
 
   // Check each component
   for (const record of componentRecords || []) {
@@ -472,46 +724,76 @@ function layersContainComponent(layers: Layer[], componentId: string): boolean {
  * Returns the deleted component and affected entities for undo/redo
  */
 export async function softDeleteComponent(id: string): Promise<SoftDeleteResult> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
   // Get the component before deleting
-  const component = await db('components')
+  const { data: component, error: fetchError } = await client
+    .from('components')
     .select('*')
-    .where('id', id)
-    .where('is_published', false)
-    .whereNull('deleted_at')
-    .first();
+    .eq('id', id)
+    .eq('is_published', false)
+    .is('deleted_at', null)
+    .single();
 
-  if (!component) {
+  if (fetchError || !component) {
     throw new Error('Component not found');
   }
 
   // Find all affected entities
   const affectedEntities = await findEntitiesUsingComponent(id);
 
-  // Detach component from all affected page_layers
+  // Detach component from all affected page_layers and recompute hashes
+  const { generatePageLayersHash } = await import('@/lib/hash-utils');
+
   for (const entity of affectedEntities) {
     if (entity.type === 'page') {
-      try {
-        await db('page_layers')
-          .where('id', entity.id)
-          .update({
-            layers: jsonb(entity.newLayers),
-            updated_at: new Date().toISOString(),
-          });
-      } catch (updateError) {
+      // Fetch existing generated_css to keep hash consistent
+      const { data: existing } = await client
+        .from('page_layers')
+        .select('generated_css')
+        .eq('id', entity.id)
+        .eq('is_published', false)
+        .single();
+
+      const contentHash = generatePageLayersHash({
+        layers: entity.newLayers,
+        generated_css: existing?.generated_css || null,
+      });
+
+      const { error: updateError } = await client
+        .from('page_layers')
+        .update({
+          layers: entity.newLayers,
+          content_hash: contentHash,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', entity.id)
+        // CRITICAL: page_layers has composite PK (id, is_published). Without
+        // this filter, the UPDATE writes the new layers + draft content_hash
+        // onto the published row too. Two failure modes:
+        //   1. Published row carries new layers but stale generated_css —
+        //      site renders broken classes for the deleted component.
+        //   2. batchPublishPageLayers compares hashes, sees draft == published
+        //      (we just wrote it!), and skips the page on publish.
+        .eq('is_published', false);
+
+      if (updateError) {
         console.error(`Failed to update page_layers ${entity.id}:`, updateError);
       }
     } else if (entity.type === 'component') {
-      try {
-        await db('components')
-          .where('id', entity.id)
-          .where('is_published', false)
-          .update({
-            layers: jsonb(entity.newLayers),
-            updated_at: new Date().toISOString(),
-          });
-      } catch (updateError) {
+      const { error: updateError } = await client
+        .from('components')
+        .update({
+          layers: entity.newLayers,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', entity.id)
+        .eq('is_published', false);
+
+      if (updateError) {
         console.error(`Failed to update component ${entity.id}:`, updateError);
       }
     }
@@ -519,9 +801,14 @@ export async function softDeleteComponent(id: string): Promise<SoftDeleteResult>
 
   // Soft delete the component (both draft and published versions)
   const deletedAt = new Date().toISOString();
-  await db('components')
-    .where('id', id)
-    .update({ deleted_at: deletedAt });
+  const { error: deleteError } = await client
+    .from('components')
+    .update({ deleted_at: deletedAt })
+    .eq('id', id);
+
+  if (deleteError) {
+    throw new Error(`Failed to soft delete component: ${deleteError.message}`);
+  }
 
   return {
     component: { ...component, deleted_at: deletedAt },
@@ -533,13 +820,22 @@ export async function softDeleteComponent(id: string): Promise<SoftDeleteResult>
  * Restore a soft-deleted component
  */
 export async function restoreComponent(id: string): Promise<Component> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  const [data] = await db('components')
-    .where('id', id)
-    .where('is_published', false)
+  const { data, error } = await client
+    .from('components')
     .update({ deleted_at: null })
-    .returning('*');
+    .eq('id', id)
+    .eq('is_published', false)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to restore component: ${error.message}`);
+  }
 
   return data;
 }
@@ -548,23 +844,39 @@ export async function restoreComponent(id: string): Promise<Component> {
  * Hard delete a component (permanent, use with caution)
  */
 export async function deleteComponent(id: string): Promise<void> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  await db('components')
-    .where('id', id)
-    .delete();
+  const { error } = await client
+    .from('components')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    throw new Error(`Failed to delete component: ${error.message}`);
+  }
 }
 
 /**
  * Update a component's thumbnail URL (draft only)
  */
 export async function updateComponentThumbnail(id: string, thumbnailUrl: string | null): Promise<void> {
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
 
-  await db('components')
-    .where('id', id)
-    .where('is_published', false)
-    .update({ thumbnail_url: thumbnailUrl });
+  const { error } = await client
+    .from('components')
+    .update({ thumbnail_url: thumbnailUrl })
+    .eq('id', id)
+    .eq('is_published', false);
+
+  if (error) {
+    throw new Error(`Failed to update component thumbnail: ${error.message}`);
+  }
 }
 
 /**

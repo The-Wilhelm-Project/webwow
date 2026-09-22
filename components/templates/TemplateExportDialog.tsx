@@ -37,7 +37,7 @@ export function TemplateExportDialog({
   onOpenChange,
   onSuccess,
 }: TemplateExportDialogProps) {
-  const { authenticated } = useAuthStore();
+  const { user } = useAuthStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -80,7 +80,7 @@ export function TemplateExportDialog({
           templateId,
           templateName: templateName.trim(),
           description: description.trim(),
-          email: '',
+          email: user?.email || '',
         }),
       });
 

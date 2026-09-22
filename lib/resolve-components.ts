@@ -4,7 +4,9 @@
  * Applies component variable overrides during resolution
  */
 
-import type { Layer, Component, ComponentVariable, ComponentVariableValue, LayerVariables } from '@/types';
+import type { Layer, Component, ComponentVariable, ComponentVariableValue, LayerVariables, VariantSettingsValue } from '@/types';
+import { getComponentVariantLayers } from './component-variant-utils';
+import { normalizeComponentVariableValue } from './variable-utils';
 
 /**
  * Remap collection_layer_id in a FieldVariable using the ID map.
@@ -47,16 +49,16 @@ function remapDesignColor(dcv: any, idMap: Map<string, string>): any {
  */
 function remapCollectionLayerIdsInContent(content: any, idMap: Map<string, string>): any {
   if (typeof content === 'string') {
-    // Remap in inline variable tags: <webwow-inline-variable>{"...collection_layer_id":"old"...}</webwow-inline-variable>
+    // Remap in inline variable tags: <ycode-inline-variable>{"...collection_layer_id":"old"...}</ycode-inline-variable>
     return content.replace(
-      /<webwow-inline-variable>([\s\S]*?)<\/webwow-inline-variable>/g,
+      /<ycode-inline-variable>([\s\S]*?)<\/ycode-inline-variable>/g,
       (match, inner) => {
         try {
           const parsed = JSON.parse(inner.trim());
           const clid = parsed?.data?.collection_layer_id;
           if (clid && idMap.has(clid)) {
             parsed.data.collection_layer_id = idMap.get(clid);
-            return `<webwow-inline-variable>${JSON.stringify(parsed)}</webwow-inline-variable>`;
+            return `<ycode-inline-variable>${JSON.stringify(parsed)}</ycode-inline-variable>`;
           }
         } catch { /* not valid JSON, leave as-is */ }
         return match;
@@ -181,6 +183,26 @@ function remapVariableCollectionLayerIds(vars: LayerVariables, idMap: Map<string
     if (designChanged) { result.design = newDesign; changed = true; }
   }
 
+  // Conditional visibility conditions targeting a collection by layer ID
+  // (e.g. empty-state "has no items" rules inside a component instance)
+  if (vars.conditionalVisibility?.groups?.length) {
+    const groups = vars.conditionalVisibility.groups;
+    const newGroups = groups.map((group) => {
+      if (!Array.isArray(group?.conditions)) return group;
+      const newConditions = group.conditions.map((cond) => {
+        const mapped = cond?.collectionLayerId ? idMap.get(cond.collectionLayerId) : undefined;
+        return mapped && mapped !== cond.collectionLayerId ? { ...cond, collectionLayerId: mapped } : cond;
+      });
+      return newConditions.some((c, i) => c !== group.conditions[i])
+        ? { ...group, conditions: newConditions }
+        : group;
+    });
+    if (newGroups.some((g, i) => g !== groups[i])) {
+      result.conditionalVisibility = { ...vars.conditionalVisibility, groups: newGroups };
+      changed = true;
+    }
+  }
+
   return changed ? result : vars;
 }
 
@@ -189,11 +211,23 @@ function remapVariableCollectionLayerIds(vars: LayerVariables, idMap: Map<string
  * This enables animations to target the correct elements when multiple instances exist.
  * @param layers - Layers to transform
  * @param instanceLayerId - The component instance's layer ID used as namespace
+ * @param rootMasterId - The component root's master ID, mapped to the instance ID so
+ *   child interactions targeting the root (which renders as the instance) resolve correctly
  * @returns Transformed layers with remapped IDs and interaction references
  */
-export function transformLayerIdsForInstance(layers: Layer[], instanceLayerId: string): Layer[] {
+export function transformLayerIdsForInstance(
+  layers: Layer[],
+  instanceLayerId: string,
+  rootMasterId?: string,
+): Layer[] {
   // Build ID map: original ID -> instance-specific ID
   const idMap = new Map<string, string>();
+
+  // The component root renders with the instance ID, so map its master ID
+  // to the instance ID for child tweens/interactions that target the root.
+  if (rootMasterId && rootMasterId !== instanceLayerId) {
+    idMap.set(rootMasterId, instanceLayerId);
+  }
 
   // First pass: collect all layer IDs and generate new ones
   const collectIds = (layerList: Layer[]) => {
@@ -214,6 +248,7 @@ export function transformLayerIdsForInstance(layers: Layer[], instanceLayerId: s
     const transformedLayer: Layer = {
       ...layer,
       id: newId,
+      _originalLayerId: layer._originalLayerId || layer.id,
     };
 
     // Remap interaction IDs and tween layer_id references
@@ -256,6 +291,7 @@ const OVERRIDE_CATEGORIES: OverrideCategory[] = [
   'audio',
   'video',
   'icon',
+  'variant',
 ];
 
 function findOverrideByVariableId(
@@ -328,23 +364,44 @@ export function applyComponentOverrides(
   return layers.map(layer => {
     let updatedLayer = { ...layer };
 
+    // If this nested-component instance has its variant choice driven by a
+    // parent component variable, resolve the variant id from the parent's
+    // override (or the variable's default) and stamp it on `componentVariantId`
+    // before `resolveComponents` reads it. The parent variable is generic — it
+    // doesn't carry a target component id — so the variant id might not exist
+    // on this layer's referenced component; in that case
+    // `getComponentVariantLayers` falls back to the first variant.
+    if (layer.componentVariantVariableId) {
+      const variableId = layer.componentVariantVariableId;
+      const variableDef = componentVariables?.find(v => v.id === variableId);
+      const overrideValue = overrides?.variant?.[variableId];
+      const value = (overrideValue ?? variableDef?.default_value) as VariantSettingsValue | undefined;
+      if (value && typeof value === 'object' && 'variant_id' in value && value.variant_id) {
+        updatedLayer = { ...updatedLayer, componentVariantId: value.variant_id };
+      }
+    }
+
     // Check if this layer has a text variable linked
     const linkedTextVariableId = layer.variables?.text?.id;
     if (linkedTextVariableId) {
       const variableDef = componentVariables?.find(v => v.id === linkedTextVariableId);
       const overrideCategory = (variableDef?.type === 'rich_text' ? 'rich_text' : 'text') as OverrideCategory;
       const overrideValue = overrides?.[overrideCategory]?.[linkedTextVariableId];
-      const valueToApply = overrideValue ?? variableDef?.default_value;
+      const valueToApply = normalizeComponentVariableValue(overrideValue ?? variableDef?.default_value);
 
       // Only apply if it's a text variable (has 'type' property, not ImageSettingsValue)
       if (valueToApply && 'type' in valueToApply) {
-        // Apply the value to this layer's text variable
+        // Apply the value to this layer's text variable. Mark layers whose
+        // text came from an instance override so `injectTranslatedText`
+        // doesn't clobber the (already page-scope-translated) override value
+        // with the component-scope default translation.
         updatedLayer = {
           ...updatedLayer,
           variables: {
             ...updatedLayer.variables,
             text: valueToApply as any,
           },
+          ...(overrideValue !== undefined ? { _textFromOverride: true } as any : {}),
         };
       }
     }
@@ -378,6 +435,7 @@ export function applyComponentOverrides(
             ...(imageValue.height && { height: imageValue.height }),
             ...(imageValue.loading && { loading: imageValue.loading }),
           },
+          ...(overrideValue !== undefined ? { _imageFromOverride: true } as any : {}),
         };
       }
     }
@@ -385,20 +443,34 @@ export function applyComponentOverrides(
     // Check if this layer has a link variable linked
     const linkedLinkVariableId = (layer.variables?.link as any)?.variable_id;
     if (linkedLinkVariableId) {
-      // Check for override first, then fall back to variable's default value
       const overrideValue = overrides?.link?.[linkedLinkVariableId];
       const variableDef = componentVariables?.find(v => v.id === linkedLinkVariableId);
-      const linkValue = (overrideValue ?? variableDef?.default_value) as any;
 
-      if (linkValue) {
-        // Apply the value to this layer's link variable, keeping the variable_id for reference
-        updatedLayer = {
-          ...updatedLayer,
-          variables: {
-            ...updatedLayer.variables,
-            link: { ...linkValue, variable_id: linkedLinkVariableId },
-          },
-        };
+      // Only resolve when the link variable belongs to THIS component's scope
+      // (an override exists here or a matching variable is defined). A link that
+      // was already resolved for a nested component instance keeps its
+      // `variable_id` for reference — skipping out-of-scope ids stops an outer
+      // component pass from stripping a valid nested link it doesn't own.
+      if (overrideValue !== undefined || variableDef) {
+        // Use `!== undefined` (not `??`) so an explicit `null` override (user cleared
+        // the link via "No link") is respected instead of reverting to the default.
+        const linkValue = (overrideValue !== undefined ? overrideValue : variableDef?.default_value) as any;
+
+        if (linkValue) {
+          // Apply the value to this layer's link variable, keeping the variable_id for reference
+          updatedLayer = {
+            ...updatedLayer,
+            variables: {
+              ...updatedLayer.variables,
+              link: { ...linkValue, variable_id: linkedLinkVariableId },
+            },
+          };
+        } else {
+          // Explicit "No link" — strip any inherited link settings from the layer
+          // so the rendered element has no href / link wrapper.
+          const { link: _ignored, ...restVariables } = updatedLayer.variables ?? {};
+          updatedLayer = { ...updatedLayer, variables: restVariables };
+        }
       }
     }
 
@@ -525,6 +597,7 @@ function tagLayersWithComponentId(layers: Layer[], componentId: string): Layer[]
  * @param components - Array of available components
  * @param parentComponentVariables - Variables of the parent component (for variableLinks resolution)
  * @param parentOverrides - Overrides from the parent component instance (for variableLinks resolution)
+ * @param _visitedComponentIds - Internal: tracks component IDs in the current resolution chain to prevent circular references
  * @returns Layer tree with components resolved
  */
 export function resolveComponents(
@@ -532,6 +605,7 @@ export function resolveComponents(
   components: Component[],
   parentComponentVariables?: ComponentVariable[],
   parentOverrides?: Layer['componentOverrides'],
+  _visitedComponentIds?: Set<string>,
 ): Layer[] {
   // Resolve variableLinks at this level first so nested instances
   // get the correct overrides before their children are resolved
@@ -539,19 +613,37 @@ export function resolveComponents(
     ? applyComponentOverrides(layers, parentOverrides, parentComponentVariables)
     : layers;
 
+  const visited = _visitedComponentIds ?? new Set<string>();
+
   return effectiveLayers.map(layer => {
     // If this layer is a component instance, populate its children from the component
     if (layer.componentId) {
+      // Circular reference guard: skip if this component is already being resolved up the chain
+      if (visited.has(layer.componentId)) {
+        console.warn('[resolveComponents] Circular component reference detected, skipping:', layer.componentId);
+        return { ...layer, children: [] };
+      }
+
       const component = components.find(c => c.id === layer.componentId);
 
-      if (component?.layers?.length) {
-        // The component's first layer is the actual content (Section, etc.)
-        const componentContent = component.layers[0];
+      // Pick the layer tree for the variant this instance is bound to. Falls
+      // back to the first variant when the requested variant no longer exists
+      // (silent fallback for deleted variants) or to the legacy `layers` field
+      // for components stored before the variants migration.
+      const variantLayers = component ? getComponentVariantLayers(component, layer.componentVariantId) : [];
+
+      if (component && variantLayers.length) {
+        // Track this component in the resolution chain
+        const innerVisited = new Set(visited);
+        innerVisited.add(layer.componentId);
+
+        // The variant's first layer is the actual content (Section, etc.)
+        const componentContent = variantLayers[0];
 
         // Recursively resolve nested components, passing current component's
         // variables and this instance's overrides so nested variableLinks resolve correctly
         const nestedResolved = componentContent.children
-          ? resolveComponents(componentContent.children, components, component.variables, layer.componentOverrides)
+          ? resolveComponents(componentContent.children, components, component.variables, layer.componentOverrides, innerVisited)
           : [];
 
         // Apply component variable overrides (or defaults) before tagging
@@ -577,18 +669,39 @@ export function resolveComponents(
         // Transform layer IDs to be instance-specific
         // This ensures each component instance has unique IDs for proper animation targeting
         const resolvedChildren = taggedChildren.length
-          ? transformLayerIdsForInstance(taggedChildren, layer.id)
+          ? transformLayerIdsForInstance(taggedChildren, layer.id, componentContent.id)
           : [];
+
+        // Remap root layer interactions to reference transformed child IDs
+        // Without this, tween.layer_id still points to original IDs that no longer exist in the DOM
+        let resolvedInteractions = overriddenRoot.interactions;
+        if (resolvedInteractions?.length) {
+          resolvedInteractions = resolvedInteractions.map(interaction => ({
+            ...interaction,
+            id: `${layer.id}-${interaction.id}`,
+            tweens: interaction.tweens.map(tween => ({
+              ...tween,
+              layer_id: tween.layer_id === componentContent.id
+                ? layer.id
+                : `${layer.id}-${tween.layer_id}`,
+            })),
+          }));
+        }
 
         // Merge component content with instance layer, keeping instance ID
         // IMPORTANT: Keep componentId so LayerRenderer knows this is a component instance
+        // _originalLayerId is the component's root template ID — translations on the
+        // component's root wrapper (text/media) are stored under this ID, while the
+        // runtime ID becomes the page-instance ID.
         return {
           ...layer,
           ...overriddenRoot,
           id: layer.id,
           componentId: layer.componentId, // Keep the original componentId
           _masterComponentId: component.id,
+          _originalLayerId: componentContent.id,
           children: resolvedChildren,
+          interactions: resolvedInteractions,
         };
       }
 
@@ -599,7 +712,7 @@ export function resolveComponents(
     if (layer.children?.length) {
       return {
         ...layer,
-        children: resolveComponents(layer.children, components, parentComponentVariables, parentOverrides),
+        children: resolveComponents(layer.children, components, parentComponentVariables, parentOverrides, visited),
       };
     }
 

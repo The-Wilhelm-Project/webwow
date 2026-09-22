@@ -636,6 +636,19 @@ export const formTemplates: Record<string, BlockTemplate> = {
           children: [
             {
               name: 'option',
+              attributes: { value: '', disabled: 'true', hidden: 'true' },
+              settings: { isPlaceholder: true },
+              variables: {
+                text: {
+                  type: 'dynamic_text',
+                  data: {
+                    content: 'Select an option'
+                  }
+                }
+              }
+            },
+            {
+              name: 'option',
               attributes: { value: 'option1' },
               variables: {
                 text: {

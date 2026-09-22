@@ -1,8 +1,9 @@
 import { getKnexClient, closeKnexClient, testKnexConnection } from '../knex-client';
-import { STORAGE_FOLDERS } from '@/lib/asset-constants';
-import { uploadFile, getPublicUrl } from '@/lib/local-storage';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { STORAGE_BUCKET, STORAGE_FOLDERS } from '@/lib/asset-constants';
 import { migrations } from '../migrations-loader';
-import { WEBWOW_EXTERNAL_API_URL } from '@/lib/config';
+import { guardKnexForMigrationReplay } from '@/lib/migration-replay-guard';
+import { YCODE_EXTERNAL_API_URL } from '@/lib/config';
 
 /**
  * Tables to truncate when applying a template.
@@ -21,6 +22,8 @@ const TABLES_TO_TRUNCATE = [
   'page_layers',
   'pages',
   'page_folders',
+  'color_variables',
+  'fonts',
 ];
 
 export interface TemplateCategory {
@@ -63,7 +66,7 @@ export async function listTemplatesWithCategories(): Promise<{
   templates: Template[];
   categories: TemplateCategory[];
 }> {
-  const response = await fetch(`${WEBWOW_EXTERNAL_API_URL}/api/templates`, {
+  const response = await fetch(`${YCODE_EXTERNAL_API_URL}/api/templates`, {
     cache: 'no-store',
   });
 
@@ -100,7 +103,7 @@ export async function listCategories(): Promise<TemplateCategory[]> {
  * Get template details from the template service
  */
 export async function getTemplate(id: string): Promise<TemplateDetails | null> {
-  const response = await fetch(`${WEBWOW_EXTERNAL_API_URL}/api/templates/${id}`, {
+  const response = await fetch(`${YCODE_EXTERNAL_API_URL}/api/templates/${id}`, {
     cache: 'no-store',
   });
 
@@ -122,6 +125,13 @@ export async function getTemplate(id: string): Promise<TemplateDetails | null> {
  * @param knex - Knex transaction or client
  */
 async function copyTemplateAssetsToUserStorage(knex: ReturnType<typeof getKnexClient> extends Promise<infer T> ? T : never): Promise<void> {
+  const supabase = await getSupabaseAdmin();
+  if (!supabase) {
+    console.warn('[copyTemplateAssets] Supabase not configured, skipping asset copy');
+    return;
+  }
+
+  // Find all template assets that need to be copied (have public_url but no storage_path)
   const templateAssets = await knex('assets')
     .whereNotNull('public_url')
     .whereNull('storage_path')
@@ -134,8 +144,9 @@ async function copyTemplateAssetsToUserStorage(knex: ReturnType<typeof getKnexCl
 
   for (const asset of templateAssets) {
     try {
+      // Download from template-service CDN with timeout
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000);
+      const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
       let response: Response;
       try {
@@ -155,22 +166,105 @@ async function copyTemplateAssetsToUserStorage(knex: ReturnType<typeof getKnexCl
       const blob = await response.blob();
       const buffer = Buffer.from(await blob.arrayBuffer());
 
+      // Generate unique storage path
       const timestamp = Date.now();
       const random = Math.random().toString(36).substring(2, 15);
       const extension = asset.filename.split('.').pop() || 'bin';
       const storagePath = `${STORAGE_FOLDERS.WEBSITE}/${timestamp}-${random}.${extension}`;
 
-      await uploadFile(storagePath, buffer);
-      const publicUrl = getPublicUrl(storagePath);
+      // Upload to user's storage
+      const { data, error } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(storagePath, buffer, {
+          contentType: asset.mime_type || 'application/octet-stream',
+          cacheControl: '3600',
+          upsert: false,
+        });
 
+      if (error) {
+        console.warn(`[copyTemplateAssets] Failed to upload ${asset.filename}:`, error);
+        continue;
+      }
+
+      // Get new public URL
+      const { data: urlData } = supabase.storage
+        .from(STORAGE_BUCKET)
+        .getPublicUrl(data.path);
+
+      // Update asset record with new storage path and URL
       await knex('assets')
         .where('id', asset.id)
         .update({
-          storage_path: storagePath,
-          public_url: publicUrl,
+          storage_path: data.path,
+          public_url: urlData.publicUrl,
         });
     } catch (err) {
       console.warn(`[copyTemplateAssets] Error copying ${asset.filename}:`, err);
+    }
+  }
+
+  // Copy custom font files (fonts with url from template CDN but no storage_path)
+  const fontsTableExists = await knex.schema.hasTable('fonts');
+  if (fontsTableExists) {
+    const templateFonts = await knex('fonts')
+      .whereNotNull('url')
+      .whereNull('storage_path')
+      .select('id', 'name', 'kind', 'url');
+
+    for (const font of templateFonts) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+
+        let response: Response;
+        try {
+          response = await fetch(font.url, { signal: controller.signal });
+        } catch (fetchErr) {
+          clearTimeout(timeout);
+          console.warn(`[copyTemplateAssets] Failed to fetch font ${font.name}:`, fetchErr);
+          continue;
+        }
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+          console.warn(`[copyTemplateAssets] Failed to download font ${font.name}: ${response.status}`);
+          continue;
+        }
+
+        const blob = await response.blob();
+        const buffer = Buffer.from(await blob.arrayBuffer());
+
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 15);
+        const extension = font.kind || 'woff2';
+        const storagePath = `${STORAGE_FOLDERS.WEBSITE}/fonts/${timestamp}-${random}.${extension}`;
+
+        const { data, error } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .upload(storagePath, buffer, {
+            contentType: extension === 'woff2' ? 'font/woff2' : 'font/ttf',
+            cacheControl: '31536000',
+            upsert: false,
+          });
+
+        if (error) {
+          console.warn(`[copyTemplateAssets] Failed to upload font ${font.name}:`, error);
+          continue;
+        }
+
+        const { data: urlData } = supabase.storage
+          .from(STORAGE_BUCKET)
+          .getPublicUrl(data.path);
+
+        await knex('fonts')
+          .where('id', font.id)
+          .update({
+            storage_path: data.path,
+            url: urlData.publicUrl,
+          });
+      } catch (err) {
+        console.warn(`[copyTemplateAssets] Error copying font ${font.name}:`, err);
+      }
     }
   }
 }
@@ -222,9 +316,12 @@ async function runPendingMigrationsForTemplate(
     return;
   }
 
+  // Destructive DDL is blocked: these up()s replay against live data.
+  const guardedKnex = guardKnexForMigrationReplay(knex);
+
   for (const migration of pendingMigrations) {
     try {
-      await migration.up(knex);
+      await migration.up(guardedKnex);
     } catch (error) {
       // Log the error but continue - migrations should be idempotent
       // Schema changes (ADD COLUMN IF NOT EXISTS) will no-op
@@ -265,7 +362,7 @@ export async function applyTemplate(
   try {
     // 1. Fetch processed SQL from template service
     const response = await fetch(
-      `${WEBWOW_EXTERNAL_API_URL}/api/templates/${templateId}/apply`,
+      `${YCODE_EXTERNAL_API_URL}/api/templates/${templateId}/apply`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

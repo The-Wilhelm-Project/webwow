@@ -1,0 +1,95 @@
+import { NextRequest } from 'next/server';
+import { credentials } from '@/lib/credentials';
+import { testSupabaseConnection } from '@/lib/supabase-server';
+import { testSupabaseDirectConnection } from '@/lib/knex-client';
+import { parseSupabaseConfig } from '@/lib/supabase-config-parser';
+import { noCache } from '@/lib/api-response';
+import type { SupabaseConfig } from '@/types';
+
+/**
+ * POST /ycode/api/setup/connect
+ *
+ * Test and store Supabase credentials (4 fields)
+ */
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { anon_key, service_role_key, connection_url, db_password, supabase_url } = body;
+
+    // Validate required fields
+    if (!anon_key || !service_role_key || !connection_url || !db_password) {
+      return noCache(
+        { error: 'Missing required fields: anon_key, service_role_key, connection_url, db_password' },
+        400
+      );
+    }
+
+    // Create config object
+    const config: SupabaseConfig = {
+      anonKey: anon_key,
+      serviceRoleKey: service_role_key,
+      connectionUrl: connection_url,
+      dbPassword: db_password,
+      ...(supabase_url ? { supabaseUrl: supabase_url } : {}),
+    };
+
+    let parsed;
+    try {
+      parsed = parseSupabaseConfig(config);
+    } catch (error) {
+      return noCache(
+        { error: error instanceof Error ? error.message : 'Invalid connection URL format' },
+        400
+      );
+    }
+
+    // Test Supabase API connection
+    const supabaseTestResult = await testSupabaseConnection(config);
+    if (!supabaseTestResult.success) {
+      const isSelfHosted = !!supabase_url;
+      const rawError = supabaseTestResult.error || 'Supabase API connection test failed';
+      const isAuthError = /unauthorized|invalid.*key|forbidden/i.test(rawError);
+
+      let error = rawError;
+      if (isSelfHosted && isAuthError) {
+        error =
+          `Supabase API returned "${rawError}". ` +
+          'For self-hosted setups, verify that SERVICE_ROLE_KEY and ANON_KEY in your .env ' +
+          'were generated with the same JWT_SECRET. If you changed any of these values, restart ' +
+          'your Docker containers with "docker compose down && docker compose up -d".';
+      }
+
+      return noCache({ error }, 400);
+    }
+
+    // Test database connection
+    const dbTestResult = await testSupabaseDirectConnection({
+      dbHost: parsed.dbHost,
+      dbPort: parsed.dbPort,
+      dbName: parsed.dbName,
+      dbUser: parsed.dbUser,
+      dbPassword: parsed.dbPassword,
+      ssl: !supabase_url,
+    });
+    if (!dbTestResult.success) {
+      return noCache(
+        { error: `Database connection failed: ${dbTestResult.error || 'Unknown error'}` },
+        400
+      );
+    }
+
+    // Store credentials
+    await credentials.set('supabase_config', config);
+
+    return noCache({
+      success: true,
+      message: 'Supabase connected successfully',
+    });
+  } catch (error) {
+    console.error('[Setup API] Connection failed:', error);
+    return noCache(
+      { error: error instanceof Error ? error.message : 'Connection failed' },
+      500
+    );
+  }
+}

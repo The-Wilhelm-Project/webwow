@@ -326,12 +326,18 @@ export const RichTextLink = Mark.create<RichTextLinkOptions>({
 });
 
 /**
- * Extract LinkSettings from mark attributes
+ * Extract LinkSettings from mark attributes.
+ * Tolerates the legacy `{ href, linkType }` shape (older MCP-authored links) by
+ * mapping a bare `href` into the canonical url variable structure.
  */
 export function getLinkSettingsFromMark(attrs: Record<string, any>): LinkSettings {
+  const legacyUrl = !attrs.url && typeof attrs.href === 'string' && attrs.href
+    ? { type: 'dynamic_text' as const, data: { content: attrs.href } }
+    : undefined;
+
   return {
-    type: attrs.type || 'url',
-    url: attrs.url || undefined,
+    type: attrs.type || attrs.linkType || 'url',
+    url: attrs.url || legacyUrl || undefined,
     email: attrs.email || undefined,
     phone: attrs.phone || undefined,
     asset: attrs.asset || undefined,

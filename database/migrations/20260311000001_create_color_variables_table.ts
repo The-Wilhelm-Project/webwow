@@ -19,6 +19,31 @@ export async function up(knex: Knex): Promise<void> {
       table.timestamp('updated_at', { useTz: true }).defaultTo(knex.fn.now());
     });
 
+    await knex.schema.raw('ALTER TABLE color_variables ENABLE ROW LEVEL SECURITY');
+
+    await knex.schema.raw(`
+      CREATE POLICY "Color variables are viewable"
+        ON color_variables FOR SELECT
+        USING (true)
+    `);
+
+    await knex.schema.raw(`
+      CREATE POLICY "Authenticated users can modify color variables"
+        ON color_variables FOR INSERT
+        WITH CHECK ((SELECT auth.uid()) IS NOT NULL)
+    `);
+
+    await knex.schema.raw(`
+      CREATE POLICY "Authenticated users can update color variables"
+        ON color_variables FOR UPDATE
+        USING ((SELECT auth.uid()) IS NOT NULL)
+    `);
+
+    await knex.schema.raw(`
+      CREATE POLICY "Authenticated users can delete color variables"
+        ON color_variables FOR DELETE
+        USING ((SELECT auth.uid()) IS NOT NULL)
+    `);
   }
 }
 

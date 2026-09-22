@@ -8,8 +8,12 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-inter);
-  --font-mono: var(--font-inter);
+  /* `--font-inter` is only defined inside the builder layout. On public
+     published pages the variable is undefined and these fall back to the
+     system font stacks — keeps marketing sites from downloading Inter just
+     because something used the generic `font-sans` class. */
+  --font-sans: var(--font-inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif);
+  --font-mono: var(--font-inter, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -45,6 +49,7 @@
   --radius-xl: calc(var(--radius) + 4px);
 
   --animate-shimmer: shimmer 2s ease-in-out infinite;
+  --animate-indeterminate: indeterminate 1.5s ease-in-out infinite;
 }
 
 @keyframes shimmer {
@@ -54,6 +59,68 @@
   100% {
     background-position: 200% 0;
   }
+}
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+/* Shimmering outline drawn over canvas layers the AI agent is actively editing.
+   Uses the mask "gradient border" trick: the element box minus its content-box
+   leaves only the padding ring, which we paint with a base violet tint plus a
+   moving highlight band (animated via background-position) for the shimmer. */
+.ai-activity-outline {
+  border-radius: 0;
+  padding: 1px;
+  background:
+    linear-gradient(110deg, transparent 30%, rgba(196, 181, 253, 0.95) 50%, transparent 70%),
+    rgba(139, 92, 246, 0.4);
+  background-size: 220% 100%, 100% 100%;
+  animation: shimmer 3s ease-in-out infinite;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+/* Shimmering ring for in-DOM elements the AI agent is actively working on — used
+   in the CMS for collection rows, the items area, and individual item rows.
+   Unlike .ai-activity-outline (an absolutely-positioned canvas overlay) this is
+   an inset ::after pseudo-element, so any element works as long as it is
+   positioned. Reuses the same mask "gradient border" + shimmer animation. */
+.ai-activity-shimmer {
+  position: relative;
+}
+.ai-activity-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  z-index: 2;
+  background:
+    linear-gradient(110deg, transparent 30%, rgba(196, 181, 253, 0.95) 50%, transparent 70%),
+    rgba(139, 92, 246, 0.4);
+  background-size: 220% 100%, 100% 100%;
+  animation: shimmer 3s ease-in-out infinite;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
 }
 
 :root {
@@ -155,8 +222,10 @@
   }
 }
 
-/* Icon SVG styling */
-[data-icon] {
+/* Icon SVG styling — exclude `.hidden` so Tailwind's `display: none` always
+   wins for hidden icons (this author rule is unlayered and would otherwise
+   beat any layered `.hidden` utility). */
+[data-icon]:not(.hidden) {
   display: inline-block;
 }
 
@@ -164,7 +233,34 @@
   width: 100%;
   height: 100%;
   display: block;
+}
+
+/* Force inline SVG fill/stroke attributes (even on nested nodes) to inherit
+   the icon layer's text color — matches the legacy `<i>` wrapper behavior so
+   migrated icons with hard-coded colors still tint with `text-*` utilities.
+   Note: must not blanket-apply `fill: currentColor` to the root <svg>, since
+   that would override `fill="none"` and solid-fill stroke-only icons. */
+[data-icon] [fill]:not([fill="none"]) {
   fill: currentColor;
+}
+
+[data-icon] [stroke]:not([stroke="none"]),
+[data-icon] [stroke-width] {
+  stroke: currentColor;
+}
+
+/* AI chat composer (TipTap) */
+.ai-chat-composer.ProseMirror {
+  @apply outline-none w-full;
+}
+
+.ai-chat-composer.ProseMirror p {
+  @apply m-0;
+}
+
+.ai-chat-composer.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  @apply text-muted-foreground/50 pointer-events-none float-left h-0;
 }
 
 /* RichTextEditor Styles */
@@ -254,8 +350,47 @@
   @apply border-t border-border my-4;
 }
 
-/* Custom dropdown chevron for styled select elements on published pages */
-#ybody select.appearance-none {
+.rich-text-editor-full.ProseMirror .tableWrapper {
+  @apply overflow-x-auto max-w-full min-w-0 my-2;
+  width: 100%;
+}
+
+.rich-text-editor-full.ProseMirror table {
+  @apply w-full border-separate border-spacing-0 border border-border rounded-lg overflow-hidden;
+}
+
+.rich-text-editor-full.ProseMirror th,
+.rich-text-editor-full.ProseMirror td {
+  @apply px-2 py-1.5 text-left align-top min-w-[80px];
+}
+
+.rich-text-editor-full.ProseMirror tr + tr td,
+.rich-text-editor-full.ProseMirror tr + tr th {
+  @apply border-t border-border;
+}
+
+.rich-text-editor-full.ProseMirror td + td,
+.rich-text-editor-full.ProseMirror td + th,
+.rich-text-editor-full.ProseMirror th + td,
+.rich-text-editor-full.ProseMirror th + th {
+  @apply border-l border-border;
+}
+
+.rich-text-editor-full.ProseMirror th {
+  @apply bg-muted font-semibold;
+}
+
+.rich-text-editor-full.ProseMirror th p,
+.rich-text-editor-full.ProseMirror td p {
+  @apply m-0;
+}
+
+.rich-text-editor-full.ProseMirror .selectedCell {
+  @apply bg-accent/50;
+}
+
+/* Custom dropdown chevron for select elements (native arrow removed by form reset) */
+#ybody select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;

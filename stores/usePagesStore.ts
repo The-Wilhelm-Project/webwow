@@ -1,13 +1,15 @@
 'use client';
 
 import { create } from 'zustand';
-import type { Layer, Page, PageLayers, PageFolder, PageItemDuplicateResult, CollectionItemWithValues } from '../types';
+import type { Layer, LayerStyle, Page, PageLayers, PageFolder, PageItemDuplicateResult, CollectionItemWithValues } from '../types';
 import { pagesApi, pageLayersApi, foldersApi } from '../lib/api';
+import { getStatusFlagsFromAction, type StatusAction } from '../lib/collection-field-utils';
 import { getLayerFromTemplate, getBlockName } from '../lib/templates/blocks';
 import { cloneDeep } from 'lodash';
 import {
   canHaveChildren,
   canAddChild,
+  canPasteIntoParent,
   regenerateIdsWithInteractionRemapping,
   canMoveLayer,
   findLayerById,
@@ -25,6 +27,17 @@ import { getDescendantFolderIds, isHomepage, findHomepage, findNextSelection } f
 import { updateLayersWithStyle, detachStyleFromLayers } from '../lib/layer-style-utils';
 import { updateLayersWithComponent, detachComponentFromLayers } from '../lib/component-utils';
 import { useComponentsStore, triggerThumbnailGeneration } from './useComponentsStore';
+
+/**
+ * Module-level dedupe map for in-flight loadDraft requests.
+ * Kept outside the store so subscribers do not re-render when load
+ * state changes, while still preventing duplicate HTTP fetches.
+ *
+ * NOTE: This map lives outside the Zustand store and will NOT be cleared
+ * by store resets (e.g. in tests or HMR). If a store reset/destroy helper
+ * is added, it must also call `inflightDraftLoads.clear()`.
+ */
+const inflightDraftLoads = new Map<string, Promise<void>>();
 
 interface PagesState {
   pages: Page[];
@@ -67,6 +80,7 @@ interface PagesActions {
   updateLayerClasses: (pageId: string, layerId: string, classes: string) => void;
   saveDraft: (pageId: string) => Promise<void>;
   publishPage: (pageId: string) => Promise<void>;
+  setPageStatus: (pageId: string, action: StatusAction) => Promise<void>;
   addLayer: (pageId: string, parentLayerId: string | null, layerName: string) => void;
   addLayerWithId: (pageId: string, parentLayerId: string | null, layer: Layer) => void;
 
@@ -80,6 +94,7 @@ interface PagesActions {
   updatePageLocal: (pageId: string, updates: Partial<Page>) => void;
   removePage: (pageId: string) => void;
   setDraftLayers: (pageId: string, layers: Layer[]) => void;
+  setDraftGeneratedCss: (pageId: string, css: string) => void;
   copyLayer: (pageId: string, layerId: string) => Layer | null;
   copyLayers: (pageId: string, layerIds: string[]) => Layer[]; // New batch copy
   duplicateLayer: (pageId: string, layerId: string) => Layer | null;
@@ -88,12 +103,12 @@ interface PagesActions {
   pasteInside: (pageId: string, targetLayerId: string, layerToPaste: Layer) => Layer | null;
 
   // Layer Style Actions
-  updateStyleOnLayers: (styleId: string, newClasses: string, newDesign?: Layer['design']) => void;
-  detachStyleFromAllLayers: (styleId: string) => void;
+  updateStyleOnLayers: (styleId: string, stylesById: Map<string, LayerStyle>) => void;
+  detachStyleFromAllLayers: (styleId: string, stylesById?: Map<string, LayerStyle>) => void;
 
   // Component Actions
   createComponentFromLayer: (pageId: string, layerId: string, componentName: string) => Promise<string | null>;
-  updateComponentOnLayers: (componentId: string, newLayers: Layer[]) => void;
+  updateComponentOnLayers: (componentId: string) => void;
   detachComponentFromAllLayers: (componentId: string) => void;
 
   // CMS Binding Cleanup Actions
@@ -127,17 +142,28 @@ export function consumePageMcpSync(pageId: string): boolean {
 }
 
 function updateLayerInTree(tree: Layer[], layerId: string, updater: (l: Layer) => Layer): Layer[] {
-  return tree.map((node) => {
+  // Preserve identity for branches that don't contain `layerId` so downstream
+  // React.memo on LayerItem can bail out on unchanged subtrees instead of
+  // re-rendering the entire layer tree on every property edit.
+  let changed = false;
+  const next = tree.map((node) => {
     if (node.id === layerId) {
+      changed = true;
       return updater(node);
     }
 
     if (node.children && node.children.length > 0) {
-      return { ...node, children: updateLayerInTree(node.children, layerId, updater) };
+      const newChildren = updateLayerInTree(node.children, layerId, updater);
+      if (newChildren !== node.children) {
+        changed = true;
+        return { ...node, children: newChildren };
+      }
     }
 
     return node;
   });
+
+  return changed ? next : tree;
 }
 
 /**
@@ -304,41 +330,55 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
   },
 
   loadDraft: async (pageId) => {
+    // Dedupe concurrent loads for the same page. Multiple components (e.g.
+    // LeftSidebar and CenterCanvas) may both fire loadDraft on a page switch;
+    // only one HTTP request should be in flight at a time per page.
+    const existing = inflightDraftLoads.get(pageId);
+    if (existing) {
+      return existing;
+    }
+
     // Check if we already have a draft with unsaved changes
     const existingDraft = get().draftsByPageId[pageId];
 
-    set({ isLoading: true, error: null });
-    try {
-      const response = await pageLayersApi.getDraft(pageId);
-      if (response.error) {
-        set({ error: response.error, isLoading: false });
-        return;
-      }
-      if (response.data) {
-        // If we had local changes, we need to decide what to do
-        // For now, we'll prefer server data when explicitly loading (e.g., page switch)
-        // but log a warning if we're overwriting local changes
-        if (existingDraft &&
-            JSON.stringify(existingDraft.layers) !== JSON.stringify(response.data.layers)) {
-          console.warn('⚠️ loadDraft: Overwriting local changes with server data');
+    const promise = (async () => {
+      set({ error: null });
+      try {
+        const response = await pageLayersApi.getDraft(pageId);
+        if (response.error) {
+          set({ error: response.error });
+          return;
         }
+        if (response.data) {
+          // If we had local changes, we need to decide what to do
+          // For now, we'll prefer server data when explicitly loading (e.g., page switch)
+          // but log a warning if we're overwriting local changes
+          if (existingDraft &&
+              JSON.stringify(existingDraft.layers) !== JSON.stringify(response.data.layers)) {
+            console.warn('⚠️ loadDraft: Overwriting local changes with server data');
+          }
 
-        set((state) => ({
-          draftsByPageId: { ...state.draftsByPageId, [pageId]: response.data! },
-          isLoading: false,
-        }));
+          set((state) => ({
+            draftsByPageId: { ...state.draftsByPageId, [pageId]: response.data! },
+          }));
 
-        // Initialize version tracking with loaded state (awaited to ensure it completes before edits)
-        try {
-          const { initializeVersionTracking } = await import('@/lib/version-tracking');
-          initializeVersionTracking('page_layers', pageId, response.data!.layers);
-        } catch (err) {
-          console.error('Failed to initialize version tracking:', err);
+          // Initialize version tracking with loaded state (awaited to ensure it completes before edits)
+          try {
+            const { initializeVersionTracking } = await import('@/lib/version-tracking');
+            initializeVersionTracking('page_layers', pageId, response.data!.layers);
+          } catch (err) {
+            console.error('Failed to initialize version tracking:', err);
+          }
         }
+      } catch (error) {
+        set({ error: 'Failed to load draft' });
+      } finally {
+        inflightDraftLoads.delete(pageId);
       }
-    } catch (error) {
-      set({ error: 'Failed to load draft', isLoading: false });
-    }
+    })();
+
+    inflightDraftLoads.set(pageId, promise);
+    return promise;
   },
 
   loadAllDrafts: async () => {
@@ -485,11 +525,18 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
           // The new state will trigger another auto-save which will record its own version
         }
 
-        // After successfully saving the draft, generate and save CSS from ALL pages
+        // After successfully saving the draft, generate per-page CSS server-side
+        // and also regenerate the global draft_css for builder preview
         try {
-          const { generateAndSaveCSS } = await import('@/lib/client/cssGenerator');
+          // Per-page CSS: generate server-side for just this page (background, non-blocking)
+          fetch('/ycode/api/css/generate-pages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pageIds: [pageId] }),
+          }).catch(() => {});
 
-          // Collect layers from ALL pages for comprehensive CSS generation
+          // Global draft_css: still needed for builder preview
+          const { generateAndSaveCSS } = await import('@/lib/client/cssGenerator');
           const allLayers: Layer[] = [];
           const allDrafts = get().draftsByPageId;
           Object.values(allDrafts).forEach((pageDraft) => {
@@ -497,11 +544,9 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
               allLayers.push(...pageDraft.layers);
             }
           });
-
           await generateAndSaveCSS(allLayers);
         } catch (cssError) {
           console.error('Failed to generate CSS after save:', cssError);
-          // Don't fail the save operation if CSS generation fails
         }
       }
     } catch (error) {
@@ -515,7 +560,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
   publishPage: async (pageId) => {
     set({ isLoading: true, error: null });
     try {
-      const response = await fetch('/webwow/api/publish', {
+      const response = await fetch('/ycode/api/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pageIds: [pageId] }),
@@ -530,6 +575,44 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       set({ isLoading: false });
     } catch (error) {
       set({ error: 'Failed to publish page', isLoading: false });
+    }
+  },
+
+  setPageStatus: async (pageId, action) => {
+    const previousPages = get().pages;
+    const previousPage = previousPages.find(p => p.id === pageId);
+    const { isPublishable, isPublished } = getStatusFlagsFromAction(action);
+
+    // Optimistically reflect the new status; clear modified since it now matches
+    set(state => ({
+      pages: state.pages.map(p =>
+        p.id === pageId
+          ? { ...p, is_publishable: isPublishable, has_published_version: isPublished, is_modified: false }
+          : p
+      ),
+    }));
+
+    try {
+      const response = await pagesApi.setPageStatus(pageId, action);
+      if (response.error) {
+        throw new Error(response.error);
+      }
+
+      // Replace with server response for accurate computed status
+      const serverPage = response.data;
+      if (serverPage) {
+        set(state => ({
+          pages: state.pages.map(p => (p.id === pageId ? serverPage : p)),
+        }));
+      }
+    } catch (error) {
+      // Revert optimistic update
+      if (previousPage) {
+        set(state => ({
+          pages: state.pages.map(p => (p.id === pageId ? previousPage : p)),
+          error: error instanceof Error ? error.message : 'Failed to update page status',
+        }));
+      }
     }
   },
 
@@ -1177,6 +1260,13 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
 
   addPage: (page: Page) => {
     const { pages } = get();
+    // Idempotent: a `page_created` broadcast is received by every mounted
+    // page-updates subscription (the builder and the pages sidebar both
+    // subscribe), so the same new page can arrive more than once — especially
+    // for AI/MCP-created pages, where the broadcast comes from a separate
+    // connection the acting client also receives. Skip if we already have it so
+    // the pages list never holds a duplicate id (which crashes the tree render).
+    if (pages.some((existing) => existing.id === page.id)) return;
     set({ pages: [...pages, page] });
   },
 
@@ -1196,6 +1286,14 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       pages: updatedPages,
       draftsByPageId: remainingDrafts
     });
+
+    // Drop the version-tracking cache entry so the deleted page's layer JSON
+    // doesn't linger in memory for the rest of the session.
+    import('@/lib/version-tracking').then(({ clearVersionTracking }) => {
+      clearVersionTracking('page_layers', pageId);
+    }).catch(() => {
+      // non-fatal: cache will be replaced on next session
+    });
   },
 
   setDraftLayers: (pageId, layers) => {
@@ -1214,6 +1312,23 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       },
     });
 
+  },
+
+  // Store the server-compiled Tailwind CSS for a page so the editor canvas can
+  // inject it directly (mirroring the published page). This is the reliable
+  // source of truth for colors/styles on AI-built pages, where the canvas's
+  // Tailwind Browser CDN JIT is too flaky to compile large bulk inserts.
+  setDraftGeneratedCss: (pageId, css) => {
+    const { draftsByPageId } = get();
+    const draft = draftsByPageId[pageId];
+    if (!draft) return;
+    if (draft.generated_css === css) return;
+    set({
+      draftsByPageId: {
+        ...draftsByPageId,
+        [pageId]: { ...draft, generated_css: css },
+      },
+    });
   },
 
   copyLayer: (pageId, layerId) => {
@@ -1457,6 +1572,11 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     const result = findParentAndIndex(draft.layers, targetLayerId);
     if (!result) {
       console.error('❌ TARGET LAYER NOT FOUND:', targetLayerId);
+      return null;
+    }
+
+    // Check link nesting: the pasted layer becomes a sibling, so validate against the parent
+    if (result.parent && !canPasteIntoParent(draft.layers, result.parent.id, newLayer)) {
       return null;
     }
 
@@ -1847,22 +1967,24 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       return { success: false, error: 'Page not found' };
     }
 
-    // Dynamic pages cannot be duplicated
-    if (originalPage.is_dynamic) {
-      return { success: false, error: 'Dynamic pages cannot be duplicated' };
-    }
-
     // Generate temporary ID for optimistic update
     const tempId = `temp-page-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const tempPublishKey = `temp-${Date.now()}`;
     const newOrder = originalPage.order + 1;
 
+    // Dynamic pages keep their original slug pattern; other pages get a temporary
+    // unique slug until the server returns the real duplicated page.
+    const tempSlug = originalPage.is_dynamic
+      ? originalPage.slug
+      : `${originalPage.slug}-copy-${Date.now()}`;
+
     // Create temporary duplicated page
     const tempPage: Page = {
       id: tempId,
       name: `${originalPage.name} (Copy)`,
-      slug: `${originalPage.slug}-copy-${Date.now()}`,
+      slug: tempSlug,
       is_published: false,
+      is_publishable: originalPage.is_publishable ?? true,
       page_folder_id: originalPage.page_folder_id,
       order: newOrder, // Place right after original
       depth: originalPage.depth,
@@ -1947,7 +2069,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     // Start API call in background (don't await immediately)
     (async () => {
       try {
-        const response = await fetch(`/webwow/api/pages/${pageId}/duplicate`, {
+        const response = await fetch(`/ycode/api/pages/${pageId}/duplicate`, {
           method: 'POST',
         });
 
@@ -1970,8 +2092,8 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
         // (The backend increments the order of siblings when duplicating)
         try {
           const [pagesResponse, foldersResponse] = await Promise.all([
-            fetch('/webwow/api/pages'),
-            fetch('/webwow/api/folders')
+            fetch('/ycode/api/pages'),
+            fetch('/ycode/api/folders')
           ]);
 
           const pagesData = await pagesResponse.json();
@@ -2508,7 +2630,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     // Start API call in background (don't await immediately)
     (async () => {
       try {
-        const response = await fetch(`/webwow/api/folders/${folderId}/duplicate`, {
+        const response = await fetch(`/ycode/api/folders/${folderId}/duplicate`, {
           method: 'POST',
         });
 
@@ -2533,8 +2655,8 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
         try {
           // Fetch fresh data from database
           const [pagesResponse, foldersResponse] = await Promise.all([
-            fetch('/webwow/api/pages'),
-            fetch('/webwow/api/folders')
+            fetch('/ycode/api/pages'),
+            fetch('/ycode/api/folders')
           ]);
 
           const pagesData = await pagesResponse.json();
@@ -2768,6 +2890,11 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     const draft = draftsByPageId[pageId];
     if (!draft) return null;
 
+    // Check link nesting: the pasted layer becomes a child of the target
+    if (!canPasteIntoParent(draft.layers, targetLayerId, layerToPaste)) {
+      return null;
+    }
+
     // Regenerate IDs and remap self-targeted interactions
     const newLayer = regenerateIdsWithInteractionRemapping(cloneDeep(layerToPaste));
 
@@ -2809,7 +2936,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
    * Used when a style is updated
    * Updates the classes/design on layers that have the style applied
    */
-  updateStyleOnLayers: (styleId, newClasses, newDesign) => {
+  updateStyleOnLayers: (styleId, stylesById) => {
     const { draftsByPageId } = get();
 
     const updatedDrafts = { ...draftsByPageId };
@@ -2818,7 +2945,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       const draft = updatedDrafts[pageId];
       updatedDrafts[pageId] = {
         ...draft,
-        layers: updateLayersWithStyle(draft.layers, styleId, newClasses, newDesign),
+        layers: updateLayersWithStyle(draft.layers, styleId, stylesById),
       };
     });
 
@@ -2828,9 +2955,9 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
   /**
    * Detach a style from all layers across all pages
    * Used when a style is deleted
-   * Keeps current classes/design values but removes the style link
+   * Removes the style from each layer's stack, re-flattening remaining styles
    */
-  detachStyleFromAllLayers: (styleId) => {
+  detachStyleFromAllLayers: (styleId, stylesById) => {
     const { draftsByPageId } = get();
 
     const updatedDrafts = { ...draftsByPageId };
@@ -2839,7 +2966,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       const draft = updatedDrafts[pageId];
       updatedDrafts[pageId] = {
         ...draft,
-        layers: detachStyleFromLayers(draft.layers, styleId),
+        layers: detachStyleFromLayers(draft.layers, styleId, stylesById),
       };
     });
 
@@ -2861,8 +2988,11 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     const layerToCopy = copyLayer(pageId, layerId);
     if (!layerToCopy) return null;
 
+    // Regenerate IDs so the component's internal layers don't collide with the
+    // instance layer that keeps the original id in the page tree.
+    const regeneratedLayer = regenerateIdsWithInteractionRemapping(layerToCopy);
     // Strip CMS bindings that won't be valid inside a standalone component
-    const cleanedLayers = cleanLayersForComponentCreation([layerToCopy]);
+    const cleanedLayers = cleanLayersForComponentCreation([regeneratedLayer]);
     const newComponent = await createComponentViaApi(componentName, cleanedLayers);
     if (!newComponent) return null;
 
@@ -2891,20 +3021,24 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
    * Update all layers using a specific component across all pages
    * Used when a component is updated
    */
-  updateComponentOnLayers: (componentId, newLayers) => {
+  updateComponentOnLayers: (componentId) => {
     const { draftsByPageId } = get();
 
-    const updatedDrafts = { ...draftsByPageId };
+    let mutated = false;
+    const updatedDrafts: typeof draftsByPageId = { ...draftsByPageId };
 
-    Object.keys(updatedDrafts).forEach(pageId => {
-      const draft = updatedDrafts[pageId];
-      updatedDrafts[pageId] = {
-        ...draft,
-        layers: updateLayersWithComponent(draft.layers, componentId, newLayers),
-      };
+    Object.keys(draftsByPageId).forEach(pageId => {
+      const draft = draftsByPageId[pageId];
+      const nextLayers = updateLayersWithComponent(draft.layers, componentId);
+      if (nextLayers !== draft.layers) {
+        mutated = true;
+        updatedDrafts[pageId] = { ...draft, layers: nextLayers };
+      }
     });
 
-    set({ draftsByPageId: updatedDrafts });
+    if (mutated) {
+      set({ draftsByPageId: updatedDrafts });
+    }
   },
 
   /**
@@ -3005,7 +3139,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
 
     try {
       // Fetch fresh collection item data
-      const response = await fetch(`/webwow/api/pages/${pageId}/collection-item?itemId=${currentItem.id}`);
+      const response = await fetch(`/ycode/api/pages/${pageId}/collection-item?itemId=${currentItem.id}`);
       const result = await response.json();
 
       if (result.data) {

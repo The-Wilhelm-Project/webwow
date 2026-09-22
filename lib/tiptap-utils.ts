@@ -116,7 +116,7 @@ export function contentHasBlockElements(content: any): boolean {
   // Handle Tiptap doc structure
   if (content.type === 'doc' && Array.isArray(content.content)) {
     return content.content.some((block: any) =>
-      block.type === 'bulletList' || block.type === 'orderedList' || block.type === 'richTextComponent' || block.type === 'horizontalRule'
+      block.type === 'bulletList' || block.type === 'orderedList' || block.type === 'richTextComponent' || block.type === 'horizontalRule' || block.type === 'table'
     );
   }
 
@@ -188,7 +188,7 @@ export function hasLinkOrComponent(node: any): boolean {
 }
 
 /** Extract the first CMS field binding from Tiptap JSON content (dynamicVariable node with type 'field'). */
-export function getCmsFieldBinding(node: any): { field_id: string; label?: string; source?: 'page' | 'collection'; collection_layer_id?: string; field_type?: string | null } | null {
+export function getCmsFieldBinding(node: any): { field_id: string; label?: string; source?: 'page' | 'collection'; collection_layer_id?: string; field_type?: string | null; format?: string } | null {
   if (!node || typeof node !== 'object') return null;
   if (node.type === 'dynamicVariable') {
     const variable = node.attrs?.variable;
@@ -199,6 +199,7 @@ export function getCmsFieldBinding(node: any): { field_id: string; label?: strin
         source: variable.data.source,
         collection_layer_id: variable.data.collection_layer_id,
         field_type: variable.data.field_type ?? null,
+        format: variable.data.format,
       };
     }
   }
@@ -222,6 +223,31 @@ export function getSoleCmsFieldBinding(content: any): ReturnType<typeof getCmsFi
   if (!Array.isArray(nodes) || nodes.length !== 1) return null;
   if (nodes[0].type !== 'dynamicVariable') return null;
   return getCmsFieldBinding(nodes[0]);
+}
+
+/** True if a Tiptap doc contains at least one dynamicVariable node. */
+export function hasVariableNode(doc: any): boolean {
+  if (!doc?.content || !Array.isArray(doc.content)) return false;
+  const walk = (nodes: any[]): boolean => nodes.some((n: any) => {
+    if (!n || typeof n !== 'object') return false;
+    if (n.type === 'dynamicVariable') return true;
+    if (Array.isArray(n.content)) return walk(n.content);
+    return false;
+  });
+  return walk(doc.content);
+}
+
+/** True if a Tiptap doc contains at least one text or dynamicVariable node. */
+export function hasAnyTextOrVariable(doc: any): boolean {
+  if (!doc?.content || !Array.isArray(doc.content)) return false;
+  const walk = (nodes: any[]): boolean => nodes.some((n: any) => {
+    if (!n || typeof n !== 'object') return false;
+    if (n.type === 'text' && typeof n.text === 'string' && n.text.length > 0) return true;
+    if (n.type === 'dynamicVariable') return true;
+    if (Array.isArray(n.content)) return walk(n.content);
+    return false;
+  });
+  return walk(doc.content);
 }
 
 /** Check if Tiptap JSON content contains components or inline variables (non-editable on canvas). */
@@ -252,6 +278,89 @@ export function getRichTextValue(variables?: { text?: { type: string; data: { co
     return content;
   }
   return { type: 'doc', content: [{ type: 'paragraph' }] };
+}
+
+/**
+ * Detect whether a Tiptap document carries any actual rich-text formatting.
+ * "Formatting" includes block-level structure beyond a single paragraph
+ * (headings, lists, blockquotes, code blocks, horizontal rules, images,
+ * tables, embedded components) as well as inline marks (bold, italic,
+ * underline, links, etc.) and hard breaks.
+ *
+ * Used at extraction time to decide whether translatable content should be
+ * surfaced as a rich-text sheet editor or a simple text input — the editor
+ * follows the *current* content, not the source layer's original variable type.
+ */
+export function tiptapDocHasFormatting(doc: any): boolean {
+  if (!doc || typeof doc !== 'object' || !Array.isArray(doc.content)) return false;
+
+  const blocks = doc.content;
+  // Multiple block-level nodes implies structure (paragraph break)
+  if (blocks.length > 1) return true;
+
+  const NON_PLAIN_BLOCK_TYPES: ReadonlySet<string> = new Set([
+    'heading',
+    'bulletList',
+    'orderedList',
+    'listItem',
+    'blockquote',
+    'codeBlock',
+    'horizontalRule',
+    'image',
+    'table',
+    'tableRow',
+    'tableCell',
+    'tableHeader',
+    'iframe',
+    'youtube',
+    'richTextComponent',
+  ]);
+
+  const walk = (nodes: any[]): boolean => nodes.some((n: any) => {
+    if (!n || typeof n !== 'object') return false;
+    if (n.type && NON_PLAIN_BLOCK_TYPES.has(n.type)) return true;
+    if (n.type === 'hardBreak') return true;
+    if (n.type === 'text' && Array.isArray(n.marks) && n.marks.length > 0) {
+      return true;
+    }
+    if (Array.isArray(n.content) && n.content.length > 0) return walk(n.content);
+    return false;
+  });
+
+  return walk(blocks);
+}
+
+/**
+ * Serialize a Tiptap document to a plain-text string with canonical inline
+ * variable tags preserved. Block-level nodes are joined by newlines so that
+ * paragraph structure round-trips through the simple text input.
+ *
+ * This is the inverse of {@link parseValueToContent} for the subset of content
+ * we accept in plain-text translation fields: text, hardBreak, and
+ * dynamicVariable nodes. Any inline marks are dropped (the surrounding caller
+ * has already decided that this content is plain).
+ */
+export function tiptapDocToCanonicalString(doc: any): string {
+  if (!doc?.content || !Array.isArray(doc.content)) return '';
+
+  const serializeNode = (node: any): string => {
+    if (!node || typeof node !== 'object') return '';
+    if (node.type === 'text') return typeof node.text === 'string' ? node.text : '';
+    if (node.type === 'hardBreak') return '\n';
+    if (node.type === 'dynamicVariable') {
+      const variable = node.attrs?.variable;
+      if (!variable) return '';
+      return `<ycode-inline-variable>${JSON.stringify(variable)}</ycode-inline-variable>`;
+    }
+    if (Array.isArray(node.content)) return node.content.map(serializeNode).join('');
+    return '';
+  };
+
+  return doc.content
+    .map(serializeNode)
+    .map((s: string) => s.replace(/[ \t]+/g, ' '))
+    .filter((s: string) => s.length > 0)
+    .join('\n');
 }
 
 /**
@@ -289,4 +398,90 @@ export function extractPlainTextFromTiptap(content: any): string {
   }
 
   return result.trim();
+}
+
+/**
+ * Extract plain text from Tiptap JSON, preserving block-level boundaries as
+ * newlines. Useful for multi-line previews (e.g. read-only translation
+ * textareas) where collapsing paragraphs/headings into a single line would
+ * misrepresent the structure of the original content.
+ *
+ * Inline marks (bold, italic, links) are dropped — only the textual content
+ * and dynamic-variable labels survive.
+ */
+export function extractMultilinePlainTextFromTiptap(content: any): string {
+  if (!content || typeof content !== 'object') return '';
+
+  // Block-level nodes that should each occupy their own line in the preview.
+  const BLOCK_TYPES = new Set([
+    'paragraph',
+    'heading',
+    'blockquote',
+    'codeBlock',
+    'listItem',
+    'horizontalRule',
+    'richTextHtmlEmbed',
+    'richTextImage',
+    'richTextComponent',
+  ]);
+
+  const lines: string[] = [];
+
+  const collectInline = (node: any, into: { text: string }): void => {
+    if (!node) return;
+    if (node.type === 'text' && node.text) {
+      into.text += node.text;
+      return;
+    }
+    if (node.type === 'dynamicVariable' && node.attrs?.label) {
+      into.text += `[${node.attrs.label}]`;
+      return;
+    }
+    if (node.type === 'hardBreak') {
+      into.text += '\n';
+      return;
+    }
+    if (Array.isArray(node.content)) {
+      node.content.forEach((child: any) => collectInline(child, into));
+    }
+  };
+
+  const visit = (node: any): void => {
+    if (!node) return;
+    if (node.type === 'horizontalRule') {
+      lines.push('');
+      return;
+    }
+    if (BLOCK_TYPES.has(node.type)) {
+      const acc = { text: '' };
+      if (Array.isArray(node.content)) {
+        node.content.forEach((child: any) => {
+          // Nested block nodes (e.g. a paragraph inside a listItem) get their
+          // own line so list bullets / quotes still read naturally.
+          if (BLOCK_TYPES.has(child?.type)) {
+            visit(child);
+          } else {
+            collectInline(child, acc);
+          }
+        });
+      }
+      if (acc.text) {
+        lines.push(acc.text);
+      }
+      return;
+    }
+    if (Array.isArray(node.content)) {
+      node.content.forEach(visit);
+    }
+  };
+
+  if (content.type === 'doc' && Array.isArray(content.content)) {
+    content.content.forEach(visit);
+  } else if (Array.isArray(content)) {
+    content.forEach(visit);
+  } else {
+    visit(content);
+  }
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }

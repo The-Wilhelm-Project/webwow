@@ -1,0 +1,534 @@
+/**
+ * Server-side twin of upstream's `ImportMaterializer` (SPEC §4.14, D9).
+ *
+ * Mirrors `lib/import/materializer.ts` @ ycode 1.30.15 — `getOrCreateStyle`,
+ * `prepareStyles`, `prepareAssets`, `uploadAsset`, `installFont`,
+ * `createComponent` and the `counts` object — with two differences that are the
+ * whole point of the clone:
+ *
+ *  1. every write goes through the repositories (`createStyles`, `uploadFile`,
+ *     `createFont`, `createComponent`), never through `fetch('/ycode/api/…')`
+ *     or a Zustand store, so the import runs inside one route handler;
+ *  2. `uploadAsset` resolves a *key* — a ZIP-relative path (`images/x.jpg`) or
+ *     an https URL — instead of a browser-fetchable URL, so the same cache
+ *     serves the export's own files and (bounded, allow-listed) CMS downloads.
+ *
+ * Every created layer style carries `design: buildDesign(classes)` so the
+ * builder's design panel is populated for imported layers — the v1 importer's
+ * central failure (658 styles, 0 with design data).
+ *
+ * Re-diff this file against upstream on every sync.
+ */
+
+import { randomUUID } from 'crypto';
+import fs from 'fs/promises';
+import path from 'path';
+
+import { buildDesign } from '@/lib/import/design';
+import { uploadFile } from '@/lib/file-upload';
+import { createAsset } from '@/lib/repositories/assetRepository';
+import { createComponent as createComponentRow } from '@/lib/repositories/componentRepository';
+import { createFont, getAllFonts } from '@/lib/repositories/fontRepository';
+import { createStyles } from '@/lib/repositories/layerStyleRepository';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { STORAGE_BUCKET, STORAGE_FOLDERS } from '@/lib/asset-constants';
+import { guessMimeType } from '@/lib/webwow/storage';
+
+import { ByteBudget, envRelaxedHosts, safeFetch } from './safe-fetch';
+import { isFontPath, isImagePath, isVideoPath } from './zip';
+import type { Warnings } from './warnings';
+
+import type { MaterializerCounts } from '@/lib/import/materializer';
+import type { ImportStyleRef } from '@/lib/import/types';
+import type { Component, ComponentVariable, ComponentVariant, Font, Layer, LayerStyle } from '@/types';
+
+/** Resolve a materializer key that is not an https URL (a ZIP entry). */
+export interface FileSource {
+  (key: string): Promise<{ buffer: Buffer; filename: string; mime: string } | null>;
+}
+
+/** Per-category asset tallies surfaced in `WfImportCounts.assets`. */
+export interface WfAssetCounts {
+  images: number;
+  videos: number;
+  documents: number;
+  fontFiles: number;
+  /** Downloads that were attempted and failed. */
+  failed: number;
+  /** Remote assets not attempted because `remoteAssets === 'skip'`. */
+  skipped: number;
+}
+
+export interface ServerMaterializerOptions {
+  /** Source label (`Webflow`); only used for the default asset `source`. */
+  group: string;
+  files: FileSource;
+  remote: { enabled: boolean; budget: ByteBudget };
+  assetFolderId: string | null;
+  /** `assets.source` for every uploaded file. */
+  source: string;
+  warn: Warnings;
+  /** Parallel uploads in `prepareAssets` (default 4). */
+  concurrency?: number;
+}
+
+interface GoogleFontCatalogEntry {
+  family: string;
+  variants: string[];
+  category: string;
+  axes?: { tag: string; start: number; end: number }[];
+}
+
+/**
+ * Stable identity for "same style": name plus its declarations, order-agnostic.
+ * Byte-identical to upstream's private `contentKey`.
+ */
+function contentKey(name: string, classes: string): string {
+  const sorted = classes.split(/\s+/).filter(Boolean).sort().join(' ');
+  return `${name}\u0000${sorted}`;
+}
+
+const HTTPS_RE = /^https?:\/\//i;
+
+/** `createStyles` is all-or-nothing per batch — keep batches modest (SPEC §4.14). */
+const STYLE_BATCH = 200;
+
+export class ServerMaterializer {
+  readonly counts: MaterializerCounts = { styles: 0, components: 0, assets: 0, fonts: 0 };
+  readonly assetCounts: WfAssetCounts = { images: 0, videos: 0, documents: 0, fontFiles: 0, failed: 0, skipped: 0 };
+
+  /** `ImportStyleRef.key`s that produced a NEW style row (combo tally in index.ts). */
+  readonly createdStyleKeys = new Set<string>();
+
+  private readonly styleCache = new Map<string, Promise<LayerStyle | null>>();
+  private readonly assetCache = new Map<string, Promise<string | null>>();
+  private readonly fontCache = new Map<string, Promise<Font | null>>();
+  private readonly publicUrlByKey = new Map<string, string>();
+  private readonly assetIdByKey = new Map<string, string>();
+
+  private readonly usedStyleNames = new Set<string>();
+  private readonly stylesByContent = new Map<string, LayerStyle>();
+
+  private googleCatalog: GoogleFontCatalogEntry[] | null = null;
+  private existingFonts: Font[] | null = null;
+
+  private constructor(private readonly opts: ServerMaterializerOptions) {}
+
+  static async create(opts: ServerMaterializerOptions): Promise<ServerMaterializer> {
+    const mat = new ServerMaterializer(opts);
+    // Seed from ALL draft rows INCLUDING soft-deleted ones: `layer_styles` has a
+    // UNIQUE(name, is_published) index that still counts soft-deleted drafts
+    // (findings-import-core G2), so a name taken by a deleted style would make
+    // the whole bulk insert fail.
+    const client = await getSupabaseAdmin();
+    if (client) {
+      const { data, error } = await client
+        .from('layer_styles')
+        .select('id,name,classes,design,deleted_at')
+        .eq('is_published', false);
+      if (error) {
+        opts.warn.add('css_dropped', `could not read existing layer styles: ${error.message}`);
+      }
+      for (const row of (data ?? []) as (LayerStyle & { deleted_at?: string | null })[]) {
+        mat.usedStyleNames.add(row.name);
+        if (!row.deleted_at) mat.stylesByContent.set(contentKey(row.name, row.classes), row);
+      }
+    }
+    return mat;
+  }
+
+  // ── Styles ────────────────────────────────────────────────────────────────
+
+  /** Upstream `ImportMaterializer.getOrCreateStyle` (:71-102) against the repository. */
+  getOrCreateStyle(ref: ImportStyleRef): Promise<LayerStyle | null> {
+    const cached = this.styleCache.get(ref.key);
+    if (cached) return cached;
+
+    const promise = (async () => {
+      const classes = ref.classes.join(' ').trim();
+      if (!classes) return null;
+
+      const name = ref.name || 'Imported';
+      const key = contentKey(name, classes);
+      const existing = this.stylesByContent.get(key);
+      if (existing) return existing;
+
+      const design = buildDesign(classes);
+      let style: LayerStyle | null = null;
+      try {
+        const created = await createStyles([{ name: this.uniqueStyleName(name), classes, design }]);
+        style = created[0] ?? null;
+      } catch (error) {
+        this.opts.warn.add('css_dropped', `layer style "${name}" could not be created: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      }
+      if (style) {
+        this.counts.styles += 1;
+        this.createdStyleKeys.add(ref.key);
+        this.stylesByContent.set(key, style);
+        this.stylesByContent.set(contentKey(style.name, style.classes), style);
+      }
+      return style;
+    })();
+
+    this.styleCache.set(ref.key, promise);
+    return promise;
+  }
+
+  /**
+   * `LayerStyle.id` -> its class string, for every style this run created or
+   * reused. Valid after `prepareStyles`; used to re-resolve a layer's chip stack.
+   */
+  styleClassesById(): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const style of this.stylesByContent.values()) out.set(style.id, style.classes);
+    return out;
+  }
+
+  /** Upstream `ImportMaterializer.prepareStyles` (:115-179), bulk-inserted in batches. */
+  async prepareStyles(refs: ImportStyleRef[]): Promise<void> {
+    const toCreate: { name: string; classes: string; design: Layer['design'] }[] = [];
+    const contentToIndex = new Map<string, number>();
+    const keyToContent = new Map<string, string>();
+    const keyToExisting = new Map<string, LayerStyle>();
+
+    for (const ref of refs) {
+      if (this.styleCache.has(ref.key)) continue;
+      if (keyToContent.has(ref.key) || keyToExisting.has(ref.key)) continue;
+
+      const classes = ref.classes.join(' ').trim();
+      if (!classes) continue; // declaration-less: the converter inlines it
+
+      const name = ref.name || 'Imported';
+      const cKey = contentKey(name, classes);
+
+      const existing = this.stylesByContent.get(cKey);
+      if (existing) {
+        keyToExisting.set(ref.key, existing);
+        continue;
+      }
+
+      if (contentToIndex.has(cKey)) {
+        keyToContent.set(ref.key, cKey);
+        continue;
+      }
+
+      const index = toCreate.length;
+      toCreate.push({ name: this.uniqueStyleName(name), classes, design: buildDesign(classes) });
+      contentToIndex.set(cKey, index);
+      keyToContent.set(ref.key, cKey);
+    }
+
+    for (const [key, style] of keyToExisting) {
+      this.styleCache.set(key, Promise.resolve(style));
+    }
+
+    if (toCreate.length === 0) return;
+
+    const created: (LayerStyle | undefined)[] = [];
+    for (let i = 0; i < toCreate.length; i += STYLE_BATCH) {
+      const batch = toCreate.slice(i, i + STYLE_BATCH);
+      try {
+        const rows = await createStyles(batch);
+        for (let j = 0; j < batch.length; j++) created.push(rows[j]);
+      } catch (error) {
+        this.opts.warn.add('css_dropped', `bulk layer-style insert failed (${batch.length} styles): ${error instanceof Error ? error.message : String(error)}`);
+        for (let j = 0; j < batch.length; j++) created.push(undefined);
+      }
+    }
+
+    created.forEach((style) => {
+      if (!style) return;
+      this.counts.styles += 1;
+      this.stylesByContent.set(contentKey(style.name, style.classes), style);
+    });
+
+    for (const [key, cKey] of keyToContent) {
+      const index = contentToIndex.get(cKey);
+      if (index === undefined) continue;
+      const style = created[index];
+      if (!style) continue;
+      this.styleCache.set(key, Promise.resolve(style));
+      this.stylesByContent.set(cKey, style);
+      this.createdStyleKeys.add(key);
+    }
+  }
+
+  private uniqueStyleName(base: string): string {
+    const trimmed = base.trim() || 'Imported';
+    if (!this.usedStyleNames.has(trimmed)) {
+      this.usedStyleNames.add(trimmed);
+      return trimmed;
+    }
+    let i = 2;
+    while (this.usedStyleNames.has(`${trimmed} ${i}`)) i += 1;
+    const name = `${trimmed} ${i}`;
+    this.usedStyleNames.add(name);
+    return name;
+  }
+
+  // ── Assets ────────────────────────────────────────────────────────────────
+
+  /** Re-host every key with bounded concurrency, priming the cache for conversion. */
+  async prepareAssets(keys: string[], onUploaded?: () => void): Promise<void> {
+    const unique = [...new Set(keys.filter(Boolean))];
+    const limit = Math.max(1, this.opts.concurrency ?? 4);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(limit, unique.length) }, async () => {
+      for (;;) {
+        const index = cursor++;
+        if (index >= unique.length) return;
+        await this.uploadAsset(unique[index]);
+        onUploaded?.();
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  /**
+   * Upload a ZIP entry or a remote URL and return its asset id (null on
+   * failure). Promise-cached per key, so hundreds of references cost one upload.
+   */
+  uploadAsset(key: string): Promise<string | null> {
+    const cached = this.assetCache.get(key);
+    if (cached) return cached;
+
+    const promise = this.doUploadAsset(key);
+    this.assetCache.set(key, promise);
+    return promise;
+  }
+
+  private async doUploadAsset(key: string): Promise<string | null> {
+    const remote = HTTPS_RE.test(key);
+    let payload: { buffer: Buffer; filename: string; mime: string } | null = null;
+
+    if (remote) {
+      if (!this.opts.remote.enabled) {
+        this.assetCounts.skipped += 1;
+        this.opts.warn.add('asset_skipped', 'remote asset download disabled (remoteAssets = skip)', { node: key });
+        return null;
+      }
+      // CMS images of an operator-listed live site (verification setup, outside production
+      // only) may be plain http on a private address; the relaxation is passed explicitly.
+      const result = await safeFetch(key, { budget: this.opts.remote.budget, relaxedHosts: envRelaxedHosts() });
+      if (!result.ok) {
+        this.assetCounts.failed += 1;
+        this.opts.warn.add('asset_download_failed', result.error);
+        return null;
+      }
+      payload = { buffer: result.buffer, filename: result.filename, mime: result.contentType || guessMimeType(result.filename) };
+    } else {
+      try {
+        payload = await this.opts.files(key);
+      } catch (error) {
+        payload = null;
+        this.opts.warn.add('asset_missing', `could not read ${key}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!payload) {
+        this.assetCounts.failed += 1;
+        this.opts.warn.add('asset_missing', `asset not found in the export: ${key}`);
+        return null;
+      }
+    }
+
+    // SVGs are inlined by `uploadFile` (storage_path/public_url null — findings
+    // G9), which breaks CSS `url()` rewriting and favicons, so store them raw.
+    if (payload.mime === 'image/svg+xml' || /\.svg$/i.test(payload.filename)) {
+      const raw = await this.uploadRaw(payload.filename, payload.buffer, 'image/svg+xml');
+      if (!raw) {
+        this.assetCounts.failed += 1;
+        return null;
+      }
+      this.publicUrlByKey.set(key, raw.publicUrl);
+      this.assetIdByKey.set(key, raw.id);
+      this.tally(payload.filename);
+      return raw.id;
+    }
+
+    try {
+      const asset = await uploadFile(
+        new File([new Uint8Array(payload.buffer)], payload.filename, { type: payload.mime }),
+        this.opts.source,
+        undefined,
+        this.opts.assetFolderId,
+      );
+      if (!asset) {
+        this.assetCounts.failed += 1;
+        this.opts.warn.add('asset_download_failed', `upload failed: ${key}`);
+        return null;
+      }
+      this.counts.assets += 1;
+      this.tally(payload.filename);
+      this.assetIdByKey.set(key, asset.id);
+      if (asset.public_url) this.publicUrlByKey.set(key, asset.public_url);
+      return asset.id;
+    } catch (error) {
+      this.assetCounts.failed += 1;
+      this.opts.warn.add('asset_download_failed', `upload failed for ${key}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Store a buffer verbatim (no WebP re-encode, no SVG inlining) and register an
+   * asset row with a real public URL. Used for CSS-referenced SVGs and the extra
+   * font weights that go into residual `@font-face` rules.
+   */
+  async uploadRaw(zipPath: string, buffer: Buffer, mime: string): Promise<{ id: string; publicUrl: string } | null> {
+    try {
+      const client = await getSupabaseAdmin();
+      if (!client) return null;
+      const filename = zipPath.split('/').pop() || 'file';
+      const ext = filename.includes('.') ? filename.split('.').pop() : 'bin';
+      const folder = isFontPath(filename) ? STORAGE_FOLDERS.FONTS : STORAGE_FOLDERS.WEBSITE;
+      const storagePath = `${folder}/${Date.now()}-${randomUUID().replace(/-/g, '').slice(0, 12)}.${ext}`;
+
+      const { data, error } = await client.storage
+        .from(STORAGE_BUCKET)
+        .upload(storagePath, buffer, { contentType: mime, upsert: false, cacheControl: '3600' });
+      if (error || !data) {
+        this.opts.warn.add('asset_download_failed', `storage upload failed for ${zipPath}: ${error?.message ?? 'unknown error'}`);
+        return null;
+      }
+      const { data: urlData } = client.storage.from(STORAGE_BUCKET).getPublicUrl(data.path);
+      const publicUrl = urlData?.publicUrl ?? '';
+
+      const asset = await createAsset({
+        filename: filename.replace(/\.[^/.]+$/, '') || filename,
+        storage_path: data.path,
+        public_url: publicUrl,
+        file_size: buffer.length,
+        mime_type: mime,
+        source: this.opts.source,
+        asset_folder_id: this.opts.assetFolderId,
+      });
+      this.counts.assets += 1;
+      return { id: asset.id, publicUrl };
+    } catch (error) {
+      this.opts.warn.add('asset_download_failed', `raw upload failed for ${zipPath}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /** Public URL of an already-uploaded key (CSS `url()` rewriting). */
+  assetUrl(key: string): string | null {
+    return this.publicUrlByKey.get(key) ?? null;
+  }
+
+  /** Asset id of an already-uploaded key — synchronous, valid after `prepareAssets`. */
+  assetId(key: string): string | null {
+    return this.assetIdByKey.get(key) ?? null;
+  }
+
+  private tally(filename: string): void {
+    if (isFontPath(filename)) this.assetCounts.fontFiles += 1;
+    else if (isVideoPath(filename)) this.assetCounts.videos += 1;
+    else if (isImagePath(filename)) this.assetCounts.images += 1;
+    else this.assetCounts.documents += 1;
+  }
+
+  // ── Fonts ─────────────────────────────────────────────────────────────────
+
+  /** Install a Google font family by name (existing row reused). */
+  installFont(family: string): Promise<Font | null> {
+    const key = family.trim().toLowerCase();
+    const cached = this.fontCache.get(key);
+    if (cached) return cached;
+
+    const promise = (async () => {
+      const existing = await this.loadExistingFonts();
+      const hit = existing.find((f) => f.family.trim().toLowerCase() === key || f.name.trim().toLowerCase() === key);
+      if (hit) return hit;
+
+      const catalog = await this.loadGoogleCatalog();
+      const match = catalog.find((f) => f.family.toLowerCase() === key);
+      if (!match) return null;
+
+      const slug = match.family.toLowerCase().replace(/\s+/g, '-');
+      if (existing.some((f) => f.name === slug)) return existing.find((f) => f.name === slug) ?? null;
+
+      const wght = match.axes?.find((a) => a.tag === 'wght');
+      let weights: string[];
+      if (wght) {
+        weights = [];
+        for (let w = Math.max(wght.start, 100); w <= Math.min(wght.end, 900); w += 100) weights.push(String(w));
+      } else {
+        weights = match.variants
+          .map((v) => {
+            if (v === 'regular') return '400';
+            if (v === 'italic') return null;
+            if (!Number.isNaN(Number(v))) return v;
+            const m = v.match(/^\d+/);
+            return m ? m[0] : null;
+          })
+          .filter((w): w is string => w !== null)
+          .filter((w, i, arr) => arr.indexOf(w) === i);
+      }
+
+      try {
+        const font = await createFont({
+          name: slug,
+          family: match.family,
+          type: 'google',
+          variants: match.variants,
+          weights: weights.length > 0 ? weights : ['400', '700'],
+          category: match.category ?? '',
+          axes: match.axes && match.axes.length > 0 ? match.axes : null,
+        });
+        this.counts.fonts += 1;
+        existing.push(font);
+        return font;
+      } catch (error) {
+        this.opts.warn.add('font_extra_weight', `could not install Google font ${match.family}: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      }
+    })();
+
+    this.fontCache.set(key, promise);
+    return promise;
+  }
+
+  private async loadExistingFonts(): Promise<Font[]> {
+    if (!this.existingFonts) {
+      try {
+        this.existingFonts = await getAllFonts();
+      } catch {
+        this.existingFonts = [];
+      }
+    }
+    return this.existingFonts;
+  }
+
+  private async loadGoogleCatalog(): Promise<GoogleFontCatalogEntry[]> {
+    if (this.googleCatalog) return this.googleCatalog;
+    try {
+      const file = path.join(process.cwd(), 'storage', 'fonts', 'google-fonts.json');
+      const raw = await fs.readFile(file, 'utf-8');
+      const parsed = JSON.parse(raw);
+      this.googleCatalog = Array.isArray(parsed) ? (parsed as GoogleFontCatalogEntry[]) : [];
+    } catch {
+      this.googleCatalog = [];
+    }
+    return this.googleCatalog;
+  }
+
+  // ── Components ────────────────────────────────────────────────────────────
+
+  /**
+   * `variants` (optional): one entry per look of the same region — the
+   * repository seeds a "Default" variant from `layers` when none is given, so
+   * callers without variants are unchanged (components.ts navbar variants).
+   */
+  async createComponent(name: string, layers: Layer[], variables?: ComponentVariable[], variants?: ComponentVariant[]): Promise<Component | null> {
+    try {
+      const component = await createComponentRow({ name, layers, variables, ...(variants && variants.length > 0 ? { variants } : {}) });
+      this.counts.components += 1;
+      return component;
+    } catch (error) {
+      this.opts.warn.add('component_skipped', `component "${name}" could not be created: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+}
+
+export { ByteBudget };

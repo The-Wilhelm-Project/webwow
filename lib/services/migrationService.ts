@@ -1,4 +1,4 @@
-import { getKnexClient, testKnexConnection } from '../knex-client';
+import { getKnexClient, closeKnexClient, testKnexConnection } from '../knex-client';
 import { migrations } from '../migrations-loader';
 
 /**
@@ -103,6 +103,7 @@ export async function runMigrations(): Promise<MigrationResult> {
           executed.push(migration.name);
         } catch (error) {
           console.error(`[runMigrations] ✗ ${migration.name} failed:`, error);
+          await closeKnexClient();
 
           return {
             success: false,
@@ -114,12 +115,22 @@ export async function runMigrations(): Promise<MigrationResult> {
       }
     }
 
+    // Close connection
+    await closeKnexClient();
+
     return {
       success: true,
       executed,
     };
   } catch (error) {
     console.error('[runMigrations] Migration failed:', error);
+
+    // Make sure to close connection on error
+    try {
+      await closeKnexClient();
+    } catch (closeError) {
+      console.error('[runMigrations] Error closing connection:', closeError);
+    }
 
     return {
       success: false,

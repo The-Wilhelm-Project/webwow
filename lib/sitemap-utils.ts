@@ -13,8 +13,10 @@ import type {
   SitemapChangeFrequency,
   CollectionItem,
 } from '@/types';
-import { buildSlugPath, buildLocalizedSlugPath } from './page-utils';
-import { getTranslatableKey } from './localisation-utils';
+import { buildSlugPath } from './page-utils';
+import { buildPageHreflangAlternates } from './hreflang-utils';
+import type { HreflangAlternate } from './hreflang-utils';
+import { buildAbsolutePageUrl } from './url-utils';
 
 export interface SitemapUrl {
   loc: string;
@@ -23,10 +25,7 @@ export interface SitemapUrl {
   alternates?: SitemapAlternate[];
 }
 
-export interface SitemapAlternate {
-  hreflang: string;
-  href: string;
-}
+export type SitemapAlternate = HreflangAlternate;
 
 /**
  * Build sitemap URLs for a static page (non-dynamic)
@@ -49,12 +48,9 @@ function buildStaticPageUrls(
     return [];
   }
 
-  const defaultLocale = locales.find(l => l.is_default);
-  const nonDefaultLocales = locales.filter(l => !l.is_default);
-
   // Build the default (base) URL
   const defaultPath = buildSlugPath(page, folders, 'page');
-  const defaultUrl = `${baseUrl}${defaultPath}`;
+  const defaultUrl = buildAbsolutePageUrl(baseUrl, defaultPath);
 
   const sitemapUrl: SitemapUrl = {
     loc: defaultUrl,
@@ -63,39 +59,14 @@ function buildStaticPageUrls(
   };
 
   // Always add localized alternates when multiple locales exist
-  if (locales.length > 1) {
-    const alternates: SitemapAlternate[] = [];
-
-    // Add default locale alternate
-    if (defaultLocale) {
-      alternates.push({
-        hreflang: defaultLocale.code,
-        href: defaultUrl,
-      });
-    }
-
-    // Add non-default locale alternates
-    for (const locale of nonDefaultLocales) {
-      const translations = translationsByLocale.get(locale.id);
-      const localizedPath = buildLocalizedSlugPath(
-        page,
-        folders,
-        'page',
-        locale,
-        translations
-      );
-      alternates.push({
-        hreflang: locale.code,
-        href: `${baseUrl}${localizedPath}`,
-      });
-    }
-
-    // Add x-default for language negotiation
-    alternates.push({
-      hreflang: 'x-default',
-      href: defaultUrl,
-    });
-
+  const alternates = buildPageHreflangAlternates({
+    page,
+    folders,
+    baseUrl,
+    locales,
+    translationsByLocale,
+  });
+  if (alternates.length > 0) {
     sitemapUrl.alternates = alternates;
   }
 
@@ -127,8 +98,6 @@ function buildDynamicPageUrls(
   }
 
   const urls: SitemapUrl[] = [];
-  const defaultLocale = locales.find(l => l.is_default);
-  const nonDefaultLocales = locales.filter(l => !l.is_default);
 
   // Build folder path prefix (without the {slug} placeholder)
   const folderPath = buildSlugPath(page, folders, 'page', '').replace(/\/$/, '');
@@ -141,7 +110,7 @@ function buildDynamicPageUrls(
     if (!slugValue) continue;
 
     const itemPath = folderPath ? `${folderPath}/${slugValue}` : `/${slugValue}`;
-    const itemUrl = `${baseUrl}${itemPath}`;
+    const itemUrl = buildAbsolutePageUrl(baseUrl, itemPath);
 
     const sitemapUrl: SitemapUrl = {
       loc: itemUrl,
@@ -150,54 +119,15 @@ function buildDynamicPageUrls(
     };
 
     // Always add localized alternates when multiple locales exist
-    if (locales.length > 1) {
-      const alternates: SitemapAlternate[] = [];
-
-      // Add default locale alternate
-      if (defaultLocale) {
-        alternates.push({
-          hreflang: defaultLocale.code,
-          href: itemUrl,
-        });
-      }
-
-      // Add non-default locale alternates
-      for (const locale of nonDefaultLocales) {
-        const translations = translationsByLocale.get(locale.id);
-        // Build localized folder path
-        const localizedFolderPath = buildLocalizedSlugPath(
-          page,
-          folders,
-          'page',
-          locale,
-          translations,
-          ''
-        ).replace(/\/$/, '');
-
-        // Get translated slug for the CMS item if available
-        const translatedSlugKey = getTranslatableKey({
-          source_type: 'cms',
-          source_id: item.id,
-          content_key: slugFieldId,
-        });
-        const translatedSlug = translations?.[translatedSlugKey]?.content_value || slugValue;
-
-        const localizedItemPath = localizedFolderPath
-          ? `${localizedFolderPath}/${translatedSlug}`
-          : `/${locale.code}/${translatedSlug}`;
-
-        alternates.push({
-          hreflang: locale.code,
-          href: `${baseUrl}${localizedItemPath}`,
-        });
-      }
-
-      // Add x-default
-      alternates.push({
-        hreflang: 'x-default',
-        href: itemUrl,
-      });
-
+    const alternates = buildPageHreflangAlternates({
+      page,
+      folders,
+      baseUrl,
+      locales,
+      translationsByLocale,
+      dynamicSlug: { itemId: item.id, defaultValue: slugValue },
+    });
+    if (alternates.length > 0) {
       sitemapUrl.alternates = alternates;
     }
 
@@ -325,7 +255,7 @@ export function generateSitemapXml(urls: SitemapUrl[]): string {
 }
 
 /**
- * Default sitemap settings (Webwow-generated sitemap enabled for new apps)
+ * Default sitemap settings (Ycode-generated sitemap enabled for new apps)
  */
 export function getDefaultSitemapSettings(): SitemapSettings {
   return {

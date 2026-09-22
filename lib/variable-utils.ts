@@ -10,8 +10,10 @@
 
 import type { AssetVariable, FieldVariable, DynamicTextVariable, DynamicRichTextVariable, StaticTextVariable, ComponentVariableValue, Layer } from '@/types';
 import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
-import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
+import { buildFieldVariablePath, resolveFieldFromSources } from '@/lib/cms-variables-utils';
 import { DEFAULT_ASSETS } from '@/lib/asset-constants';
+import { buildSvgDataUrl } from '@/lib/asset-utils';
+import { parseCollectionLinkValue } from '@/lib/link-utils';
 import { stringToTiptapContent } from '@/lib/text-format-utils';
 
 /** Canonical empty componentOverrides structure — use when setting/resetting overrides */
@@ -23,6 +25,7 @@ export const EMPTY_OVERRIDES: NonNullable<Layer['componentOverrides']> = {
   audio: {},
   video: {},
   icon: {},
+  variant: {},
   variableLinks: {},
 };
 
@@ -65,6 +68,22 @@ export function createDynamicRichTextVariable(content: string): DynamicRichTextV
 }
 
 /**
+ * Create a DynamicRichTextVariable directly from plain text, without attempting
+ * JSON parsing. Use this when the source value is known to be plain text
+ * (e.g. a translation whose stored content_type is `text` even though the
+ * target variable is `dynamic_rich_text`), to avoid the noisy JSON.parse
+ * fallback in `createDynamicRichTextVariable`.
+ */
+export function createDynamicRichTextVariableFromPlainText(content: string): DynamicRichTextVariable {
+  return {
+    type: 'dynamic_rich_text',
+    data: {
+      content: stringToTiptapContent(content),
+    },
+  };
+}
+
+/**
  * Create an AssetVariable from an asset ID
  */
 export function createAssetVariable(assetId: string): AssetVariable {
@@ -97,6 +116,25 @@ export function createTextComponentVariableValue(tiptapContent: object): Compone
 }
 
 /**
+ * Coerce a persisted component variable value into its object form.
+ *
+ * Text values are expected to be `{ type, data }` objects, but a bare string
+ * can reach the database — the MCP component tools accept an unvalidated
+ * `default_value`, so an agent can store `"Accessories"` instead of
+ * `{ type: 'dynamic_text', data: { content: 'Accessories' } }`. Callers probe
+ * these values with the `in` operator, which throws on a primitive, so
+ * normalize before inspecting. Returns undefined for values that can never
+ * be a variable value.
+ */
+export function normalizeComponentVariableValue(value: unknown): ComponentVariableValue | undefined {
+  if (typeof value === 'string') {
+    return { type: 'dynamic_text', data: { content: value } };
+  }
+  if (typeof value !== 'object' || value === null) return undefined;
+  return value as ComponentVariableValue;
+}
+
+/**
  * Extract Tiptap JSON content from text ComponentVariableValue
  * Returns the Tiptap content object or a default empty document
  * Handles both DynamicRichTextVariable (with formatting) and DynamicTextVariable (plain text)
@@ -104,16 +142,17 @@ export function createTextComponentVariableValue(tiptapContent: object): Compone
 export function extractTiptapFromComponentVariable(value?: ComponentVariableValue): object {
   const emptyDoc = { type: 'doc', content: [{ type: 'paragraph' }] };
 
-  if (!value) return emptyDoc;
+  const normalized = normalizeComponentVariableValue(value);
+  if (!normalized) return emptyDoc;
 
   // Check if value is a text variable (has 'type' property) vs ImageSettingsValue (has 'src' property)
-  if ('type' in value && value.type === 'dynamic_rich_text') {
-    return (value as DynamicRichTextVariable).data.content;
+  if ('type' in normalized && normalized.type === 'dynamic_rich_text') {
+    return (normalized as DynamicRichTextVariable).data.content;
   }
 
-  if ('type' in value && value.type === 'dynamic_text') {
+  if ('type' in normalized && normalized.type === 'dynamic_text') {
     // Convert plain text to Tiptap format
-    return stringToTiptapContent((value as DynamicTextVariable).data.content);
+    return stringToTiptapContent((normalized as DynamicTextVariable).data.content);
   }
 
   return emptyDoc;
@@ -252,6 +291,19 @@ export function getVariableStringValue(
 }
 
 /**
+ * Unwrap a resolved field value to a media URL/asset id. Link/url fields store a
+ * serialized CollectionLinkValue; when bound as an image/video source we need the
+ * underlying URL (or asset id) rather than the JSON blob. Non-link values pass through.
+ */
+function unwrapLinkFieldUrl(resolvedValue: string): string {
+  const linkValue = parseCollectionLinkValue(resolvedValue);
+  if (!linkValue) return resolvedValue;
+  if (linkValue.type === 'url') return linkValue.url || '';
+  if (linkValue.type === 'asset') return linkValue.asset?.id || '';
+  return '';
+}
+
+/**
  * Get image URL from image src variable
  * - AssetVariable -> gets asset URL from store
  * - FieldVariable -> resolves field value using source-aware resolution (page or collection)
@@ -266,7 +318,7 @@ export function getVariableStringValue(
  */
 export function getImageUrlFromVariable(
   src: AssetVariable | FieldVariable | DynamicTextVariable | undefined | null,
-  getAsset?: (id: string) => { public_url: string | null; content?: string | null } | null,
+  getAsset?: (id: string) => { public_url: string | null; content?: string | null; width?: number | null; height?: number | null } | null,
   collectionItemData?: Record<string, string>,
   pageCollectionItemData?: Record<string, string> | null,
   useDefault: boolean = true
@@ -288,8 +340,7 @@ export function getImageUrlFromVariable(
       return asset.public_url;
     }
     if (asset?.content) {
-      // Convert inline SVG content to data URL
-      return `data:image/svg+xml,${encodeURIComponent(asset.content)}`;
+      return buildSvgDataUrl(asset.content, asset.width, asset.height);
     }
     return undefined;
   }
@@ -298,35 +349,47 @@ export function getImageUrlFromVariable(
     const fieldId = src.data.field_id;
     if (!fieldId) return undefined;
 
+    // Build path with relationships so nested-reference image fields resolve
+    // (e.g. Author reference -> Photo image field).
+    const fieldPath = buildFieldVariablePath(fieldId, src.data.relationships);
+
     // Use source-aware resolution (respects source: 'page' | 'collection')
     const resolvedValue = resolveFieldFromSources(
-      fieldId,
+      fieldPath,
       src.data.source,
       collectionItemData,
       pageCollectionItemData
     );
-    if (!resolvedValue) return undefined;
+    // Empty/null CMS value - fall back to the default placeholder image.
+    if (!resolvedValue) return useDefault ? DEFAULT_ASSETS.IMAGE : undefined;
+
+    // A link/url field bound as an image source stores a serialized
+    // CollectionLinkValue, not a bare URL — unwrap it to the underlying URL.
+    const unwrapped = unwrapLinkFieldUrl(resolvedValue);
+
+    // Link field with no usable URL/asset - fall back to the default image.
+    if (!unwrapped) return useDefault ? DEFAULT_ASSETS.IMAGE : undefined;
 
     // The field value may be an asset ID - look up the asset to get the URL
     if (getAsset) {
-      const asset = getAsset(resolvedValue);
+      const asset = getAsset(unwrapped);
       if (asset?.public_url) {
         return asset.public_url;
       }
       if (asset?.content) {
-        return `data:image/svg+xml,${encodeURIComponent(asset.content)}`;
+        return buildSvgDataUrl(asset.content, asset.width, asset.height);
       }
     }
 
     // If getAsset is not available or asset not found, return the raw value
     // (might be a URL in text fields)
-    return resolvedValue;
+    return unwrapped;
   }
 
   if (isDynamicTextVariable(src)) {
     const content = src.data.content;
     // Resolve inline variables if present
-    if (content.includes('<webwow-inline-variable>')) {
+    if (content.includes('<ycode-inline-variable>')) {
       return resolveInlineVariablesFromData(content, collectionItemData, pageCollectionItemData);
     }
     return content;
@@ -378,18 +441,29 @@ export function getVideoUrlFromVariable(
     const fieldId = src.data.field_id;
     if (!fieldId) return undefined;
 
+    // Build path with relationships so nested-reference fields resolve
+    const fieldPath = buildFieldVariablePath(fieldId, src.data.relationships);
+
     // Use source-aware resolution (respects source: 'page' | 'collection')
     const resolvedValue = resolveFieldFromSources(
-      fieldId,
+      fieldPath,
       src.data.source,
       collectionItemData,
       pageCollectionItemData
     );
-    if (!resolvedValue) return undefined;
+    // Empty/null CMS value - fall back to the default placeholder if enabled.
+    if (!resolvedValue) return useDefault ? DEFAULT_ASSETS.VIDEO : undefined;
+
+    // A link/url field bound as a video source stores a serialized
+    // CollectionLinkValue — unwrap it to the underlying URL/asset id.
+    const unwrapped = unwrapLinkFieldUrl(resolvedValue);
+
+    // Link field with no usable URL/asset - fall back to the default if enabled.
+    if (!unwrapped) return useDefault ? DEFAULT_ASSETS.VIDEO : undefined;
 
     // The field value may be an asset ID - look up the asset to get the URL
     if (getAsset) {
-      const asset = getAsset(resolvedValue);
+      const asset = getAsset(unwrapped);
       if (asset?.public_url) {
         return asset.public_url;
       }
@@ -397,13 +471,13 @@ export function getVideoUrlFromVariable(
 
     // If getAsset is not available or asset not found, return the raw value
     // (might be a URL in text fields)
-    return resolvedValue;
+    return unwrapped;
   }
 
   if (isDynamicTextVariable(src)) {
     const content = src.data.content;
     // Resolve inline variables if present
-    if (content.includes('<webwow-inline-variable>')) {
+    if (content.includes('<ycode-inline-variable>')) {
       return resolveInlineVariablesFromData(content, collectionItemData, pageCollectionItemData);
     }
     return content;

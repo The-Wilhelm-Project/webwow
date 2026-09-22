@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Webwow: white-label fork. Upstream ships the 132x35 "ycode" wordmark here and the
+     header/footer layouts in lib/templates/layouts.ts insert it into user pages. The box
+     keeps the original 132x35 aspect ratio so those layouts render unchanged. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="132px" height="35px" viewBox="0 0 132 35" version="1.1">
+  <title>webwow-logo-black</title>
+  <g transform="scale(2.923488)">
+    <path
+      d="M7.456,4.644A5.558,5.558,0,0,1,10.062.112L10.023.044A8.685,8.685,0,0,1,11.159,5.08a15.806,15.806,0,0,1-.993,4.688A5.439,5.439,0,0,1,7.456,4.644ZM1.328,4.87.005,0,7.448,4.822,0,9.7ZM10.007.019l.016.025Z"
+      transform="translate(0.833 1.13)"
+      fill="#000000"
+    />
+  </g>
+</svg>

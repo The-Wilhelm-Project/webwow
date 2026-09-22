@@ -41,6 +41,9 @@ interface LayerStylesActions {
 
   // CRUD operations
   createStyle: (name: string, classes: string, design?: LayerStyle['design'], group?: string) => Promise<LayerStyle | null>;
+  createStyles: (
+    styles: { name: string; classes: string; design?: LayerStyle['design']; group?: string }[]
+  ) => Promise<LayerStyle[]>;
   updateStyle: (id: string, updates: Partial<Pick<LayerStyle, 'name' | 'classes' | 'design'>>) => Promise<void>;
   deleteStyle: (id: string) => Promise<DeleteResult>;
 
@@ -73,7 +76,7 @@ export const useLayerStylesStore = create<LayerStylesStore>((set, get) => ({
     set({ isLoading: true, error: null });
 
     try {
-      const response = await fetch('/webwow/api/layer-styles');
+      const response = await fetch('/ycode/api/layer-styles');
       const result = await response.json();
 
       if (result.error) {
@@ -93,7 +96,7 @@ export const useLayerStylesStore = create<LayerStylesStore>((set, get) => ({
     set({ isLoading: true, error: null });
 
     try {
-      const response = await fetch('/webwow/api/layer-styles', {
+      const response = await fetch('/ycode/api/layer-styles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -125,12 +128,47 @@ export const useLayerStylesStore = create<LayerStylesStore>((set, get) => ({
     }
   },
 
+  // Create many styles in one request (used by the import pipeline so a paste
+  // costs a single round-trip instead of one POST per style). Returns the
+  // created styles in input order so callers can map them back by index.
+  createStyles: async (inputs) => {
+    if (inputs.length === 0) return [];
+    set({ isLoading: true, error: null });
+
+    try {
+      const response = await fetch('/ycode/api/layer-styles/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ styles: inputs }),
+      });
+
+      const result = await response.json();
+
+      if (result.error) {
+        set({ error: result.error, isLoading: false });
+        return [];
+      }
+
+      const created: LayerStyle[] = result.data || [];
+      set((state) => ({
+        styles: [...created, ...state.styles],
+        isLoading: false,
+      }));
+
+      return created;
+    } catch (error) {
+      console.error('Failed to create layer styles:', error);
+      set({ error: 'Failed to create styles', isLoading: false });
+      return [];
+    }
+  },
+
   // Update a style
   updateStyle: async (id, updates) => {
     set({ isLoading: true, error: null });
 
     try {
-      const response = await fetch(`/webwow/api/layer-styles/${id}`, {
+      const response = await fetch(`/ycode/api/layer-styles/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -166,7 +204,7 @@ export const useLayerStylesStore = create<LayerStylesStore>((set, get) => ({
     set({ isLoading: true, error: null });
 
     try {
-      const response = await fetch(`/webwow/api/layer-styles/${id}`, {
+      const response = await fetch(`/ycode/api/layer-styles/${id}`, {
         method: 'DELETE',
       });
 
@@ -210,10 +248,18 @@ export const useLayerStylesStore = create<LayerStylesStore>((set, get) => ({
                 ),
               }));
 
-              // Also update component draft if it's currently being edited
-              const currentDraft = componentsStore.componentDrafts[entity.id];
-              if (currentDraft) {
-                componentsStore.updateComponentDraft(entity.id, entity.newLayers);
+              // Also update the primary variant draft if a working copy
+              // exists. Style detach happens against the legacy `layers`
+              // field, which mirrors variants[0].
+              const variantDrafts = componentsStore.componentDrafts[entity.id];
+              if (variantDrafts) {
+                const updatedComponent = useComponentsStore.getState().getComponentById(entity.id);
+                const primaryVariantId = updatedComponent?.variants && updatedComponent.variants.length > 0
+                  ? updatedComponent.variants[0].id
+                  : Object.keys(variantDrafts)[0];
+                if (primaryVariantId) {
+                  componentsStore.updateComponentDraft(entity.id, primaryVariantId, entity.newLayers);
+                }
               }
             }
           }
@@ -234,7 +280,8 @@ export const useLayerStylesStore = create<LayerStylesStore>((set, get) => ({
             const layerIds: string[] = [];
             const traverse = (layerList: Layer[]) => {
               for (const layer of layerList) {
-                if (layer.styleId === styleId) {
+                const ids = layer.styleIds ?? (layer.styleId ? [layer.styleId] : []);
+                if (ids.includes(styleId)) {
                   layerIds.push(layer.id);
                 }
                 if (layer.children && layer.children.length > 0) {
@@ -328,7 +375,7 @@ export const useLayerStylesStore = create<LayerStylesStore>((set, get) => ({
     // Restore each style via API
     for (const styleId of stylesToRestore) {
       try {
-        const response = await fetch(`/webwow/api/layer-styles/${styleId}`, {
+        const response = await fetch(`/ycode/api/layer-styles/${styleId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'restore' }),

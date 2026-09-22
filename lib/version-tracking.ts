@@ -9,10 +9,13 @@ import type { VersionEntityType, CreateVersionData, Layer, VersionMetadata } fro
 import { createPatch, createInversePatch, isPatchEmpty, doesPatchChangeState, generatePatchDescription, JsonPatch } from '@/lib/version-utils';
 import { generatePageLayersHash, generateComponentContentHash, generateLayerStyleContentHash } from '@/lib/hash-utils';
 import { stripUIProperties } from '@/lib/layer-utils';
+import { getStyleIds } from '@/lib/layer-style-resolve';
 import { useEditorStore } from '@/stores/useEditorStore';
 
-// In-memory cache for previous states (per session)
-const previousStatesCache = new Map<string, any>();
+// In-memory cache for previous states (per session).
+// Stored as JSON strings to cut V8 retained memory ~3x vs parsed objects, which
+// matters when projects have many large pages.
+const previousStatesCache = new Map<string, string>();
 
 /**
  * Generate a cache key for an entity
@@ -22,30 +25,49 @@ function getCacheKey(entityType: VersionEntityType, entityId: string): string {
 }
 
 /**
- * Get the cached previous state for an entity
+ * Build the version-tracking entity id for a component variant. Each variant
+ * keeps its own undo/redo history, keyed by `${componentId}:${variantId}`, so
+ * edits to a non-primary variant are tracked independently.
  */
+export function componentVersionEntityId(componentId: string, variantId?: string | null): string {
+  return variantId ? `${componentId}:${variantId}` : componentId;
+}
+
+/** Get the cached previous state, parsing the stored JSON. */
 export function getPreviousState(entityType: VersionEntityType, entityId: string): any | null {
-  return previousStatesCache.get(getCacheKey(entityType, entityId)) || null;
+  const stored = previousStatesCache.get(getCacheKey(entityType, entityId));
+  if (!stored) return null;
+  try {
+    return JSON.parse(stored);
+  } catch {
+    return null;
+  }
 }
 
-/**
- * Set the cached previous state for an entity
- */
+/** Set the cached previous state (stores as JSON string). */
 export function setPreviousState(entityType: VersionEntityType, entityId: string, state: any): void {
-  previousStatesCache.set(getCacheKey(entityType, entityId), state);
+  try {
+    previousStatesCache.set(getCacheKey(entityType, entityId), JSON.stringify(state));
+  } catch {
+    // ignore stringify failures — caller will re-init on next save
+  }
 }
 
-/**
- * Initialize version tracking for an entity (called when loading data)
- */
+/** Initialize version tracking for an entity (called when loading data). */
 export function initializeVersionTracking(
   entityType: VersionEntityType,
   entityId: string,
   initialState: any
 ): void {
-  // Deep clone to prevent reference issues
-  const clonedState = JSON.parse(JSON.stringify(initialState));
-  setPreviousState(entityType, entityId, clonedState);
+  setPreviousState(entityType, entityId, initialState);
+}
+
+/** Drop the cached previous state for an entity. Call on delete to plug the leak. */
+export function clearVersionTracking(
+  entityType: VersionEntityType,
+  entityId: string
+): void {
+  previousStatesCache.delete(getCacheKey(entityType, entityId));
 }
 
 /**
@@ -267,7 +289,7 @@ export async function recordVersionViaApi(
   };
 
   try {
-    const response = await fetch('/webwow/api/versions', {
+    const response = await fetch('/ycode/api/versions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(versionData),
@@ -308,10 +330,10 @@ export async function recordVersionViaApi(
 function getSessionId(): string {
   if (typeof window === 'undefined') return 'server';
 
-  let sessionId = sessionStorage.getItem('webwow-session-id');
+  let sessionId = sessionStorage.getItem('ycode-session-id');
   if (!sessionId) {
     sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    sessionStorage.setItem('webwow-session-id', sessionId);
+    sessionStorage.setItem('ycode-session-id', sessionId);
   }
   return sessionId;
 }
@@ -485,8 +507,8 @@ function extractLayerStyleIds(layers: Layer[]): string[] {
 
   function traverse(layerList: Layer[]) {
     for (const layer of layerList) {
-      if (layer.styleId) {
-        styleIds.add(layer.styleId);
+      for (const id of getStyleIds(layer)) {
+        styleIds.add(id);
       }
       if (layer.children && layer.children.length > 0) {
         traverse(layer.children);

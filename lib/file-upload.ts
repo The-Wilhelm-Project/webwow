@@ -1,12 +1,12 @@
 /**
- * File upload utilities for local storage
+ * File upload utilities for Supabase Storage
  * Creates Asset records in database for uploaded files
  */
 
-import { uploadFile as uploadToStorage, getPublicUrl } from '@/lib/local-storage';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { createAsset } from '@/lib/repositories/assetRepository';
 import { isAssetOfType } from './asset-utils';
-import { ASSET_CATEGORIES, STORAGE_FOLDERS } from '@/lib/asset-constants';
+import { ASSET_CATEGORIES, STORAGE_BUCKET, generateStoragePath, getDisplayName } from '@/lib/asset-constants';
 import sharp from 'sharp';
 import type { Asset } from '@/types';
 
@@ -25,11 +25,13 @@ export function isValidSvg(content: string): boolean {
     return false;
   }
 
+  // Check for SVG tag (case-insensitive)
   const svgTagRegex = /<svg[\s>]/i;
   if (!svgTagRegex.test(trimmed)) {
     return false;
   }
 
+  // Check for closing SVG tag or self-closing tag
   const hasClosingTag = /<\/svg>/i.test(trimmed);
   const hasSelfClosing = /<svg[^>]*\/>/i.test(trimmed);
 
@@ -37,6 +39,7 @@ export function isValidSvg(content: string): boolean {
     return false;
   }
 
+  // Basic structure check: ensure we have at least one SVG element
   const svgMatch = trimmed.match(/<svg[\s>][\s\S]*<\/svg>/i);
   if (!svgMatch) {
     return false;
@@ -51,29 +54,38 @@ export function isValidSvg(content: string): boolean {
  * @returns Cleaned SVG string without classes, IDs, comments, or fixed dimensions (preserves inline styles)
  */
 export function cleanSvgContent(svgContent: string): string {
+  // Remove XML declarations and DOCTYPE
   let cleaned = svgContent
-    .replace(/<\?xml[^?]*\?>/gi, '')
-    .replace(/<!DOCTYPE[^>]*>/gi, '');
+    .replace(/<\?xml[^?]*\?>/gi, '') // Remove <?xml ... ?>
+    .replace(/<!DOCTYPE[^>]*>/gi, ''); // Remove <!DOCTYPE ... >
 
+  // Remove HTML/XML comments
   cleaned = cleaned.replace(/<!--[\s\S]*?-->/g, '');
 
+  // Remove script tags and event handlers
   cleaned = cleaned
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/\son\w+\s*=\s*["'][^"']*["']/gi, '');
+    .replace(/\son\w+\s*=\s*["'][^"']*["']/gi, ''); // Remove event handlers like onclick, onload, etc.
 
-  const dangerousTags = ['script', 'iframe', 'embed', 'object', 'link', 'style'];
+  // Remove potentially dangerous tags. `<style>` is safe inside SVG (CSS can't
+  // execute code) and is commonly used to define class-based fills (e.g.
+  // `.cls-1 { fill: #5d5d5d; }` from Illustrator exports) — stripping it would
+  // leave path classes referencing nothing and the SVG would render all-black.
+  const dangerousTags = ['script', 'iframe', 'embed', 'object', 'link'];
   dangerousTags.forEach(tag => {
     const regex = new RegExp(`<${tag}\\b[^<]*(?:(?!<\\/${tag}>)<[^<]*)*<\\/${tag}>`, 'gi');
     cleaned = cleaned.replace(regex, '');
   });
 
+  // Remove unwanted attributes (width, height)
   cleaned = cleaned
-    .replace(/(<svg[^>]*)\s+width\s*=\s*["'][^"']*["']/gi, '$1')
-    .replace(/(<svg[^>]*)\s+height\s*=\s*["'][^"']*["']/gi, '$1');
+    .replace(/(<svg[^>]*)\s+width\s*=\s*["'][^"']*["']/gi, '$1') // Remove width from SVG
+    .replace(/(<svg[^>]*)\s+height\s*=\s*["'][^"']*["']/gi, '$1'); // Remove height from SVG
 
+  // Remove excessive whitespace
   cleaned = cleaned
-    .replace(/\s+/g, ' ')
-    .replace(/>\s+</g, '><');
+    .replace(/\s+/g, ' ') // Replace multiple spaces/newlines with single space
+    .replace(/>\s+</g, '><'); // Remove spaces between tags
 
   return cleaned.trim();
 }
@@ -107,36 +119,44 @@ async function getImageDimensions(file: File): Promise<{ width: number; height: 
 
 /**
  * Convert image to WebP format using sharp
+ * @param file - Original image file
+ * @returns Converted file data and metadata, or null if not an image or conversion fails
  */
 async function convertImageToWebP(file: File): Promise<{
   buffer: Buffer;
   mimeType: string;
   fileExtension: string;
-  width: number;
-  height: number;
+  width: number | null;
+  height: number | null;
 } | null> {
   try {
+    // Only convert raster images. Skip SVG, animated GIFs, and AVIF — AVIF is
+    // already a highly-compressed modern format, so re-encoding to WebP would
+    // typically inflate size and lose quality for no benefit.
     if (!isAssetOfType(file.type, ASSET_CATEGORIES.IMAGES) ||
         file.type === 'image/svg+xml' ||
-        file.type === 'image/gif') {
+        file.type === 'image/gif' ||
+        file.type === 'image/avif') {
       return null;
     }
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
+    // Convert to WebP with quality 85
     const webpBuffer = await sharp(buffer)
       .webp({ quality: 85 })
       .toBuffer();
 
+    // Get dimensions from the converted image
     const metadata = await sharp(webpBuffer).metadata();
 
     return {
       buffer: webpBuffer,
       mimeType: 'image/webp',
       fileExtension: 'webp',
-      width: metadata.width || 0,
-      height: metadata.height || 0,
+      width: metadata.width || null,
+      height: metadata.height || null,
     };
   } catch (error) {
     console.error('Error converting image to WebP:', error);
@@ -145,7 +165,7 @@ async function convertImageToWebP(file: File): Promise<{
 }
 
 /**
- * Upload a file to local storage and create Asset record
+ * Upload a file to Supabase Storage and create Asset record
  * Automatically converts raster images to WebP format for better performance
  *
  * @param file - File to upload
@@ -161,13 +181,14 @@ export async function uploadFile(
   assetFolderId?: string | null
 ): Promise<Asset | null> {
   try {
-    const baseName = file.name.replace(/\.[^/.]+$/, '');
-    const filename = customName || baseName || file.name;
+    const filename = getDisplayName(file.name, customName);
 
+    // Handle SVG files - store content directly without uploading to storage
     if (file.type === 'image/svg+xml') {
       const svgText = await file.text();
       const cleanedContent = cleanSvgContent(svgText);
 
+      // Try to extract dimensions from SVG if possible
       let dimensions: { width: number; height: number } | null = null;
       try {
         const arrayBuffer = await file.arrayBuffer();
@@ -183,6 +204,7 @@ export async function uploadFile(
         // SVG dimension extraction is best-effort
       }
 
+      // Create asset with inline SVG content
       const asset = await createAsset({
         filename,
         storage_path: null,
@@ -199,45 +221,69 @@ export async function uploadFile(
       return asset;
     }
 
-    const timestamp = Date.now();
-    const random = Math.random().toString(36).substring(2, 15);
+    // For non-SVG files, proceed with storage upload
+    const supabase = await getSupabaseAdmin();
 
+    if (!supabase) {
+      throw new Error('Supabase client not available');
+    }
+
+    // Try to convert image to WebP
     const webpConversion = await convertImageToWebP(file);
 
-    let fileBuffer: Buffer;
+    let fileToUpload: File | Buffer;
     let fileExtension: string;
     let mimeType: string;
     let fileSize: number;
     let dimensions: { width: number; height: number } | null = null;
 
     if (webpConversion) {
-      fileBuffer = webpConversion.buffer;
+      // Use converted WebP image
+      fileToUpload = webpConversion.buffer;
       fileExtension = webpConversion.fileExtension;
       mimeType = webpConversion.mimeType;
       fileSize = webpConversion.buffer.length;
-      dimensions = {
-        width: webpConversion.width,
-        height: webpConversion.height,
-      };
+      // Only persist dimensions when both are positive; zero/unknown values
+      // would otherwise produce invalid `width="0"` attributes on render.
+      dimensions = (webpConversion.width && webpConversion.height)
+        ? { width: webpConversion.width, height: webpConversion.height }
+        : null;
     } else {
-      const arrayBuffer = await file.arrayBuffer();
-      fileBuffer = Buffer.from(arrayBuffer);
+      // Use original file
+      fileToUpload = file;
       fileExtension = file.name.split('.').pop() || '';
       mimeType = file.type;
       fileSize = file.size;
+      // Get dimensions for non-converted images
       dimensions = await getImageDimensions(file);
     }
 
-    const storagePath = `${STORAGE_FOLDERS.WEBSITE}/${timestamp}-${random}.${fileExtension}`;
+    const effectiveFilename = webpConversion
+      ? `${file.name.replace(/\.[^/.]+$/, '')}.${fileExtension}`
+      : file.name;
+    const storagePath = generateStoragePath(effectiveFilename);
 
-    await uploadToStorage(storagePath, fileBuffer);
+    const { data, error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(storagePath, fileToUpload, {
+        cacheControl: '3600',
+        upsert: false,
+        contentType: mimeType,
+      });
 
-    const publicUrl = getPublicUrl(storagePath);
+    if (error) {
+      console.error('Error uploading file:', error);
+      return null;
+    }
+
+    const { data: urlData } = supabase.storage
+      .from(STORAGE_BUCKET)
+      .getPublicUrl(data.path);
 
     const asset = await createAsset({
       filename,
-      storage_path: storagePath,
-      public_url: publicUrl,
+      storage_path: data.path,
+      public_url: urlData.publicUrl,
       file_size: fileSize,
       mime_type: mimeType,
       width: dimensions?.width,
@@ -256,31 +302,48 @@ export async function uploadFile(
 /**
  * Delete an asset (from both storage and database)
  * @deprecated Use deleteAsset from '@/lib/repositories/assetRepository' instead.
+ * This function does not support the draft/published workflow.
  *
  * @param assetId - Asset ID to delete
  * @returns True if successful, false otherwise
  */
 export async function deleteAsset(assetId: string): Promise<boolean> {
   try {
-    const { getKnexClient } = await import('@/lib/knex-client');
-    const { deleteFile } = await import('@/lib/local-storage');
-    const db = await getKnexClient();
+    const supabase = await getSupabaseAdmin();
 
-    const asset = await db('assets')
+    if (!supabase) {
+      throw new Error('Supabase client not available');
+    }
+
+    const { data: asset, error: fetchError } = await supabase
+      .from('assets')
       .select('storage_path')
-      .where('id', assetId)
-      .first();
+      .eq('id', assetId)
+      .single();
 
-    if (!asset) {
-      console.error('Asset not found:', assetId);
+    if (fetchError || !asset) {
+      console.error('Error fetching asset:', fetchError);
       return false;
     }
 
-    if (asset.storage_path) {
-      await deleteFile(asset.storage_path);
+    const { error: storageError } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .remove([asset.storage_path]);
+
+    if (storageError) {
+      console.error('Error deleting file from storage:', storageError);
+      return false;
     }
 
-    await db('assets').where('id', assetId).delete();
+    const { error: dbError } = await supabase
+      .from('assets')
+      .delete()
+      .eq('id', assetId);
+
+    if (dbError) {
+      console.error('Error deleting asset from database:', dbError);
+      return false;
+    }
 
     return true;
   } catch (error) {

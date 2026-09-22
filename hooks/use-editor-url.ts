@@ -56,6 +56,8 @@ interface EditorUrlState {
   view?: 'desktop' | 'tablet' | 'mobile' | null; // Viewport mode
   rightTab?: 'design' | 'settings' | 'interactions' | null; // Right sidebar tab
   layerId?: string | null; // Selected layer ID
+  /** Selected component variant id while editing a component. */
+  variantId?: string | null;
 }
 
 export function useEditorUrl() {
@@ -66,20 +68,20 @@ export function useEditorUrl() {
   // Parse current URL to determine state
   const urlState = useMemo((): EditorUrlState => {
     // Match new patterns:
-    // - /webwow/layers/[id] → layer editing
-    // - /webwow/pages/[id] → page view (with optional ?edit query param for settings)
-    // - /webwow/collections → base collections view (no ID)
-    // - /webwow/collections/[id] → specific collection view (with optional ?new or ?edit=itemId query params)
-    // - /webwow/components/[id] → component editing
+    // - /ycode/layers/[id] → layer editing
+    // - /ycode/pages/[id] → page view (with optional ?edit query param for settings)
+    // - /ycode/collections → base collections view (no ID)
+    // - /ycode/collections/[id] → specific collection view (with optional ?new or ?edit=itemId query params)
+    // - /ycode/components/[id] → component editing
 
-    const layersMatch = pathname?.match(/^\/webwow\/layers\/([^/]+)$/);
-    const pageMatch = pathname?.match(/^\/webwow\/pages\/([^/]+)$/);
-    const collectionsBaseMatch = pathname?.match(/^\/webwow\/collections$/);
-    const collectionMatch = pathname?.match(/^\/webwow\/collections\/([^/]+)$/);
-    const componentMatch = pathname?.match(/^\/webwow\/components\/([^/]+)$/);
-    const settingsMatch = pathname?.match(/^\/webwow\/settings(?:\/([^/]+))?$/);
-    const localizationMatch = pathname?.match(/^\/webwow\/localization(?:\/([^/]+))?$/);
-    const profileMatch = pathname?.match(/^\/webwow\/profile(?:\/([^/]+))?$/);
+    const layersMatch = pathname?.match(/^\/ycode\/layers\/([^/]+)$/);
+    const pageMatch = pathname?.match(/^\/ycode\/pages\/([^/]+)$/);
+    const collectionsBaseMatch = pathname?.match(/^\/ycode\/collections$/);
+    const collectionMatch = pathname?.match(/^\/ycode\/collections\/([^/]+)$/);
+    const componentMatch = pathname?.match(/^\/ycode\/components\/([^/]+)$/);
+    const settingsMatch = pathname?.match(/^\/ycode\/settings(?:\/([^/]+))?$/);
+    const localizationMatch = pathname?.match(/^\/ycode\/localization(?:\/([^/]+))?$/);
+    const profileMatch = pathname?.match(/^\/ycode\/profile(?:\/([^/]+))?$/);
 
     if (layersMatch) {
       const viewParam = searchParams?.get('view');
@@ -182,7 +184,7 @@ export function useEditorUrl() {
     }
 
     // Forms route matching
-    const formsMatch = pathname?.match(/^\/webwow\/forms(?:\/([^/]+))?$/);
+    const formsMatch = pathname?.match(/^\/ycode\/forms(?:\/([^/]+))?$/);
     if (formsMatch) {
       return {
         type: 'forms',
@@ -194,7 +196,7 @@ export function useEditorUrl() {
     }
 
     // Integrations route matching
-    const integrationsMatch = pathname?.match(/^\/webwow\/integrations(?:\/([^/]+))?$/);
+    const integrationsMatch = pathname?.match(/^\/ycode\/integrations(?:\/([^/]+))?$/);
     if (integrationsMatch) {
       return {
         type: 'integrations',
@@ -208,6 +210,7 @@ export function useEditorUrl() {
     if (componentMatch) {
       const rightTabParam = searchParams?.get('tab');
       const layerParam = searchParams?.get('layer');
+      const variantParam = searchParams?.get('variant');
 
       return {
         type: 'component',
@@ -217,10 +220,11 @@ export function useEditorUrl() {
         sidebarTab: 'layers', // Inferred: components show layers sidebar
         rightTab: rightTabParam as 'design' | 'settings' | 'interactions' | null,
         layerId: layerParam,
+        variantId: variantParam,
       };
     }
 
-    // For /webwow base route
+    // For /ycode base route
     return {
       type: null,
       resourceId: null,
@@ -245,7 +249,7 @@ export function useEditorUrl() {
       currentParams.set('layer', layerId || currentParams.get('layer') || 'body');
 
       const query = currentParams.toString();
-      router.push(`/webwow/layers/${pageId}?${query}`);
+      router.push(`/ycode/layers/${pageId}?${query}`);
     },
     [router]
   );
@@ -264,7 +268,7 @@ export function useEditorUrl() {
       currentParams.set('layer', layerId || currentParams.get('layer') || 'body');
 
       const query = currentParams.toString();
-      router.push(`/webwow/pages/${pageId}?${query}`);
+      router.push(`/ycode/pages/${pageId}?${query}`);
     },
     [router]
   );
@@ -292,7 +296,7 @@ export function useEditorUrl() {
       }
 
       const query = currentParams.toString();
-      router.push(`/webwow/pages/${pageId}${query ? `?${query}` : ''}`);
+      router.push(`/ycode/pages/${pageId}${query ? `?${query}` : ''}`);
     },
     [router, searchParams]
   );
@@ -319,31 +323,43 @@ export function useEditorUrl() {
         params.set('limit', pageSize.toString());
       }
       const query = params.toString();
-      router.push(`/webwow/collections/${collectionId}${query ? `?${query}` : ''}`);
+      router.push(`/ycode/collections/${collectionId}${query ? `?${query}` : ''}`);
     },
     [router]
   );
 
   const navigateToCollections = useCallback(() => {
-    router.push('/webwow/collections');
+    router.push('/ycode/collections');
   }, [router]);
 
   const navigateToCollectionItem = useCallback(
     (collectionId: string, itemRId: string) => {
-      router.push(`/webwow/collections/${collectionId}?edit=${itemRId}`);
+      const currentParams = new URLSearchParams(window.location.search);
+      const params = new URLSearchParams();
+      params.set('edit', itemRId);
+      if (currentParams.has('page')) params.set('page', currentParams.get('page')!);
+      if (currentParams.has('limit')) params.set('limit', currentParams.get('limit')!);
+      if (currentParams.has('search')) params.set('search', currentParams.get('search')!);
+      router.push(`/ycode/collections/${collectionId}?${params.toString()}`);
     },
     [router]
   );
 
   const navigateToNewCollectionItem = useCallback(
     (collectionId: string) => {
-      router.push(`/webwow/collections/${collectionId}?new`);
+      const currentParams = new URLSearchParams(window.location.search);
+      const params = new URLSearchParams();
+      params.set('new', '');
+      if (currentParams.has('page')) params.set('page', currentParams.get('page')!);
+      if (currentParams.has('limit')) params.set('limit', currentParams.get('limit')!);
+      if (currentParams.has('search')) params.set('search', currentParams.get('search')!);
+      router.push(`/ycode/collections/${collectionId}?${params.toString()}`);
     },
     [router]
   );
 
   const navigateToComponent = useCallback(
-    (componentId: string, rightTab?: string, layerId?: string) => {
+    (componentId: string, rightTab?: string, layerId?: string, variantId?: string | null) => {
       const currentParams = new URLSearchParams(window.location.search);
       const params = new URLSearchParams();
 
@@ -352,15 +368,19 @@ export function useEditorUrl() {
       params.set('tab', tabToUse);
 
       if (layerId) params.set('layer', layerId);
+      // Preserve the active variant on the URL so reloads land back on the
+      // same variant the user was editing.
+      const variantToUse = variantId !== undefined ? variantId : currentParams.get('variant');
+      if (variantToUse) params.set('variant', variantToUse);
 
       const query = params.toString();
-      router.push(`/webwow/components/${componentId}${query ? `?${query}` : ''}`);
+      router.push(`/ycode/components/${componentId}${query ? `?${query}` : ''}`);
     },
     [router]
   );
 
   const navigateToEditor = useCallback(() => {
-    router.push('/webwow');
+    router.push('/ycode');
   }, [router]);
 
   const updateQueryParams = useCallback(
@@ -369,6 +389,7 @@ export function useEditorUrl() {
       tab?: string;
       layer?: string;
       preview?: string | undefined;
+      variant?: string | null;
     }) => {
       const currentSearchParams = new URLSearchParams(window.location.search);
       const newSearchParams = new URLSearchParams(currentSearchParams);
@@ -404,6 +425,15 @@ export function useEditorUrl() {
           hasChanges = true;
           if (params.preview) newSearchParams.set('preview', params.preview);
           else newSearchParams.delete('preview');
+        }
+      }
+      if ('variant' in params) {
+        const currentVariant = currentSearchParams.get('variant');
+        const nextVariant = params.variant ?? null;
+        if (nextVariant !== currentVariant) {
+          hasChanges = true;
+          if (nextVariant) newSearchParams.set('variant', nextVariant);
+          else newSearchParams.delete('variant');
         }
       }
 
@@ -449,9 +479,9 @@ export function useEditorUrl() {
  */
 export function useEditorActions() {
   const { navigateToLayers, navigateToPage, navigateToPageEdit, navigateToPageLayers, navigateToCollection, navigateToCollections, navigateToCollectionItem, navigateToNewCollectionItem, navigateToComponent, updateQueryParams, urlState } = useEditorUrl();
-  const { setCurrentPageId } = useEditorStore();
-  const { setSelectedCollectionId } = useCollectionsStore();
-  const { setEditingComponentId } = useEditorStore();
+  const setCurrentPageId = useEditorStore((s) => s.setCurrentPageId);
+  const setSelectedCollectionId = useCollectionsStore((s) => s.setSelectedCollectionId);
+  const setEditingComponentId = useEditorStore((s) => s.setEditingComponentId);
 
   // Combined action: Open page (updates state + URL)
   const openPage = useCallback(
@@ -508,9 +538,9 @@ export function useEditorActions() {
   // Combined action: Open component edit mode (updates state + URL)
   // returnToLayerId is the page/parent layer to restore on exit — NOT the component's layer for the URL
   const openComponent = useCallback(
-    (componentId: string, returnPageId: string | null, rightTab?: string, returnToLayerId?: string) => {
+    (componentId: string, returnPageId: string | null, rightTab?: string, returnToLayerId?: string, variantId?: string | null) => {
       setEditingComponentId(componentId, returnPageId, returnToLayerId);
-      navigateToComponent(componentId, rightTab);
+      navigateToComponent(componentId, rightTab, undefined, variantId ?? undefined);
     },
     [setEditingComponentId, navigateToComponent]
   );

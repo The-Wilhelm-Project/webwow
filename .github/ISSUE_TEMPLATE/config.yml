@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Documentation
-    url: https://docs.webwow.com
-    about: Check the docs — your question may already be answered.
-  - name: Discord Community
-    url: https://discord.gg/xadfw2DV4q
-    about: Chat with the community and get help with self-hosting.
+  - name: ycode documentation
+    url: https://docs.ycode.com/docs
+    about: Webwow runs the ycode builder and CMS — the upstream docs are the best reference for editor features.
+  - name: Upstream ycode issues
+    url: https://github.com/ycode/ycode/issues
+    about: Bugs in the builder itself that also occur on ycode.com belong upstream; Webwow only owns the Postgres/Docker layer and the Webflow ZIP importer.

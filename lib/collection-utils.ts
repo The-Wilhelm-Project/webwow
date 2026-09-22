@@ -1,4 +1,4 @@
-import type { Collection, CollectionFieldType } from '@/types';
+import type { Collection, CollectionFieldType, CollectionSorting, Layer } from '@/types';
 import { sanitizeSlug } from './page-utils';
 
 /**
@@ -55,6 +55,14 @@ export function parseMultiReferenceValue(value: unknown): string[] {
  * @param collections - Array of collections to sort
  * @returns Sorted array of collections
  */
+/** Extract sortBy/sortOrder API params from a collection's sorting config. */
+export function getSortParams(sorting: CollectionSorting | null | undefined): { sortBy?: string; sortOrder?: string } {
+  if (!sorting || sorting.direction === 'manual') {
+    return { sortBy: 'manual', sortOrder: undefined };
+  }
+  return { sortBy: sorting.field, sortOrder: sorting.direction };
+}
+
 export function sortCollectionsByOrder(collections: Collection[]): Collection[] {
   return [...collections].sort((a, b) => {
     // If orders are different, sort by order
@@ -92,7 +100,7 @@ export function castValue(value: string | null, type: CollectionFieldType): any 
       return value === 'true' || value === '1' || value === 'yes';
 
     case 'date':
-      // Return as ISO string for consistency
+    case 'date_only':
       return value;
 
     case 'reference':
@@ -108,12 +116,8 @@ export function castValue(value: string | null, type: CollectionFieldType): any 
       }
 
     case 'link':
-      // Parse link settings from stored JSON
-      try {
-        return JSON.parse(value);
-      } catch {
-        return null;
-      }
+      // Keep as raw JSON string — parsed downstream by parseCollectionLinkValue
+      return value;
 
     case 'color':
       // Standard hex color string (e.g. #ff0000 or #ff0000aa with alpha)
@@ -161,7 +165,7 @@ export function valueToString(value: any, type: CollectionFieldType): string | n
       return String(value);
 
     case 'date':
-      // Expect ISO string or Date object
+    case 'date_only':
       if (value instanceof Date) {
         return value.toISOString();
       }
@@ -204,6 +208,27 @@ export function valueToString(value: any, type: CollectionFieldType): string | n
  */
 export function slugify(name: string): string {
   return sanitizeSlug(name);
+}
+
+/**
+ * Generate a URL-safe slug that is unique within a set of existing slugs.
+ * Appends an incrementing suffix (`-1`, `-2`, ...) on collision and records
+ * the result in `existingSlugs` so subsequent calls stay unique.
+ * @param value - Source text to slugify (falls back to "item" when empty)
+ * @param existingSlugs - Mutable set of slugs already taken
+ */
+export function generateUniqueSlug(value: string | null | undefined, existingSlugs: Set<string>): string {
+  const base = slugify(value || 'item');
+  if (!existingSlugs.has(base)) {
+    existingSlugs.add(base);
+    return base;
+  }
+
+  let n = 1;
+  while (existingSlugs.has(`${base}-${n}`)) n++;
+  const unique = `${base}-${n}`;
+  existingSlugs.add(unique);
+  return unique;
 }
 
 /**
@@ -277,7 +302,8 @@ export function resolveReferenceFieldsSync(
   fields: import('@/types').CollectionField[],
   allItems: Record<string, import('@/types').CollectionItemWithValues[]>,
   allFields: Record<string, import('@/types').CollectionField[]>,
-  visited: Set<string> = new Set()
+  visited: Set<string> = new Set(),
+  translateValues?: (itemId: string, values: Record<string, string>, fields: import('@/types').CollectionField[]) => Record<string, string>
 ): Record<string, string> {
   const enhancedValues = { ...itemValues };
 
@@ -303,9 +329,15 @@ export function resolveReferenceFieldsSync(
     // Get fields for the referenced collection
     const refFields = allFields[field.reference_collection_id] || [];
 
+    // Translate the referenced item's values so the canvas renders referenced
+    // CMS content in the active locale (matches the server-side page fetcher)
+    const refValues = translateValues
+      ? translateValues(refItem.id, refItem.values, refFields)
+      : refItem.values;
+
     // Add referenced item's values with field.id as prefix
     for (const refField of refFields) {
-      const refValue = refItem.values[refField.id];
+      const refValue = refValues[refField.id];
       if (refValue !== undefined) {
         enhancedValues[`${field.id}.${refField.id}`] = refValue;
       }
@@ -313,11 +345,12 @@ export function resolveReferenceFieldsSync(
 
     // Recursively resolve nested reference fields
     const nestedValues = resolveReferenceFieldsSync(
-      refItem.values,
+      refValues,
       refFields,
       allItems,
       allFields,
-      visited
+      visited,
+      translateValues
     );
 
     // Merge nested values with proper path prefix
@@ -330,4 +363,51 @@ export function resolveReferenceFieldsSync(
   }
 
   return enhancedValues;
+}
+
+/**
+ * Recursively suffix all layer IDs (and matching interaction tween `layer_id`
+ * references) in a subtree so each rendered collection item has unique DOM
+ * targets. Lets animations bind to the correct element per item instead of
+ * sharing one DOM node.
+ */
+export function remapLayerIdsForCollectionItem(layer: Layer, suffix: string): Layer {
+  const originalIds = new Set<string>();
+  const collectIds = (l: Layer) => {
+    originalIds.add(l.id);
+    l.children?.forEach(collectIds);
+  };
+  collectIds(layer);
+
+  const remapLayer = (l: Layer): Layer => {
+    const remapped: Layer = {
+      ...l,
+      id: `${l.id}${suffix}`,
+      // Preserve the pre-suffix id so translation injection (which runs after
+      // collection expansion and keys off the original template layer id) can
+      // still resolve static text translations for layers rendered per item.
+      _originalLayerId: (l as Layer)._originalLayerId || l.id,
+    };
+
+    if (l.interactions?.length) {
+      remapped.interactions = l.interactions.map(interaction => ({
+        ...interaction,
+        id: `${interaction.id}${suffix}`,
+        tweens: interaction.tweens.map(tween => ({
+          ...tween,
+          layer_id: originalIds.has(tween.layer_id)
+            ? `${tween.layer_id}${suffix}`
+            : tween.layer_id,
+        })),
+      }));
+    }
+
+    if (l.children) {
+      remapped.children = l.children.map(remapLayer);
+    }
+
+    return remapped;
+  };
+
+  return remapLayer(layer);
 }

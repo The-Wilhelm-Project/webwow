@@ -2,6 +2,14 @@
  * Layout Templates
  *
  * Pre-built combinations of layers with styles
+ *
+ * Webwow: the sample copy in the blog-card and FAQ layouts advertised Ycode, and the
+ * header/footer layouts embedded the ycode wordmark. Inserting such a layout put that
+ * marketing text straight onto a user's page, so every `'text': '...Ycode...'` value was
+ * rewritten to Webwow (and public/ycode/layouts/assets/ycode-logo-black.svg now carries
+ * the Wilhelm mark). After an upstream sync, check with
+ *   grep -n "'text': '[^']*Ycode" lib/templates/layouts.ts
+ * and re-run the substitution on the hits (text values only, never keys or asset paths).
  */
 
 import { LayerTemplate } from '@/types';
@@ -16,7 +24,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'hero-001': {
     category: 'Hero',
-    previewImage: '/webwow/layouts/previews/hero-001.webp',
+    previewImage: '/ycode/layouts/previews/hero-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -410,7 +418,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                   },
                   'src': {
                     'data': {
-                      'content': '/webwow/layouts/assets/hero-background-1.webp'
+                      'content': '/ycode/layouts/assets/hero-background-1.webp'
                     },
                     'type': 'dynamic_text'
                   }
@@ -431,7 +439,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'hero-002': {
     category: 'Hero',
-    previewImage: '/webwow/layouts/previews/hero-002.webp',
+    previewImage: '/ycode/layouts/previews/hero-002.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -743,7 +751,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'hero-003': {
     category: 'Hero',
-    previewImage: '/webwow/layouts/previews/hero-003.webp',
+    previewImage: '/ycode/layouts/previews/hero-003.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -1089,7 +1097,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           },
                           'src': {
                             'data': {
-                              'content': '/webwow/layouts/assets/placeholder-1.webp'
+                              'content': '/ycode/layouts/assets/placeholder-1.webp'
                             },
                             'type': 'dynamic_text'
                           }
@@ -1116,7 +1124,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'hero-004': {
     category: 'Hero',
-    previewImage: '/webwow/layouts/previews/hero-004.webp',
+    previewImage: '/ycode/layouts/previews/hero-004.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -1464,7 +1472,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           'src': {
                             'type': 'dynamic_text',
                             'data': {
-                              'content': '/webwow/layouts/assets/placeholder-2.webp'
+                              'content': '/ycode/layouts/assets/placeholder-2.webp'
                             }
                           },
                           'alt': {
@@ -1504,7 +1512,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'hero-005': {
     category: 'Hero',
-    previewImage: '/webwow/layouts/previews/hero-005.webp',
+    previewImage: '/ycode/layouts/previews/hero-005.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -1787,7 +1795,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
               'src': {
                 'type': 'dynamic_text',
                 'data': {
-                  'content': '/webwow/layouts/assets/placeholder-3.webp'
+                  'content': '/ycode/layouts/assets/placeholder-3.webp'
                 }
               },
               'alt': {
@@ -1807,7 +1815,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'header-001': {
     category: 'Header',
-    previewImage: '/webwow/layouts/previews/header-001.webp',
+    previewImage: '/ycode/layouts/previews/header-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -2153,7 +2161,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'header-002': {
     category: 'Header',
-    previewImage: '/webwow/layouts/previews/header-002.webp',
+    previewImage: '/ycode/layouts/previews/header-002.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -2305,7 +2313,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'header-003': {
     category: 'Header',
-    previewImage: '/webwow/layouts/previews/header-003.webp',
+    previewImage: '/ycode/layouts/previews/header-003.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -2704,7 +2712,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'header-004': {
     category: 'Header',
-    previewImage: '/webwow/layouts/previews/header-004.webp',
+    previewImage: '/ycode/layouts/previews/header-004.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -3093,7 +3101,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
               'src': {
                 'type': 'dynamic_text',
                 'data': {
-                  'content': '/webwow/layouts/assets/placeholder-2.webp'
+                  'content': '/ycode/layouts/assets/placeholder-2.webp'
                 }
               },
               'alt': {
@@ -3113,7 +3121,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-001': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-001.webp',
+    previewImage: '/ycode/layouts/previews/features-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -3319,7 +3327,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               },
                               'src': {
                                 'data': {
-                                  'content': '/webwow/layouts/assets/placeholder-1.webp'
+                                  'content': '/ycode/layouts/assets/placeholder-1.webp'
                                 },
                                 'type': 'dynamic_text'
                               }
@@ -3379,7 +3387,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               },
                               'src': {
                                 'data': {
-                                  'content': '/webwow/layouts/assets/placeholder-1.webp'
+                                  'content': '/ycode/layouts/assets/placeholder-1.webp'
                                 },
                                 'type': 'dynamic_text'
                               }
@@ -3516,7 +3524,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-002': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-002.webp',
+    previewImage: '/ycode/layouts/previews/features-002.webp',
     template: {
       'name': 'section',
       'classes': 'flex flex-col items-center w-[100%] pt-[140px] pb-[140px] bg-[#ffffff]',
@@ -4077,7 +4085,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-003': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-003.webp',
+    previewImage: '/ycode/layouts/previews/features-003.webp',
     template: {
       'name': 'section',
       'classes': 'flex flex-col items-center w-[100%] pt-[140px] pb-[140px] bg-[#ffffff]',
@@ -4732,7 +4740,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           'src': {
                             'type': 'dynamic_text',
                             'data': {
-                              'content': '/webwow/layouts/assets/placeholder-4.webp'
+                              'content': '/ycode/layouts/assets/placeholder-4.webp'
                             }
                           },
                           'alt': {
@@ -4813,7 +4821,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-004': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-004.webp',
+    previewImage: '/ycode/layouts/previews/features-004.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -5837,7 +5845,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-005': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-005.webp',
+    previewImage: '/ycode/layouts/previews/features-005.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -6157,7 +6165,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               },
                               'src': {
                                 'data': {
-                                  'content': '/webwow/layouts/assets/placeholder-5.webp'
+                                  'content': '/ycode/layouts/assets/placeholder-5.webp'
                                 },
                                 'type': 'dynamic_text'
                               }
@@ -6545,7 +6553,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-006': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-006.webp',
+    previewImage: '/ycode/layouts/previews/features-006.webp',
     template: {
       'name': 'section',
       'open': true,
@@ -7303,7 +7311,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
               },
               'src': {
                 'data': {
-                  'content': '/webwow/layouts/assets/placeholder-2.webp'
+                  'content': '/ycode/layouts/assets/placeholder-2.webp'
                 },
                 'type': 'dynamic_text'
               }
@@ -7320,7 +7328,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-007': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-007.webp',
+    previewImage: '/ycode/layouts/previews/features-007.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -8251,7 +8259,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-008': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-008.webp',
+    previewImage: '/ycode/layouts/previews/features-008.webp',
     template: {
       'name': 'section',
       'classes': 'flex flex-col items-center pt-[140px] pb-[140px] bg-[#ffffff] w-[100%]',
@@ -8356,7 +8364,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           'src': {
                             'type': 'dynamic_text',
                             'data': {
-                              'content': '/webwow/layouts/assets/placeholder-4.webp'
+                              'content': '/ycode/layouts/assets/placeholder-4.webp'
                             }
                           },
                           'alt': {
@@ -9001,7 +9009,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-009': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-009.webp',
+    previewImage: '/ycode/layouts/previews/features-009.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -10282,7 +10290,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-010': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-010.webp',
+    previewImage: '/ycode/layouts/previews/features-010.webp',
     template: {
       'name': 'section',
       'classes': 'flex flex-col items-center pt-[140px] pb-[140px] bg-[#ffffff] w-[100%]',
@@ -10387,7 +10395,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           'src': {
                             'type': 'dynamic_text',
                             'data': {
-                              'content': '/webwow/layouts/assets/placeholder-4.webp'
+                              'content': '/ycode/layouts/assets/placeholder-4.webp'
                             }
                           },
                           'alt': {
@@ -11125,7 +11133,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-011': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-011.webp',
+    previewImage: '/ycode/layouts/previews/features-011.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -12084,7 +12092,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'features-012': {
     category: 'Features',
-    previewImage: '/webwow/layouts/previews/features-012.webp',
+    previewImage: '/ycode/layouts/previews/features-012.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -13015,7 +13023,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-posts-001': {
     category: 'Blog posts',
-    previewImage: '/webwow/layouts/previews/blog-posts-001-2.webp',
+    previewImage: '/ycode/layouts/previews/blog-posts-001-2.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -13255,7 +13263,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-6.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-6.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -13560,7 +13568,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-5.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-5.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -13865,7 +13873,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-7.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-7.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -14170,7 +14178,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-8.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-8.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -14434,7 +14442,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-posts-002': {
     category: 'Blog posts',
-    previewImage: '/webwow/layouts/previews/blog-posts-002.webp',
+    previewImage: '/ycode/layouts/previews/blog-posts-002.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -14673,7 +14681,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-6.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-6.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -14900,7 +14908,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           },
                                           'src': {
                                             'data': {
-                                              'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                              'content': '/ycode/layouts/assets/user-profile-1.webp'
                                             },
                                             'type': 'dynamic_text'
                                           }
@@ -15071,7 +15079,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-7.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-7.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -15298,7 +15306,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           },
                                           'src': {
                                             'data': {
-                                              'content': '/webwow/layouts/assets/user-profile-4.webp'
+                                              'content': '/ycode/layouts/assets/user-profile-4.webp'
                                             },
                                             'type': 'dynamic_text'
                                           }
@@ -15429,7 +15437,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-posts-003': {
     category: 'Blog posts',
-    previewImage: '/webwow/layouts/previews/blog-posts-003.webp',
+    previewImage: '/ycode/layouts/previews/blog-posts-003.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -15832,7 +15840,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-1.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -16158,7 +16166,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-4.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-4.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -16480,7 +16488,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       'src': {
                                         'type': 'dynamic_text',
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-3.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-3.webp'
                                         }
                                       },
                                       'alt': {
@@ -16609,7 +16617,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-posts-004': {
     category: 'Blog posts',
-    previewImage: '/webwow/layouts/previews/blog-posts-004.webp',
+    previewImage: '/ycode/layouts/previews/blog-posts-004.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -16855,7 +16863,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-6.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-6.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -17100,7 +17108,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           },
                                           'src': {
                                             'data': {
-                                              'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                              'content': '/ycode/layouts/assets/user-profile-1.webp'
                                             },
                                             'type': 'dynamic_text'
                                           }
@@ -17270,7 +17278,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-7.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-7.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -17515,7 +17523,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           },
                                           'src': {
                                             'data': {
-                                              'content': '/webwow/layouts/assets/user-profile-4.webp'
+                                              'content': '/ycode/layouts/assets/user-profile-4.webp'
                                             },
                                             'type': 'dynamic_text'
                                           }
@@ -17680,7 +17688,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   'src': {
                                     'type': 'dynamic_text',
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-8.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-8.webp'
                                     }
                                   },
                                   'alt': {
@@ -17924,7 +17932,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           'src': {
                                             'type': 'dynamic_text',
                                             'data': {
-                                              'content': '/webwow/layouts/assets/user-profile-3.webp'
+                                              'content': '/ycode/layouts/assets/user-profile-3.webp'
                                             }
                                           },
                                           'alt': {
@@ -18054,7 +18062,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-posts-005': {
     category: 'Blog posts',
-    previewImage: '/webwow/layouts/previews/blog-posts-005.webp',
+    previewImage: '/ycode/layouts/previews/blog-posts-005.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -18293,7 +18301,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-6.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-6.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -18525,7 +18533,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-7.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-7.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -18752,7 +18760,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   'src': {
                                     'type': 'dynamic_text',
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-9.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-9.webp'
                                     }
                                   },
                                   'alt': {
@@ -18949,7 +18957,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-posts-006': {
     category: 'Blog posts',
-    previewImage: '/webwow/layouts/previews/blog-posts-006.webp',
+    previewImage: '/ycode/layouts/previews/blog-posts-006.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -19317,7 +19325,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-6.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-6.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -19623,7 +19631,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-5.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-5.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -19929,7 +19937,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/placeholder-8.webp'
+                                      'content': '/ycode/layouts/assets/placeholder-8.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -20194,7 +20202,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-headers-001': {
     category: 'Blog header',
-    previewImage: '/webwow/layouts/previews/blog-headers-001.webp',
+    previewImage: '/ycode/layouts/previews/blog-headers-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -20406,7 +20414,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-1.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -20546,7 +20554,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           'src': {
                             'type': 'dynamic_text',
                             'data': {
-                              'content': '/webwow/layouts/assets/placeholder-2.webp'
+                              'content': '/ycode/layouts/assets/placeholder-2.webp'
                             }
                           },
                           'alt': {
@@ -20585,7 +20593,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-headers-002': {
     category: 'Blog header',
-    previewImage: '/webwow/layouts/previews/blog-headers-002.webp',
+    previewImage: '/ycode/layouts/previews/blog-headers-002.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -20904,7 +20912,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           'src': {
                             'type': 'dynamic_text',
                             'data': {
-                              'content': '/webwow/layouts/assets/placeholder-8.webp'
+                              'content': '/ycode/layouts/assets/placeholder-8.webp'
                             }
                           },
                           'alt': {
@@ -20932,7 +20940,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-headers-003': {
     category: 'Blog header',
-    previewImage: '/webwow/layouts/previews/blog-headers-003.webp',
+    previewImage: '/ycode/layouts/previews/blog-headers-003.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -21255,7 +21263,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           'src': {
                             'type': 'dynamic_text',
                             'data': {
-                              'content': '/webwow/layouts/assets/placeholder-10.webp'
+                              'content': '/ycode/layouts/assets/placeholder-10.webp'
                             }
                           },
                           'alt': {
@@ -21288,7 +21296,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'blog-headers-004': {
     category: 'Blog header',
-    previewImage: '/webwow/layouts/previews/blog-headers-004.webp',
+    previewImage: '/ycode/layouts/previews/blog-headers-004.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -21507,7 +21515,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               },
                               'src': {
                                 'data': {
-                                  'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                  'content': '/ycode/layouts/assets/user-profile-1.webp'
                                 },
                                 'type': 'dynamic_text'
                               }
@@ -21729,7 +21737,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
               'src': {
                 'type': 'dynamic_text',
                 'data': {
-                  'content': '/webwow/layouts/assets/placeholder-2.webp'
+                  'content': '/ycode/layouts/assets/placeholder-2.webp'
                 }
               },
               'alt': {
@@ -21748,7 +21756,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'stats-001': {
     category: 'Stats',
-    previewImage: '/webwow/layouts/previews/stats-001.webp',
+    previewImage: '/ycode/layouts/previews/stats-001.webp',
     template: {
       'name': 'section',
       'classes': 'flex flex-col items-center w-[100%] pt-[140px] pb-[140px] bg-[#ffffff]',
@@ -22407,7 +22415,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'stats-002': {
     category: 'Stats',
-    previewImage: '/webwow/layouts/previews/stats-002.webp',
+    previewImage: '/ycode/layouts/previews/stats-002.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -23133,7 +23141,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'stats-003': {
     category: 'Stats',
-    previewImage: '/webwow/layouts/previews/stats-003.webp',
+    previewImage: '/ycode/layouts/previews/stats-003.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -23392,7 +23400,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               },
                               'src': {
                                 'data': {
-                                  'content': '/webwow/layouts/assets/placeholder-4.webp'
+                                  'content': '/ycode/layouts/assets/placeholder-4.webp'
                                 },
                                 'type': 'dynamic_text'
                               }
@@ -23909,7 +23917,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'pricing-001': {
     category: 'Pricing',
-    previewImage: '/webwow/layouts/previews/pricing-001.webp',
+    previewImage: '/ycode/layouts/previews/pricing-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -25501,7 +25509,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'team-001': {
     category: 'Team',
-    previewImage: '/webwow/layouts/previews/team-001.webp',
+    previewImage: '/ycode/layouts/previews/team-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -25745,7 +25753,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-1.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -25911,7 +25919,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-6.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-6.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -26077,7 +26085,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-5.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-5.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -26243,7 +26251,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-4.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-4.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -26409,7 +26417,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-7.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-7.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -26575,7 +26583,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-8.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-8.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -26700,7 +26708,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'team-002': {
     category: 'Team',
-    previewImage: '/webwow/layouts/previews/team-002.webp',
+    previewImage: '/ycode/layouts/previews/team-002.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -26946,7 +26954,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-1.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -27115,7 +27123,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-6.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-6.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -27284,7 +27292,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-5.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-5.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -27453,7 +27461,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/user-profile-4.webp'
+                                      'content': '/ycode/layouts/assets/user-profile-4.webp'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -27580,7 +27588,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'testimonials-001': {
     category: 'Testimonials',
-    previewImage: '/webwow/layouts/previews/testimonials-001.webp',
+    previewImage: '/ycode/layouts/previews/testimonials-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -27700,7 +27708,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           },
                           'src': {
                             'data': {
-                              'content': '/webwow/layouts/assets/user-profile-1.webp'
+                              'content': '/ycode/layouts/assets/user-profile-1.webp'
                             },
                             'type': 'dynamic_text'
                           }
@@ -27858,7 +27866,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'testimonials-002': {
     category: 'Testimonials',
-    previewImage: '/webwow/layouts/previews/testimonials-002.webp',
+    previewImage: '/ycode/layouts/previews/testimonials-002.webp',
     template: {
       'name': 'section',
       'classes': 'flex flex-col items-center w-[100%] pt-[140px] pb-[140px] bg-[#ffffff]',
@@ -28078,7 +28086,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-1.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -28299,7 +28307,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-6.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-6.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -28520,7 +28528,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-7.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-7.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -28716,7 +28724,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'testimonials-003': {
     category: 'Testimonials',
-    previewImage: '/webwow/layouts/previews/testimonials-003.webp',
+    previewImage: '/ycode/layouts/previews/testimonials-003.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -28960,7 +28968,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               },
                               'src': {
                                 'data': {
-                                  'content': '/webwow/layouts/assets/company-2-logo-black.svg'
+                                  'content': '/ycode/layouts/assets/company-2-logo-black.svg'
                                 },
                                 'type': 'dynamic_text'
                               }
@@ -29028,7 +29036,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               'src': {
                                 'type': 'dynamic_text',
                                 'data': {
-                                  'content': '/webwow/layouts/assets/company-1-logo-black.svg'
+                                  'content': '/ycode/layouts/assets/company-1-logo-black.svg'
                                 }
                               },
                               'alt': {
@@ -29327,7 +29335,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-1.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -29719,7 +29727,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-6.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-6.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -29885,7 +29893,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               'src': {
                                 'type': 'dynamic_text',
                                 'data': {
-                                  'content': '/webwow/layouts/assets/company-2-logo-black.svg'
+                                  'content': '/ycode/layouts/assets/company-2-logo-black.svg'
                                 }
                               },
                               'alt': {
@@ -29958,7 +29966,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               'src': {
                                 'type': 'dynamic_text',
                                 'data': {
-                                  'content': '/webwow/layouts/assets/company-1-logo-black.svg'
+                                  'content': '/ycode/layouts/assets/company-1-logo-black.svg'
                                 }
                               },
                               'alt': {
@@ -29988,7 +29996,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'testimonials-004': {
     category: 'Testimonials',
-    previewImage: '/webwow/layouts/previews/testimonials-004.webp',
+    previewImage: '/ycode/layouts/previews/testimonials-004.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -30095,7 +30103,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                           'src': {
                             'type': 'dynamic_text',
                             'data': {
-                              'content': '/webwow/layouts/assets/user-profile-6.webp'
+                              'content': '/ycode/layouts/assets/user-profile-6.webp'
                             }
                           },
                           'alt': {
@@ -30487,7 +30495,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               'src': {
                                 'type': 'dynamic_text',
                                 'data': {
-                                  'content': '/webwow/layouts/assets/company-1-logo-black.svg'
+                                  'content': '/ycode/layouts/assets/company-1-logo-black.svg'
                                 }
                               },
                               'alt': {
@@ -30519,7 +30527,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'testimonials-005': {
     category: 'Testimonials',
-    previewImage: '/webwow/layouts/previews/testimonials-005.webp',
+    previewImage: '/ycode/layouts/previews/testimonials-005.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -31041,7 +31049,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-1.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-1.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -31450,7 +31458,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-6.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-6.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -31854,7 +31862,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       'src': {
                                         'type': 'dynamic_text',
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-9.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-9.webp'
                                         }
                                       },
                                       'alt': {
@@ -32267,7 +32275,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-5.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-5.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -32676,7 +32684,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-4.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-4.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -33085,7 +33093,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                       },
                                       'src': {
                                         'data': {
-                                          'content': '/webwow/layouts/assets/user-profile-7.webp'
+                                          'content': '/ycode/layouts/assets/user-profile-7.webp'
                                         },
                                         'type': 'dynamic_text'
                                       }
@@ -33208,7 +33216,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'faq-001': {
     category: 'FAQ',
-    previewImage: '/webwow/layouts/previews/faq-001.webp',
+    previewImage: '/ycode/layouts/previews/faq-001.webp',
     template: {
       'name': 'section',
       'classes': 'flex flex-col items-center w-[100%] pt-[140px] pb-[140px] bg-[#ffffff]',
@@ -34255,7 +34263,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'navigation-001': {
     category: 'Navigation',
-    previewImage: '/webwow/layouts/previews/navigation-001.webp',
+    previewImage: '/ycode/layouts/previews/navigation-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -34281,6 +34289,9 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
         }
       },
       'classes': 'flex flex-col w-[100%] items-center pt-[20px] pb-[20px] bg-[#ffffff]',
+      'settings': {
+        'tag': 'header'
+      },
       'children': [
         {
           'id': 'lyr-ml0o0z1kpz9lgn',
@@ -34308,6 +34319,9 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
             }
           },
           'classes': 'flex flex-col w-[100%] items-center pt-[20px] pb-[20px] bg-[#ffffff]',
+          'settings': {
+            'tag': 'nav'
+          },
           'children': [
             {
               'id': 'lyr-ml0o0z1kvic1di',
@@ -34405,7 +34419,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/webwow-logo-black.svg'
+                                      'content': '/ycode/layouts/assets/ycode-logo-black.svg'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -34796,17 +34810,17 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
               'customName': 'Container'
             }
           ],
-          'customName': 'Section'
+          'customName': 'Nav'
         }
       ],
-      'customName': 'Section',
+      'customName': 'Header',
       '_inlinedComponentName': 'Navigation'
     },
   },
 
   'navigation-002': {
     category: 'Navigation',
-    previewImage: '/webwow/layouts/previews/navigation-002.webp',
+    previewImage: '/ycode/layouts/previews/navigation-002.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -34832,6 +34846,9 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
         }
       },
       'classes': 'flex flex-col w-[100%] items-center bg-[#ffffff] pt-[25px] pb-[25px]',
+      'settings': {
+        'tag': 'header'
+      },
       'children': [
         {
           'id': 'lyr-ml0p6eablzp8wo',
@@ -34859,6 +34876,9 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
             }
           },
           'classes': 'flex flex-col w-[100%] items-center bg-[#ffffff] pt-[25px] pb-[25px]',
+          'settings': {
+            'tag': 'nav'
+          },
           'children': [
             {
               'id': 'lyr-ml0p6eabjud5cp',
@@ -34957,7 +34977,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/webwow-logo-black.svg'
+                                      'content': '/ycode/layouts/assets/ycode-logo-black.svg'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -35284,17 +35304,17 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
               'customName': 'Container'
             }
           ],
-          'customName': 'Section'
+          'customName': 'Nav'
         }
       ],
-      'customName': 'Section',
+      'customName': 'Header',
       '_inlinedComponentName': 'Navigation'
     },
   },
 
   'footer-001': {
     category: 'Footer',
-    previewImage: '/webwow/layouts/previews/footer-001.webp',
+    previewImage: '/ycode/layouts/previews/footer-001.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -35412,7 +35432,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                               },
                               'src': {
                                 'data': {
-                                  'content': '/webwow/layouts/assets/webwow-logo-black.svg'
+                                  'content': '/ycode/layouts/assets/ycode-logo-black.svg'
                                 },
                                 'type': 'dynamic_text'
                               }
@@ -35836,7 +35856,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'footer-002': {
     category: 'Footer',
-    previewImage: '/webwow/layouts/previews/footer-002.webp',
+    previewImage: '/ycode/layouts/previews/footer-002.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -36277,7 +36297,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
 
   'footer-003': {
     category: 'Footer',
-    previewImage: '/webwow/layouts/previews/footer-003.webp',
+    previewImage: '/ycode/layouts/previews/footer-003.webp',
     template: {
       'name': 'section',
       'open': false,
@@ -36413,7 +36433,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                   },
                                   'src': {
                                     'data': {
-                                      'content': '/webwow/layouts/assets/webwow-logo-black.svg'
+                                      'content': '/ycode/layouts/assets/ycode-logo-black.svg'
                                     },
                                     'type': 'dynamic_text'
                                   }
@@ -36600,7 +36620,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           'content': [
                                             {
                                               'type': 'text',
-                                              'text': 'info@webwow.com'
+                                              'text': 'hello@example.com'
                                             }
                                           ]
                                         }

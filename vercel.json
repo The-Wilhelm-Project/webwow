@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "name": "ycode",
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "installCommand": "npm install",
+  "framework": "nextjs",
+  "functions": {
+    "app/(builder)/ycode/api/ai/chat/route.ts": {
+      "maxDuration": 300
+    },
+    "app/(builder)/ycode/api/project/export/route.ts": {
+      "maxDuration": 300
+    },
+    "app/(builder)/ycode/api/**/*.ts": {
+      "maxDuration": 60
+    },
+    "app/(builder)/ycode/mcp/*/route.ts": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/airtable-webhooks",
+      "schedule": "0 3 * * *"
+    }
+  ]
+}
+
+

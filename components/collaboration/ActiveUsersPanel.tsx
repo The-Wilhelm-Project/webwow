@@ -6,6 +6,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { useCollaborationPresenceStore } from '../../stores/useCollaborationPresenceStore';
+import { useAuthStore } from '../../stores/useAuthStore';
 import { getUserInitials, getDisplayName, getUserStatus } from '../../lib/collaboration-utils';
 import type { CollaborationUser } from '../../types';
 
@@ -25,6 +26,7 @@ export const ActiveUsersPanel: React.FC<ActiveUsersPanelProps> = ({
   onUserClick
 }) => {
   const { users, currentUserId, getActiveUsers } = useCollaborationPresenceStore();
+  const { user: currentUser } = useAuthStore();
   const [isExpanded, setIsExpanded] = useState(false);
   
   const activeUsers = getActiveUsers();

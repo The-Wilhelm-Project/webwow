@@ -4,16 +4,18 @@
  * Handles communication with Next.js setup API routes
  */
 
-import type { ApiResponse } from '@/types';
+import type { ApiResponse, SupabaseConfig } from '@/types';
 
 /**
  * Check if setup is complete
  */
 export async function checkSetupStatus(): Promise<{
   is_configured: boolean;
-  is_setup_complete?: boolean;
+  is_setup_complete: boolean;
+  is_vercel: boolean;
+  error?: string;
 }> {
-  const response = await fetch('/webwow/api/setup/status');
+  const response = await fetch('/ycode/api/setup/status');
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -23,30 +25,53 @@ export async function checkSetupStatus(): Promise<{
 }
 
 /**
- * Validate a database connection URL (does not persist DATABASE_URL).
+ * Connect Supabase credentials (4 fields)
  */
-export async function connectDatabase(
-  databaseUrl: string
+export async function connectSupabase(
+  config: SupabaseConfig
 ): Promise<ApiResponse<void>> {
-  const response = await fetch('/webwow/api/setup/connect', {
+  const response = await fetch('/ycode/api/setup/connect', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ database_url: databaseUrl }),
+    body: JSON.stringify({
+      anon_key: config.anonKey,
+      service_role_key: config.serviceRoleKey,
+      connection_url: config.connectionUrl,
+      db_password: config.dbPassword,
+      ...(config.supabaseUrl ? { supabase_url: config.supabaseUrl } : {}),
+    }),
   });
 
   return response.json();
 }
 
 /**
- * Run database migrations (Knex) and seeds if configured
+ * Run Supabase migrations (checks and runs if needed)
  */
 export async function runMigrations(): Promise<ApiResponse<void>> {
-  const response = await fetch('/webwow/api/setup/migrate', {
+  const response = await fetch('/ycode/api/setup/migrate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });
 
   return response.json();
+}
+
+/**
+ * Check if Supabase "Confirm email" setting is disabled (autoconfirm enabled)
+ */
+export async function checkEmailConfirmDisabled(): Promise<{
+  autoconfirm: boolean;
+  error?: string;
+}> {
+  const response = await fetch('/ycode/api/setup/check-email-confirm');
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data?.error || `HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  return data;
 }
 
 /**
@@ -55,7 +80,7 @@ export async function runMigrations(): Promise<ApiResponse<void>> {
 export async function completeSetup(): Promise<ApiResponse<{ redirect_url: string }>> {
   return {
     data: {
-      redirect_url: '/webwow',
+      redirect_url: '/ycode',
     },
   };
 }

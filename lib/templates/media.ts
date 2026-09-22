@@ -117,4 +117,5 @@ export const mediaTemplates: Record<string, BlockTemplate> = {
       }
     }
   },
+
 };

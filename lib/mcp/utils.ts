@@ -3,8 +3,9 @@
  * These are simplified versions focused on the MCP tool use case.
  */
 
-import type { Layer, DesignProperties, Breakpoint, UIState } from '@/types';
+import type { Layer, DesignProperties, Breakpoint, UIState, CollectionFieldType } from '@/types';
 import { generateId } from '@/lib/utils';
+import { markdownToTiptapJson } from '@/lib/markdown-to-tiptap';
 import {
   designToClassString,
   propertyToClass,
@@ -119,6 +120,51 @@ export function getTiptapTextContent(text: string): TiptapDoc {
   };
 }
 
+/** True when value is a Tiptap document node: `{ type: 'doc', content: [...] }`. */
+export function isTiptapDoc(value: unknown): value is TiptapDoc {
+  return (
+    typeof value === 'object'
+    && value !== null
+    && (value as TiptapDoc).type === 'doc'
+    && Array.isArray((value as TiptapDoc).content)
+  );
+}
+
+/**
+ * Validate a translation's content_value against its content_type so malformed
+ * data is rejected before it reaches the database. Returns an actionable error
+ * the AI can use to correct and retry.
+ */
+export function validateTranslationContent(
+  contentType: 'text' | 'richtext' | 'asset_id',
+  contentValue: string,
+): { valid: true } | { valid: false; error: string } {
+  if (contentType === 'richtext') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(contentValue);
+    } catch {
+      return {
+        valid: false,
+        error: 'richtext content_value must be a JSON-stringified Tiptap document like {"type":"doc","content":[...]}. Prefer the set_rich_text_translation tool, which builds the JSON from simple blocks.',
+      };
+    }
+    if (!isTiptapDoc(parsed)) {
+      return {
+        valid: false,
+        error: 'richtext content_value parsed as JSON but is not a Tiptap document. It must have the shape {"type":"doc","content":[...]}. Prefer the set_rich_text_translation tool.',
+      };
+    }
+    return { valid: true };
+  }
+
+  if (contentType === 'asset_id' && !contentValue.trim()) {
+    return { valid: false, error: 'asset_id content_value must be a non-empty asset ID.' };
+  }
+
+  return { valid: true };
+}
+
 /**
  * Build a Tiptap document from a simplified block array.
  * Accepts an array of block descriptors and produces valid Tiptap JSON.
@@ -131,6 +177,10 @@ export function getTiptapTextContent(text: string): TiptapDoc {
  *  - { type: "orderedList", items: ["...", "..."] }
  *  - { type: "codeBlock", text: "..." }
  *  - { type: "horizontalRule" }
+ *  - { type: "htmlEmbed", code: "<script>...</script>" }
+ *  - { type: "image", src: "...", alt?: "...", asset_id?: "..." }
+ *  - { type: "table", rows: [["cell", "cell"], ...], header_row: true }
+ *  - { type: "component", component_id: "..." }
  *
  * Text can include simple inline formatting via markdown-like syntax:
  *  - **bold**, *italic*, [link text](url)
@@ -143,10 +193,83 @@ export function buildTiptapDoc(blocks: RichTextBlock[]): TiptapDoc {
 }
 
 export interface RichTextBlock {
-  type: 'paragraph' | 'heading' | 'blockquote' | 'bulletList' | 'orderedList' | 'codeBlock' | 'horizontalRule';
+  type:
+    | 'paragraph' | 'heading' | 'blockquote'
+    | 'bulletList' | 'orderedList'
+    | 'codeBlock' | 'horizontalRule'
+    | 'htmlEmbed' | 'image' | 'table' | 'component';
   text?: string;
   level?: number;
   items?: string[];
+  code?: string;
+  src?: string;
+  alt?: string;
+  asset_id?: string;
+  rows?: string[][];
+  header_row?: boolean;
+  component_id?: string;
+}
+
+/**
+ * Coerce a single collection-item `rich_text` value into the serialized Tiptap
+ * JSON string the CMS editor and renderer expect. Accepts, in order:
+ *  - an already-built Tiptap doc object → stringified;
+ *  - a JSON string that parses to a Tiptap doc → passed through unchanged;
+ *  - an array of RichTextBlock → built via buildTiptapDoc;
+ *  - any other string → treated as markdown and converted.
+ * Empty / nullish values become null.
+ *
+ * Agents naturally produce markdown, so a plain string "## Title\n\nBody" is
+ * turned into proper rich text instead of being stored verbatim (which renders
+ * empty/broken because castValue expects a Tiptap document).
+ */
+export function coerceRichTextValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+
+  if (isTiptapDoc(value)) {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return JSON.stringify(buildTiptapDoc(value as RichTextBlock[]));
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed === '') return null;
+    // A pre-built Tiptap doc supplied as a JSON string passes through untouched.
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (isTiptapDoc(parsed)) return trimmed;
+      } catch {
+        // Not JSON — fall through and treat as markdown.
+      }
+    }
+    return markdownToTiptapJson(value);
+  }
+
+  // Unknown object shape: stringify so it at least round-trips through storage.
+  return JSON.stringify(value);
+}
+
+/**
+ * Pre-process a collection item's `{ fieldId: value }` map so `rich_text`
+ * fields are stored as valid Tiptap JSON. Non-rich-text fields pass through
+ * untouched. Used by the create/update collection item tools before handing
+ * values to setValuesByFieldName.
+ */
+export function coerceCollectionItemValues(
+  values: Record<string, unknown>,
+  fieldTypeById: Record<string, CollectionFieldType>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [fieldId, value] of Object.entries(values)) {
+    result[fieldId] = fieldTypeById[fieldId] === 'rich_text'
+      ? coerceRichTextValue(value)
+      : value;
+  }
+  return result;
 }
 
 function parseInlineMarks(text: string): TiptapNode[] {
@@ -167,7 +290,17 @@ function parseInlineMarks(text: string): TiptapNode[] {
       nodes.push({
         type: 'text',
         text: match[3],
-        marks: [{ type: 'richTextLink', attrs: { href: match[4], linkType: 'url' } }],
+        // Match the canonical LinkSettings shape the renderer resolves via
+        // getLinkSettingsFromMark/generateLinkHref — a bare { href } is ignored.
+        marks: [{
+          type: 'richTextLink',
+          attrs: {
+            type: 'url',
+            url: { type: 'dynamic_text', data: { content: match[4] } },
+            target: '_blank',
+            rel: 'noopener noreferrer nofollow',
+          },
+        }],
       });
     }
     lastIndex = match.index + match[0].length;
@@ -224,12 +357,48 @@ function blockToTiptapNode(block: RichTextBlock): TiptapNode {
       };
     case 'horizontalRule':
       return { type: 'horizontalRule' };
+    case 'htmlEmbed':
+      return {
+        type: 'richTextHtmlEmbed',
+        attrs: { code: block.code || '' },
+      };
+    case 'image':
+      return {
+        type: 'richTextImage',
+        attrs: {
+          src: block.src || '',
+          alt: block.alt || null,
+          assetId: block.asset_id || null,
+          link: null,
+        },
+      };
+    case 'component':
+      return {
+        type: 'richTextComponent',
+        attrs: { componentId: block.component_id || '' },
+      };
+    case 'table':
+      return buildTableNode(block.rows || [], block.header_row !== false);
     default:
       return {
         type: 'paragraph',
         content: block.text ? [{ type: 'text', text: block.text }] : [],
       };
   }
+}
+
+function buildTableNode(rows: string[][], headerRow: boolean): TiptapNode {
+  if (rows.length === 0) return { type: 'paragraph' };
+  return {
+    type: 'table',
+    content: rows.map((row, rowIdx) => ({
+      type: 'tableRow',
+      content: row.map((cellText) => ({
+        type: headerRow && rowIdx === 0 ? 'tableHeader' : 'tableCell',
+        content: [{ type: 'paragraph', content: cellText ? parseInlineMarks(cellText) : [] }],
+      })),
+    })),
+  };
 }
 
 /**
@@ -256,7 +425,7 @@ function normalizeDesignValues(
       'space-evenly': 'evenly',
     };
 
-    for (const prop of ['justifyContent', 'alignItems', 'alignContent'] as const) {
+    for (const prop of ['justifyContent', 'alignItems', 'alignSelf', 'alignContent'] as const) {
       const val = layout[prop];
       if (typeof val === 'string' && flexValueMap[val]) {
         layout[prop] = flexValueMap[val];
@@ -280,11 +449,16 @@ export function applyDesignToLayer(
   // Normalize CSS values (flex-start→start, Flex→flex, etc.) before processing
   design = normalizeDesignValues(design);
 
-  // Extract bgGradientVars before processing — it's not a simple design property
+  // Extract bgGradientVars/bgImageVars before processing — they hold raw CSS
+  // values (not simple design properties) and need the backgroundImage design
+  // property + bg-[image:var(--bg-img)] class wired up to actually render.
   const bgGradientVars = (design.backgrounds as Record<string, unknown>)?.bgGradientVars as Record<string, string> | undefined;
+  const bgImageVars = normalizeBgImageVars(
+    (design.backgrounds as Record<string, unknown>)?.bgImageVars as Record<string, string> | undefined,
+  );
   const inputDesign = { ...design };
   if (inputDesign.backgrounds) {
-    const { bgGradientVars: _, ...restBg } = inputDesign.backgrounds as Record<string, unknown>;
+    const { bgGradientVars: _, bgImageVars: __, ...restBg } = inputDesign.backgrounds as Record<string, unknown>;
     inputDesign.backgrounds = restBg;
   }
 
@@ -300,12 +474,13 @@ export function applyDesignToLayer(
       }
     }
 
-    // Handle gradient vars
-    if (bgGradientVars) {
+    // Handle gradient/image vars
+    if (bgGradientVars || bgImageVars) {
       const bgDesign = mergedDesign.backgrounds || {};
-      bgDesign.bgGradientVars = { ...bgDesign.bgGradientVars, ...bgGradientVars };
+      if (bgGradientVars) bgDesign.bgGradientVars = { ...bgDesign.bgGradientVars, ...bgGradientVars };
+      if (bgImageVars) bgDesign.bgImageVars = { ...bgDesign.bgImageVars, ...bgImageVars };
       const varName = buildBgImgVarName('desktop', 'neutral');
-      if (bgGradientVars[varName]) {
+      if (bgGradientVars?.[varName] || bgImageVars?.[varName]) {
         bgDesign.backgroundImage = varName;
       }
       mergedDesign.backgrounds = bgDesign;
@@ -337,12 +512,13 @@ export function applyDesignToLayer(
     }
   }
 
-  // Handle gradient vars for non-neutral states
-  if (bgGradientVars) {
+  // Handle gradient/image vars for non-neutral states
+  if (bgGradientVars || bgImageVars) {
     const bgDesign = { ...(layer.design?.backgrounds || {}) };
-    bgDesign.bgGradientVars = { ...bgDesign.bgGradientVars, ...bgGradientVars };
+    if (bgGradientVars) bgDesign.bgGradientVars = { ...bgDesign.bgGradientVars, ...bgGradientVars };
+    if (bgImageVars) bgDesign.bgImageVars = { ...bgDesign.bgImageVars, ...bgImageVars };
     const varName = buildBgImgVarName(breakpoint, uiState);
-    if (bgGradientVars[varName]) {
+    if (bgGradientVars?.[varName] || bgImageVars?.[varName]) {
       bgDesign.backgroundImage = bgDesign.backgroundImage || buildBgImgVarName('desktop', 'neutral');
       const bgImgClass = buildBgImgClass(varName);
       classes = setBreakpointClass(classes, 'backgroundImage', bgImgClass, breakpoint, uiState);
@@ -352,6 +528,41 @@ export function applyDesignToLayer(
   }
 
   return { ...layer, classes: classes.join(' ') };
+}
+
+/**
+ * Wrap bare image URLs in `url(...)` so bgImageVars values are always valid
+ * CSS background-image values (gradients and already-wrapped values pass through).
+ */
+function normalizeBgImageVars(vars?: Record<string, string>): Record<string, string> | undefined {
+  if (!vars) return vars;
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    const needsWrap = typeof value === 'string' && !value.startsWith('url(') && !value.includes('gradient(');
+    result[key] = needsWrap ? `url(${value})` : value;
+  }
+  return result;
+}
+
+/**
+ * Ensure a layer's design + classes actually render its `variables.backgroundImage`.
+ *
+ * Setting the variable alone only provides the `--bg-img` CSS value at render time —
+ * nothing consumes it until the layer also has `design.backgrounds.backgroundImage`
+ * pointing at the var (which generates the `bg-[image:var(--bg-img)]` class).
+ * Mirrors what the builder's BackgroundsControls does when picking an image.
+ * Cover/center/no-repeat defaults are only applied when not already set.
+ */
+export function applyBackgroundImageDesign(layer: Layer): Layer {
+  const bg = layer.design?.backgrounds || {};
+  const patch: Record<string, unknown> = {
+    isActive: true,
+    backgroundImage: buildBgImgVarName('desktop', 'neutral'),
+  };
+  if (!bg.backgroundSize) patch.backgroundSize = 'cover';
+  if (!bg.backgroundPosition) patch.backgroundPosition = 'center';
+  if (!bg.backgroundRepeat) patch.backgroundRepeat = 'no-repeat';
+  return applyDesignToLayer(layer, { backgrounds: patch });
 }
 
 // ── Element Templates ────────────────────────────────────────────────────────
@@ -522,44 +733,18 @@ export const ELEMENT_TEMPLATES: Record<string, ElementTemplateEntry> = {
   },
   form: {
     name: 'Form',
-    description: 'Form container',
-    template: {
-      name: 'form',
-      classes: ['flex', 'flex-col', 'gap-8', 'w-full'],
-      settings: { id: 'contact-form' },
-      attributes: { method: 'POST', action: '' },
-      design: {
-        sizing: { isActive: true, width: '100%' },
-        layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '2rem' },
-      },
-      children: [],
-    },
+    description: 'Native form, pre-populated with name/email/message fields, a submit button, and success/error alerts. Configure submission behavior via update_form_settings. Add or remove native field children (input, textarea, select, etc.) to customize.',
+    useBlocksTemplate: true,
   },
   input: {
     name: 'Input',
-    description: 'Text input with label',
-    template: {
-      name: 'div',
-      classes: ['w-full', 'flex', 'flex-col', 'gap-1'],
-      design: {
-        sizing: { isActive: true, width: '100%' },
-        layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '0.25rem' },
-      },
-      children: [],
-    },
+    description: 'Native text input with a label wrapper. Set the field type/placeholder/name via update_layer_settings.',
+    useBlocksTemplate: true,
   },
   textarea: {
     name: 'Textarea',
-    description: 'Multi-line text area',
-    template: {
-      name: 'div',
-      classes: ['w-full', 'flex', 'flex-col', 'gap-1'],
-      design: {
-        sizing: { isActive: true, width: '100%' },
-        layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '0.25rem' },
-      },
-      children: [],
-    },
+    description: 'Native multi-line textarea with a label wrapper.',
+    useBlocksTemplate: true,
   },
   htmlEmbed: {
     name: 'Code Embed',
@@ -666,6 +851,36 @@ export const ELEMENT_TEMPLATES: Record<string, ElementTemplateEntry> = {
   localeSelector: {
     name: 'Locale Selector',
     description: 'Language switcher dropdown for multi-language sites.',
+    useBlocksTemplate: true,
+  },
+  table: {
+    name: 'Table',
+    description: 'Data table (renders as <table>). Pre-populated with a header row and two body rows.',
+    useBlocksTemplate: true,
+  },
+  thead: {
+    name: 'Table Header',
+    description: '<thead> with one header row. Add inside a table.',
+    useBlocksTemplate: true,
+  },
+  tbody: {
+    name: 'Table Body',
+    description: '<tbody> with one row. Add inside a table.',
+    useBlocksTemplate: true,
+  },
+  tr: {
+    name: 'Table Row',
+    description: '<tr>. Add inside thead or tbody.',
+    useBlocksTemplate: true,
+  },
+  td: {
+    name: 'Table Cell',
+    description: '<td>. Add inside a tr.',
+    useBlocksTemplate: true,
+  },
+  th: {
+    name: 'Table Header Cell',
+    description: '<th>. Add inside a thead tr.',
     useBlocksTemplate: true,
   },
 };

@@ -8,9 +8,11 @@
  */
 
 import { getKnexClient } from '../knex-client';
-import { jsonb } from '../knex-helpers';
 import { getPublishedPagesByIds } from '@/lib/repositories/pageRepository';
 import { batchPublishPageLayers } from '@/lib/repositories/pageLayersRepository';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { buildSlugPath } from '@/lib/page-utils';
+import type { Page, PageFolder } from '@/types';
 
 /**
  * Helper: Generate a unique slug from a page name
@@ -110,14 +112,19 @@ export async function fixOrphanedPageSlugs(
   if (orphanedPages.length === 0) return;
 
   const knex = await getKnexClient();
-  const { batchUpdateColumn } = await import('../knex-helpers');
+  const { addTenantFilter, batchUpdateColumn } = await import('../knex-helpers');
 
   try {
-    const slugRows: Array<{ slug: string }> = await knex('pages')
+    // Fetch all existing slugs once for duplicate checking
+    const slugQuery = knex('pages')
       .select('slug')
       .whereNotNull('slug')
       .whereNot('slug', '')
       .whereNull('deleted_at');
+
+    // Apply tenant scoping and execute query
+    // await resolves both the Promise and the thenable QueryBuilder, returning rows
+    const slugRows: Array<{ slug: string }> = await addTenantFilter(knex, slugQuery, 'pages');
     const existingSlugs = new Set(slugRows.map(r => r.slug));
 
     // Generate unique slugs for all orphaned pages
@@ -152,6 +159,12 @@ export async function fixOrphanedPageSlugs(
 /** Result of page publishing with timing */
 export interface PublishPagesResult {
   count: number;
+  /** Page IDs that were actually upserted (content changed, new, or folder moved) */
+  changedPageIds: string[];
+  /** Route paths that no longer exist because a page's slug or folder changed */
+  renamedPageOldRoutes: string[];
+  /** Route paths removed from the live site because a page was set to draft */
+  unpublishedPageRoutes: string[];
   timing: {
     pagesDurationMs: number;
     layersDurationMs: number;
@@ -168,29 +181,73 @@ export interface PublishPagesResult {
  */
 export async function publishPages(pageIds: string[]): Promise<PublishPagesResult> {
   if (pageIds.length === 0) {
-    return { count: 0, timing: { pagesDurationMs: 0, layersDurationMs: 0, layersCount: 0 } };
+    return { count: 0, changedPageIds: [], renamedPageOldRoutes: [], unpublishedPageRoutes: [], timing: { pagesDurationMs: 0, layersDurationMs: 0, layersCount: 0 } };
   }
 
+  // Import folder functions
   const {
     getAllDraftPageFolders,
     getPublishedPageFoldersByIds,
   } = await import('../repositories/pageFolderRepository');
 
-  const db = await getKnexClient();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Supabase not configured');
+  }
 
-  const draftPagesData = await db('pages')
+  // Step 1: Batch fetch all draft pages in a single query
+  const { data: draftPagesData, error: pagesError } = await client
+    .from('pages')
     .select('*')
-    .whereIn('id', pageIds)
-    .where('is_published', false)
-    .whereNull('deleted_at');
+    .in('id', pageIds)
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  if (pagesError) {
+    throw new Error(`Failed to fetch draft pages: ${pagesError.message}`);
+  }
 
   // Filter valid draft pages
-  const validDraftPages = (draftPagesData || []).filter(
+  const allValidDraftPages = (draftPagesData || []).filter(
     (page) => !page.deleted_at && !page.is_published
   );
 
+  // Split by publish status: only publishable pages go live; pages set to draft
+  // are skipped and their existing live version is removed (mirrors CMS items).
+  const validDraftPages = allValidDraftPages.filter((page) => page.is_publishable !== false);
+  const nonPublishableDraftPages = allValidDraftPages.filter((page) => page.is_publishable === false);
+
+  // Remove live versions of pages that are now drafts, capturing their routes
+  // first so the publish route can purge the stale caches.
+  const unpublishedPageRoutes: string[] = [];
+  if (nonPublishableDraftPages.length > 0) {
+    const draftIds = nonPublishableDraftPages.map((p) => p.id);
+    const { data: livePages } = await client
+      .from('pages')
+      .select('id')
+      .in('id', draftIds)
+      .eq('is_published', true);
+
+    const livePageIds = (livePages || []).map((p) => p.id);
+    if (livePageIds.length > 0) {
+      try {
+        const { getRoutePathsForPages } = await import('@/lib/services/cacheService');
+        unpublishedPageRoutes.push(...(await getRoutePathsForPages(livePageIds)));
+      } catch {
+        // Non-fatal: route resolution failure should not block removal
+      }
+
+      // Delete live rows (page_layers removed via ON DELETE CASCADE)
+      await client
+        .from('pages')
+        .delete()
+        .in('id', livePageIds)
+        .eq('is_published', true);
+    }
+  }
+
   if (validDraftPages.length === 0) {
-    return { count: 0, timing: { pagesDurationMs: 0, layersDurationMs: 0, layersCount: 0 } };
+    return { count: 0, changedPageIds: [], renamedPageOldRoutes: [], unpublishedPageRoutes, timing: { pagesDurationMs: 0, layersDurationMs: 0, layersCount: 0 } };
   }
 
   // Step 2: Collect all unique folder IDs from pages
@@ -286,17 +343,19 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
       page_folder_id: publishedParentId,
       order: draftFolder.order,
       depth: draftFolder.depth,
-      settings: jsonb(draftFolder.settings),
+      settings: draftFolder.settings,
       is_published: true,
       updated_at: new Date().toISOString(),
     });
   }
 
+  // Batch upsert folders
   if (foldersToUpsert.length > 0) {
-    await db('page_folders')
-      .insert(foldersToUpsert)
-      .onConflict(['id', 'is_published'])
-      .merge();
+    await client
+      .from('page_folders')
+      .upsert(foldersToUpsert, {
+        onConflict: 'id,is_published',
+      });
   }
 
   // Step 8: Publish pages using upsert (only pages that changed or are new)
@@ -336,11 +395,39 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
         is_index: draftPage.is_index,
         is_dynamic: draftPage.is_dynamic,
         error_page: draftPage.error_page,
-        settings: jsonb(draftPage.settings),
+        settings: draftPage.settings,
         content_hash: draftPage.content_hash,
         is_published: true,
         updated_at: new Date().toISOString(),
       });
+    }
+  }
+
+  // Capture old route paths for pages whose slug or folder changed so the
+  // old URLs can be invalidated (prevents stale caches at the previous URL)
+  const renamedPageOldRoutes: string[] = [];
+  const publishedFoldersArray = publishedFolders as PageFolder[];
+
+  for (const upsertPage of pagesToUpsert) {
+    const oldPublished = publishedPagesById.get(upsertPage.id);
+    if (!oldPublished) continue; // new page, no old route
+
+    const slugChanged = oldPublished.slug !== upsertPage.slug;
+    const folderChanged = oldPublished.page_folder_id !== upsertPage.page_folder_id;
+
+    if (slugChanged || folderChanged) {
+      const oldPath = buildSlugPath(
+        oldPublished as Page,
+        publishedFoldersArray,
+        'page',
+      );
+      const trimmed = oldPath.slice(1); // remove leading "/"
+
+      if (oldPublished.is_index && oldPublished.page_folder_id === null) {
+        renamedPageOldRoutes.push('');
+      } else if (trimmed) {
+        renamedPageOldRoutes.push(trimmed);
+      }
     }
   }
 
@@ -363,12 +450,13 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
     }
 
     const slugsToCheck = [...new Set(nonDynamicPagesToUpsert.map((p) => p.slug))];
-    const conflictingPublished = await db('pages')
-      .select('id', 'slug', 'page_folder_id', 'error_page')
-      .where('is_published', true)
-      .where('is_dynamic', false)
-      .whereNull('deleted_at')
-      .whereIn('slug', slugsToCheck);
+    const { data: conflictingPublished } = await client
+      .from('pages')
+      .select('id, slug, page_folder_id, error_page')
+      .eq('is_published', true)
+      .eq('is_dynamic', false)
+      .is('deleted_at', null)
+      .in('slug', slugsToCheck);
 
     // Delete if a different page will occupy this slug/folder/error_page slot
     const idsToDelete = (conflictingPublished || [])
@@ -385,26 +473,44 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
         publishedPageIdsDeletedInStep8a.add(id);
       }
 
-      await db('page_layers')
-        .where('is_published', true)
-        .whereIn('page_id', idsToDelete)
-        .delete();
+      // Delete page_layers first (FK constraint)
+      const { error: layersDeleteError } = await client
+        .from('page_layers')
+        .delete()
+        .eq('is_published', true)
+        .in('page_id', idsToDelete);
 
-      await db('pages')
-        .where('is_published', true)
-        .whereIn('id', idsToDelete)
-        .delete();
+      if (layersDeleteError) {
+        throw new Error(`Failed to remove conflicting published page layers: ${layersDeleteError.message}`);
+      }
+
+      // Then delete the pages
+      const { error: deleteError } = await client
+        .from('pages')
+        .delete()
+        .eq('is_published', true)
+        .in('id', idsToDelete);
+
+      if (deleteError) {
+        throw new Error(`Failed to remove conflicting published pages: ${deleteError.message}`);
+      }
     }
   }
 
   // Time pages upsert
   const pagesStart = performance.now();
 
+  // Batch upsert pages
   if (pagesToUpsert.length > 0) {
-    await db('pages')
-      .insert(pagesToUpsert)
-      .onConflict(['id', 'is_published'])
-      .merge();
+    const { error: upsertError } = await client
+      .from('pages')
+      .upsert(pagesToUpsert, {
+        onConflict: 'id,is_published',
+      });
+
+    if (upsertError) {
+      throw new Error(`Failed to upsert pages: ${upsertError.message}`);
+    }
   }
 
   const pagesDurationMs = Math.round(performance.now() - pagesStart);
@@ -431,17 +537,45 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
     })
     .map(p => p.id);
 
+  // Regenerate per-page CSS for the pages being published before their layers
+  // are copied live. Layer edits made outside the builder editor — AI/MCP tools,
+  // Figma import, etc. — update each layer's `classes` but never recompile the
+  // page's `generated_css`. The draft's content_hash then reflects the new
+  // layers paired with STALE CSS, so the live page ships fresh markup styled by
+  // outdated CSS (missing styles until an unrelated manual edit triggers a
+  // recompile). Recompiling here refreshes generated_css and content_hash, so
+  // batchPublishPageLayers detects the change and the live page gets CSS for its
+  // current classes. Pages already in sync compile to identical CSS and are
+  // skipped (no write), so the normal builder publish flow pays nothing.
+  if (pageIdsForLayerPublish.length > 0) {
+    try {
+      const { generateCSSForPages } = await import('@/lib/server/cssGenerator');
+      await generateCSSForPages(pageIdsForLayerPublish);
+    } catch (error) {
+      console.error('[publish] Per-page CSS regeneration failed (non-fatal):', error);
+    }
+  }
+
   // Time layers publishing
   const layersStart = performance.now();
-  const layersCount = await batchPublishPageLayers(pageIdsForLayerPublish);
+  const layersResult = await batchPublishPageLayers(pageIdsForLayerPublish);
   const layersDurationMs = Math.round(performance.now() - layersStart);
+
+  // Merge changed IDs from both pages table and page_layers table
+  const allChangedIds = [...new Set([
+    ...pagesToUpsert.map((p) => p.id),
+    ...layersResult.changedPageIds,
+  ])];
 
   return {
     count: pagesToUpsert.length,
+    changedPageIds: allChangedIds,
+    renamedPageOldRoutes,
+    unpublishedPageRoutes,
     timing: {
       pagesDurationMs,
       layersDurationMs,
-      layersCount,
+      layersCount: layersResult.count,
     },
   };
 }

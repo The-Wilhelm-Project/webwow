@@ -27,6 +27,10 @@ import AiChatPanel from '../components/ai/AiChatPanel';
 import CenterCanvas from '../components/CenterCanvas';
 import HeaderBar from '../components/HeaderBar';
 import LeftSidebar from '../components/LeftSidebar';
+// Webwow: Webflow-style rail + panels (app/(builder)/ycode/components/webwow/). The upstream
+// LeftSidebar stays available as a fallback via NEXT_PUBLIC_WEBWOW_CLASSIC_SIDEBAR=1.
+import WebwowLeftSidebar from '../components/webwow/WebwowLeftSidebar';
+const useClassicSidebar = process.env.NEXT_PUBLIC_WEBWOW_CLASSIC_SIDEBAR === '1';
 import SettingsContent from '../components/SettingsContent';
 import LocalizationContent from '../components/LocalizationContent';
 import ProfileContent from '../components/ProfileContent';
@@ -131,6 +135,22 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
   const clearSelection = useEditorStore((state) => state.clearSelection);
   const currentPageId = useEditorStore((state) => state.currentPageId);
   const setCurrentPageId = useEditorStore((state) => state.setCurrentPageId);
+
+  // Webwow: stable callbacks for the memoized rail sidebar (inline arrows would re-render
+  // the whole rail stack on every builder render).
+  const handleSidebarLayerSelect = useCallback((layerId: string | null) => {
+    setSelectedLayerId(layerId);
+    if (isEditor) {
+      useEditorStore.getState().setActiveSidebarTab('layers');
+    }
+  }, [setSelectedLayerId, isEditor]);
+  const handleSidebarPageSelect = useCallback((pageId: string) => {
+    setCurrentPageId(pageId);
+    if (isEditor) {
+      useEditorStore.getState().setActiveSidebarTab('layers');
+    }
+  }, [setCurrentPageId, isEditor]);
+
   const activeBreakpoint = useEditorStore((state) => state.activeBreakpoint);
   const setActiveBreakpoint = useEditorStore((state) => state.setActiveBreakpoint);
   const undo = useEditorStore((state) => state.undo);
@@ -636,8 +656,8 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
   }, [urlState.layerId, resourceId, routeType, setSelectedLayerId, currentPageId, editingComponentId, currentDraft, componentDraftLayers, getCurrentLayers]);
 
   // Sync selected layer to URL imperatively (avoids re-rendering YCodeBuilderMain on selection change)
-  const urlSyncDepsRef = useRef({ routeType, updateQueryParams, urlLayerId: urlState.layerId, isEditing: urlState.isEditing });
-  urlSyncDepsRef.current = { routeType, updateQueryParams, urlLayerId: urlState.layerId, isEditing: urlState.isEditing };
+  const urlSyncDepsRef = useRef({ routeType, resourceId, updateQueryParams, urlLayerId: urlState.layerId, isEditing: urlState.isEditing });
+  urlSyncDepsRef.current = { routeType, resourceId, updateQueryParams, urlLayerId: urlState.layerId, isEditing: urlState.isEditing };
 
   useEffect(() => {
     let prevLayerId: string | null = null;
@@ -647,10 +667,17 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
       prevLayerId = layerId;
 
       if (!hasInitializedLayerFromUrlRef.current) return;
-      const { routeType: rt, updateQueryParams: uqp, urlLayerId, isEditing } = urlSyncDepsRef.current;
+      const { routeType: rt, resourceId: rid, updateQueryParams: uqp, urlLayerId, isEditing } = urlSyncDepsRef.current;
       const isPageOrLayersRoute = rt === 'page' || rt === 'layers';
       const isComponentRoute = rt === 'component';
-      if ((isPageOrLayersRoute || isComponentRoute) && !isEditing && layerId) {
+      // Webwow: while the component editor is being entered or left (useEditComponent,
+      // ElementLibrary "Edit", exit handler) the store already points at the target but the
+      // URL still shows the previous route. A `history.replaceState` in that window makes the
+      // App Router queue a restore of the previous route behind the pending push, so the
+      // component page never opens. Hold the mirror until store and route agree; the effect
+      // below completes the `?layer=` deep link once the component route has settled.
+      const routeSettled = isComponentRoute ? state.editingComponentId === rid : !state.editingComponentId;
+      if ((isPageOrLayersRoute || isComponentRoute) && !isEditing && layerId && routeSettled) {
         if (urlLayerId !== layerId) {
           uqp({ layer: layerId });
         }
@@ -658,6 +685,17 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
     });
     return unsub;
   }, []);
+
+  // Webwow: complete `?layer=` for the selection made while the component route was pending
+  // (see the subscription above); only once the component draft is loaded and the layer exists.
+  useEffect(() => {
+    if (routeType !== 'component' || !resourceId || editingComponentId !== resourceId) return;
+    if (!componentDraftLayers || urlState.isEditing) return;
+    const layerId = useEditorStore.getState().selectedLayerId;
+    if (!layerId || urlState.layerId === layerId) return;
+    if (!findLayerById(componentDraftLayers, layerId)) return;
+    updateQueryParams({ layer: layerId });
+  }, [routeType, resourceId, editingComponentId, componentDraftLayers, urlState.layerId, urlState.isEditing, updateQueryParams]);
 
   // Generate initial CSS if draft_css is empty (one-time check after data loads)
   const initialCssCheckRef = useRef(false);
@@ -2294,6 +2332,17 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
 
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
+        {/* Webwow: the rail sits left of every /ycode route (design, CMS, settings, ...) */}
+        {!useClassicSidebar && (
+          <WebwowLeftSidebar
+            onLayerSelect={handleSidebarLayerSelect}
+            currentPageId={currentPageId}
+            onPageSelect={handleSidebarPageSelect}
+            liveLayerUpdates={liveLayerUpdates}
+            liveComponentUpdates={liveComponentUpdates}
+            readOnly={!canEditStructure}
+          />
+        )}
         {/* Settings Route - Render Settings Content */}
         {routeType === 'settings' ? (
           <SettingsContent>{children}</SettingsContent>
@@ -2307,9 +2356,10 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
           <IntegrationsContent>{children}</IntegrationsContent>
         ) : (
           <>
-            {/* Left Sidebar - Pages & Layers
+            {/* Left Sidebar - Pages & Layers (classic upstream sidebar, fallback only)
                 - Hidden in CMS mode
                 - For editor role: only shown when "Pages" tab is active */}
+            {useClassicSidebar && (
             <div className={activeTab === 'cms' || (isEditor && activeTab !== 'pages') ? 'hidden' : 'contents'}>
               <LeftSidebar
                 onLayerSelect={(layerId) => {
@@ -2330,6 +2380,7 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
                 readOnly={!canEditStructure}
               />
             </div>
+            )}
 
             {/* CMS View - kept mounted for instant switching */}
             <div className={activeTab === 'cms' ? 'flex flex-1 min-w-0 overflow-hidden' : 'hidden'}>

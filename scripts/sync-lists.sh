@@ -64,6 +64,13 @@ DIVERGENT_FILES=(
   "lib/apps/static-export/document.ts"
   "lib/services/webflowImportService.ts"
 
+  # Slider-Laufzeit: Effect-Cleanup von SliderInitializer gibt die Slider wieder frei
+  # (data-slider-initialized, Inline-Styles, Pagination-Template), sonst steht nach Reacts
+  # Effect-Doppellauf (Strict Mode, next dev) jeder Slider still; der verzoegerte
+  # State-Sync in slider-utils prueft swiper.destroyed. Upstream-Bug, Fix an Upstream melden.
+  "components/SliderInitializer.tsx"
+  "lib/slider-utils.ts"
+
   # White-Label: Marken-Metadaten des Builders (Titel, Icons, Manifest, Open Graph, themeColor).
   # Re-Apply: in RootLayoutShell nur den Titel ersetzen; Icons/Manifest/OG gehören ausschließlich
   # in app/(builder)/layout.tsx, sonst erben veröffentlichte Kundenseiten Webwows Favicon.
@@ -120,8 +127,16 @@ DIVERGENT_FILES=(
 
   # Verhaltens-/Fehlerkorrekturen des Forks (Details in docs/UPSTREAM-SYNC.md §2a)
   "lib/mcp/tools/publishing.ts"
+  # MCP im Multi-Site-Betrieb: Token-Cache pro Site (sonst galt ein Token von Site A 60 s lang auf Site B)
+  "lib/mcp/token-cache.ts"
+  # White-Label: serverInfo.name des MCP-Servers "webwow" statt "ycode"
+  "lib/mcp/server.ts"
   "components/MigrationChecker.tsx"
   "app/(builder)/ycode/api/error-page/route.ts"
+  # Rail-Sidebar: optionaler Prop `availableWidth` (Breite des Navigator-Panels statt
+  # `leftSidebarWidth` = rechte Kante des ganzen linken Stapels). Re-Apply: Prop im Interface,
+  # in der Signatur und in `treeAvailableWidth = (availableWidth ?? leftSidebarWidth) - 32`.
+  "app/(builder)/ycode/components/LayersTree.tsx"
 
   # Fork-Doku statt Upstream-Doku (Beitrag, Security-Kontakt, Cursor-Regeln)
   "CONTRIBUTING.md"
@@ -154,6 +169,8 @@ DIVERGENT_PREFIXES=(
   "import/"
   "tools/"
   "app/(builder)/dev/"
+  # Webflow-artige linke Sidebar (Rail + Panels); reine Logik in lib/webwow/builder/
+  "app/(builder)/ycode/components/webwow/"
 )
 
 # is_divergent <pfad> -> 0, wenn der Pfad in DIVERGENT_FILES steht oder mit einem DIVERGENT_PREFIXES-Eintrag beginnt.

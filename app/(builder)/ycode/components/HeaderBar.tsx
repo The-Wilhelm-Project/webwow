@@ -354,6 +354,28 @@ export default function HeaderBar({
     return () => window.removeEventListener('togglePreview', handleTogglePreviewEvent);
   }, [handleTogglePreview]);
 
+  // Webwow: the left rail's Find palette dispatches `webwow:publish`; open the Publish popover
+  // so the user confirms there (same flow as clicking the header button).
+  useEffect(() => {
+    const handlePublishEvent = () => {
+      const trigger = document.querySelector<HTMLButtonElement>('[data-webwow-publish] button');
+      if (trigger && !trigger.disabled) trigger.click();
+    };
+    window.addEventListener('webwow:publish', handlePublishEvent);
+    return () => window.removeEventListener('webwow:publish', handlePublishEvent);
+  }, []);
+
+  // Webwow: the left rail's Theme item (webwow/ThemeMenu.tsx) writes the same localStorage key
+  // and `dark` class and announces the change with `webwow:theme`; mirror it into this state.
+  useEffect(() => {
+    const handleThemeEvent = (event: Event) => {
+      const next = (event as CustomEvent<unknown>).detail;
+      if (next === 'system' || next === 'light' || next === 'dark') setTheme(next);
+    };
+    window.addEventListener('webwow:theme', handleThemeEvent);
+    return () => window.removeEventListener('webwow:theme', handleThemeEvent);
+  }, []);
+
   // Apply theme to HTML element
   useEffect(() => {
     const root = document.documentElement;
@@ -679,13 +701,16 @@ export default function HeaderBar({
           <Icon name="preview" />
         </Button>
 
-        <PublishPopover
-          isPublishing={isPublishing}
-          setIsPublishing={setIsPublishing}
-          baseUrl={baseUrl}
-          publishedUrl={publishedUrl}
-          onPublishSuccess={onPublishSuccess}
-        />
+        {/* Webwow: wrapper lets the rail's Find palette open the popover (see the webwow:publish effect) */}
+        <div data-webwow-publish className="contents">
+          <PublishPopover
+            isPublishing={isPublishing}
+            setIsPublishing={setIsPublishing}
+            baseUrl={baseUrl}
+            publishedUrl={publishedUrl}
+            onPublishSuccess={onPublishSuccess}
+          />
+        </div>
 
       </div>
     </header>

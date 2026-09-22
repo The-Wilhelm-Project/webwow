@@ -157,6 +157,12 @@ interface LayersTreeProps {
   liveLayerUpdates?: UseLiveLayerUpdatesReturn | null;
   liveComponentUpdates?: UseLiveComponentUpdatesReturn | null;
   readOnly?: boolean;
+  /**
+   * Webwow: visible width of the panel the tree lives in. The rail's `leftSidebarWidth`
+   * is the right edge of rail + pinned panel + flyout (what the fixed overlays need), not
+   * the tree's own panel. Defaults to `leftSidebarWidth` (upstream behaviour).
+   */
+  availableWidth?: number;
 }
 
 const ROW_HEIGHT = 32;
@@ -987,6 +993,7 @@ export default function LayersTree({
   liveLayerUpdates,
   liveComponentUpdates,
   readOnly = false,
+  availableWidth,
 }: LayersTreeProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
@@ -1515,7 +1522,7 @@ export default function LayersTree({
     return () => ro.disconnect();
   }, []);
 
-  const treeAvailableWidth = leftSidebarWidth - 32;
+  const treeAvailableWidth = (availableWidth ?? leftSidebarWidth) - 32; // Webwow: see `availableWidth`
   const maxDepth = useMemo(() => flattenedNodes.reduce((max, n) => Math.max(max, n.depth), 0), [flattenedNodes]);
 
   const virtualizer = useVirtualizer({

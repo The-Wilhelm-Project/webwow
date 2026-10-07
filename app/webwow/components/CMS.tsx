@@ -356,6 +356,7 @@ const CMS = React.memo(function CMS() {
     searchItems,
     createCollection,
     createSampleCollection,
+    applyUniversalTemplate,
     updateCollection,
     deleteCollection,
     reorderCollections,
@@ -378,6 +379,8 @@ const CMS = React.memo(function CMS() {
   const getAsset = useAssetsStore((state) => state.getAsset);
   const pages = usePagesStore((state) => state.pages);
   const folders = usePagesStore((state) => state.folders);
+  const loadPages = usePagesStore((state) => state.loadPages);
+  const loadFolders = usePagesStore((state) => state.loadFolders);
   const timezone = useSettingsStore((state) => state.settingsByKey.timezone as string | null) ?? 'UTC';
   const refetchLayersForCollection = useCollectionLayerStore((state) => state.refetchLayersForCollection);
   const invalidateLayerData = useCollectionLayerStore((state) => state.invalidateLayerData);
@@ -414,6 +417,7 @@ const CMS = React.memo(function CMS() {
   const [hoveredCollectionId, setHoveredCollectionId] = useState<string | null>(null);
   const [collectionDropdownId, setCollectionDropdownId] = useState<string | null>(null);
   const [loadingSampleCollectionId, setLoadingSampleCollectionId] = useState<string | null>(null);
+  const [isApplyingUniversalTemplate, setIsApplyingUniversalTemplate] = useState(false);
 
   // Confirm dialog state
   const [deleteItemDialogOpen, setDeleteItemDialogOpen] = useState(false);
@@ -1341,6 +1345,25 @@ const CMS = React.memo(function CMS() {
     });
   };
 
+  const handleApplyUniversalTemplate = () => {
+    // Defer so the dropdown menu can finish its close animation
+    requestAnimationFrame(async () => {
+      setIsApplyingUniversalTemplate(true);
+      try {
+        const result = await applyUniversalTemplate();
+        await Promise.all([loadPages(), loadFolders()]);
+        const created = result.collections.filter(c => c.created).length;
+        const createdPages = result.pages.filter(p => p.created).length;
+        toast.success(`Universal ontology applied: ${created} collections and ${createdPages} pages created`);
+      } catch (error) {
+        console.error('Failed to apply universal template:', error);
+        toast.error(error instanceof Error ? error.message : 'Failed to apply universal template');
+      } finally {
+        setIsApplyingUniversalTemplate(false);
+      }
+    });
+  };
+
   const handleCollectionDoubleClick = (collection: { id: string; name: string }) => {
     collectionRename.startRename(collection.id, collection.name);
   };
@@ -1962,6 +1985,14 @@ const CMS = React.memo(function CMS() {
                 ))}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={handleApplyUniversalTemplate}
+              disabled={isApplyingUniversalTemplate}
+            >
+              <Icon name="database" className="size-3 shrink-0" />
+              {isApplyingUniversalTemplate ? 'Applying universal ontology…' : 'Universal ontology (collections + pages)'}
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </header>

@@ -148,13 +148,13 @@ export async function createSampleCollection(
  * Find an existing draft asset by filename and source, or upload and create a new one.
  * Avoids duplicate storage files and DB records for the same sample image.
  */
-async function getOrUploadSampleImage(filename: string): Promise<Asset> {
+export async function getOrUploadSampleImage(filename: string, source: string = 'sample-collection'): Promise<Asset> {
   const db = await getKnexClient();
 
   const existing = await db('assets')
     .select('*')
     .where('filename', filename)
-    .where('source', 'sample-collection')
+    .where('source', source)
     .where('is_published', false)
     .whereNull('deleted_at')
     .first();
@@ -178,7 +178,7 @@ async function getOrUploadSampleImage(filename: string): Promise<Asset> {
 
   return createAsset({
     filename,
-    source: 'sample-collection',
+    source,
     storage_path: storagePath,
     public_url: publicUrl,
     file_size: buffer.length,
@@ -213,7 +213,7 @@ async function createImageAssets(
 
   // Deduplicate: upload each unique filename once
   const uniqueFilenames = [...new Set(entries.map(e => e.filename))];
-  const uploadedAssets = await Promise.all(uniqueFilenames.map(getOrUploadSampleImage));
+  const uploadedAssets = await Promise.all(uniqueFilenames.map((filename) => getOrUploadSampleImage(filename)));
 
   const filenameToAsset: Record<string, Asset> = {};
   uniqueFilenames.forEach((fn, i) => {

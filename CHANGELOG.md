@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Universal website ontology template (`lib/universal-ontology.ts`): organizations, people, places, brands, channels, events, articles, works, offerings, jobs, attributes and categories with relations, sample data, folders, list/detail wireframe pages, SEO bindings and legal pages; available from the CMS menu, `npm run template:universal`, `POST /webwow/api/templates/universal` and the MCP tools `get_universal_ontology` / `apply_universal_template`
+
+### Fixed
+
+- Nested reference resolution no longer merges a referenced item's own field values into the parent item (wrong values when a reference chain loops back into the same collection)
+- Reference resolution is memoized per request and capped at 3 hops, which turns multi-minute renders of densely linked content into sub-second renders
+
 ## [0.2.0] - 2026-03-03
 
 ### Added

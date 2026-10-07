@@ -7,6 +7,7 @@
 import type { Page, PageLayers, Layer, Asset, AssetCategory, PageFolder, ApiResponse, Collection, CollectionField, CollectionItemWithValues, Component, LayerStyle, Setting, UpdateCollectionData, CreateCollectionFieldData, UpdateCollectionFieldData, Locale, Translation, CreateLocaleData, UpdateLocaleData, CreateTranslationData, UpdateTranslationData, AssetFolder, Font } from '../types';
 import type { StatusAction } from '@/lib/collection-field-utils';
 import type { CollectionUsageResult, CollectionFieldUsageResult } from '@/lib/collection-usage-utils';
+import type { UniversalTemplateResult } from '@/lib/services/universalTemplateService';
 
 // All API routes are now relative (Next.js API routes)
 const API_BASE = '';
@@ -427,6 +428,13 @@ export const collectionsApi = {
     return apiRequest('/webwow/api/collections/sample', {
       method: 'POST',
       body: JSON.stringify({ sampleId }),
+    });
+  },
+
+  async applyUniversalTemplate(options?: { withSamples?: boolean; withPages?: boolean }): Promise<ApiResponse<UniversalTemplateResult>> {
+    return apiRequest('/webwow/api/templates/universal', {
+      method: 'POST',
+      body: JSON.stringify(options || {}),
     });
   },
 

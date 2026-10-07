@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { collectionsApi } from '@/lib/api';
+import type { UniversalTemplateResult } from '@/lib/services/universalTemplateService';
 import { sortCollectionsByOrder } from '@/lib/collection-utils';
 import { MULTI_ASSET_COLLECTION_ID, findStatusFieldId, buildStatusValue, getStatusFlagsFromAction } from '@/lib/collection-field-utils';
 import type { StatusAction } from '@/lib/collection-field-utils';
@@ -38,6 +39,7 @@ interface CollectionsActions {
   preloadCollectionsAndItems: (collections: Collection[]) => Promise<void>;
   createCollection: (data: CreateCollectionData) => Promise<Collection>;
   createSampleCollection: (sampleId: string) => Promise<Collection>;
+  applyUniversalTemplate: () => Promise<UniversalTemplateResult>;
   updateCollection: (id: string, data: UpdateCollectionData) => Promise<void>;
   deleteCollection: (id: string) => Promise<void>;
   reorderCollections: (collectionIds: string[]) => Promise<void>;
@@ -314,6 +316,28 @@ export const useCollectionsStore = create<CollectionsStore>((set, get) => ({
       return collection;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to create sample collection';
+      set({ error: errorMessage, isLoading: false });
+      throw error;
+    }
+  },
+
+  applyUniversalTemplate: async () => {
+    set({ isLoading: true, error: null });
+
+    try {
+      const response = await collectionsApi.applyUniversalTemplate();
+
+      if (response.error) {
+        throw new Error(response.error);
+      }
+
+      // Reload everything: the template touches collections, fields, items and assets
+      await get().loadCollections();
+      set({ isLoading: false });
+
+      return response.data!;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to apply universal template';
       set({ error: errorMessage, isLoading: false });
       throw error;
     }

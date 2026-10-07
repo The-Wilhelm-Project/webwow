@@ -9,6 +9,7 @@ It serves as an open-source and selfhost Webflow alternative featuring a seamles
 - [Docker](https://docs.docker.com/get-docker/), no need for Supabase and Vercel
 - "State of the art" UX Theme
 - Migration Assistant (beta)
+- Universal ontology template: 12 Schema.org-aligned CMS collections with sample data, list/detail pages and SEO bindings (see [docs/universal-ontology.md](docs/universal-ontology.md))
 
 ### Migration Assistant (beta)
 Bring existing sites into Webwow:

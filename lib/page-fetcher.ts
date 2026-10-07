@@ -846,14 +846,62 @@ function applyCmsTranslations(
  * @param isPublished - Whether to fetch published data
  * @returns Enhanced item values with resolved reference data
  */
+/**
+ * Maximum number of reference hops resolved for relationship paths
+ * (e.g. author.organization.headquarters.city = 3 hops). Deeper paths are
+ * rarely used in the builder and resolving them on densely linked content
+ * (organizations <-> places <-> people) explodes into thousands of queries.
+ */
+const MAX_REFERENCE_DEPTH = 3;
+
+/** Request-scoped memo for referenced items (same item is often referenced by many layers) */
+const getCachedItemWithValues = cache(async (itemId: string, isPublished: boolean) =>
+  getItemWithValues(itemId, isPublished)
+);
+
+/** Request-scoped memo for collection fields used during reference resolution */
+const getCachedReferenceFields = cache(async (collectionId: string, isPublished: boolean) =>
+  getFieldsByCollectionId(collectionId, isPublished, { excludeComputed: true })
+);
+
+/**
+ * Request-scoped memo of resolved reference values.
+ * injectCollectionData is called once per layer for the same item, so the
+ * (expensive) reference walk only runs once per distinct item values + render.
+ * Keyed by the serialized values (not object identity) because value objects
+ * are copied/mutated between layers.
+ */
+const getReferenceResolutionCache = cache(() => new Map<string, Promise<Record<string, string>>>());
+
+function resolveReferenceFieldsMemoized(
+  itemValues: Record<string, string>,
+  fields: CollectionField[],
+  isPublished: boolean
+): Promise<Record<string, string>> {
+  const store = getReferenceResolutionCache();
+  const key = `${isPublished ? 'p' : 'd'}:${JSON.stringify(itemValues)}`;
+
+  let promise = store.get(key);
+  if (!promise) {
+    promise = resolveReferenceFields(itemValues, fields, isPublished);
+    store.set(key, promise);
+  }
+  return promise;
+}
+
 async function resolveReferenceFields(
   itemValues: Record<string, string>,
   fields: CollectionField[],
   isPublished: boolean,
   pathPrefix: string = '',
-  visited: Set<string> = new Set()
+  visited: Set<string> = new Set(),
+  depth: number = 0
 ): Promise<Record<string, string>> {
   const enhancedValues = { ...itemValues };
+
+  if (depth >= MAX_REFERENCE_DEPTH) {
+    return enhancedValues;
+  }
 
   // Find reference fields (single reference only - multi-reference is used for collection sources)
   const referenceFields = fields.filter(
@@ -871,11 +919,11 @@ async function resolveReferenceFields(
 
     try {
       // Fetch the referenced item
-      const refItem = await getItemWithValues(refItemId, isPublished);
+      const refItem = await getCachedItemWithValues(refItemId, isPublished);
       if (!refItem) continue;
 
       // Get fields for the referenced collection
-      const refFields = await getFieldsByCollectionId(field.reference_collection_id, isPublished, { excludeComputed: true });
+      const refFields = await getCachedReferenceFields(field.reference_collection_id, isPublished);
 
       // Build the path prefix for this level
       const currentPath = pathPrefix ? `${pathPrefix}.${field.id}` : field.id;
@@ -897,11 +945,20 @@ async function resolveReferenceFields(
         refFields,
         isPublished,
         currentPath,
-        visited
+        visited,
+        depth + 1
       );
 
-      // Merge nested values (they'll have the full path)
-      Object.assign(enhancedValues, nestedValues);
+      // Merge only the nested values that carry the full path. The recursive call also
+      // returns the referenced item's own (unprefixed) values, and merging those would
+      // overwrite the current item's fields when a reference chain loops back into the
+      // same collection (e.g. person -> place -> contact person).
+      const nestedPrefix = `${currentPath}.`;
+      for (const [key, value] of Object.entries(nestedValues)) {
+        if (key.startsWith(nestedPrefix)) {
+          enhancedValues[key] = value;
+        }
+      }
     } catch (error) {
       console.error(`Failed to resolve reference field ${field.id}:`, error);
     }
@@ -930,7 +987,7 @@ async function injectCollectionData(
   // Resolve reference fields if we have field definitions
   let enhancedValues = itemValues;
   if (fields && fields.length > 0) {
-    enhancedValues = await resolveReferenceFields(itemValues, fields, isPublished);
+    enhancedValues = await resolveReferenceFieldsMemoized(itemValues, fields, isPublished);
   }
 
   const updates: Partial<Layer> = {};
@@ -1749,7 +1806,7 @@ export async function resolveCollectionLayers(
 
               // Resolve reference fields BEFORE building layerDataMap
               // This ensures relationship paths (e.g., "refFieldId.targetFieldId") are available
-              const enhancedValues = await resolveReferenceFields(translatedValues, collectionFields, isPublished);
+              const enhancedValues = await resolveReferenceFieldsMemoized(translatedValues, collectionFields, isPublished);
 
               // Extract slug for URL building
               const itemSlug = slugField ? (enhancedValues[slugField.id] || item.values[slugField.id]) : undefined;
@@ -2571,7 +2628,7 @@ async function injectCollectionDataForHtml(
   // Resolve reference fields if we have field definitions
   let enhancedValues = itemValues;
   if (fields && fields.length > 0) {
-    enhancedValues = await resolveReferenceFields(itemValues, fields, isPublished);
+    enhancedValues = await resolveReferenceFieldsMemoized(itemValues, fields, isPublished);
   }
 
   const updates: Partial<Layer> = {};

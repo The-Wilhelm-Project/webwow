@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### CMS: verschachtelte Referenzen bleiben bei ihrem Pfad
+
+- **Referenzketten, die in dieselbe Collection zurückführen, überschreiben das Seitenelement nicht mehr.**
+  `resolveReferenceFields` mergte die eigenen Werte jedes referenzierten Elements ins Eltern-Element; bei
+  Person → Ort → Ansprechperson zeigte die Detailseite die Felder der Ansprechperson. Übernommen werden jetzt
+  nur Werte mit vollem Pfad (`lib/page-fetcher.ts`, Upstream-Bug, [UPSTREAM-SYNC.md](docs/UPSTREAM-SYNC.md) §2a).
+- **Referenzauflösung auf höchstens 3 Hops begrenzt**, referenzierte Elemente und Felder pro Request gemerkt:
+  dicht verknüpfte Inhalte laufen nicht mehr bei jeder Detailseite durch den ganzen Graphen.
+
 ### Webflow-Import: Bildbreite, „Weitere Werke" ohne das aktuelle Werk, Zustände über Chips und unter 480 px
 
 - **Bilder ohne `width` im Export werden nicht mehr gestaucht.** ycode schreibt die Asset-Maße als

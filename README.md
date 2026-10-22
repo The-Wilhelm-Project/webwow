@@ -13,6 +13,8 @@ It is an open-source, self-hosted Webflow alternative with a migration assistant
 - **Multiple websites per installation** (optional) — one database per site, a sites dashboard at `/webwow`,
   `.ycode` import/export per site and a password-protected `?edit` content editor. See "Mehrere Websites" below.
 - **Whitelabel defaults** — ycode badge off, own brand assets.
+- **Universal ontology template** — 12 Schema.org-aligned CMS collections with sample data, list/detail pages
+  and SEO bindings, applied from the CMS rail panel, CLI, API or MCP (see [docs/universal-ontology.md](docs/universal-ontology.md)).
 - Everything else is unmodified ycode. Upstream code runs on a small compatibility layer
   (`lib/webwow/**`, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)), which keeps upstream updates cheap.
 

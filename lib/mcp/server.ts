@@ -27,6 +27,8 @@ import { registerPublishingTools } from '@/lib/mcp/tools/publishing';
 import { registerAnimationTools } from '@/lib/mcp/tools/animations';
 import { registerReferenceResources } from '@/lib/mcp/resources/reference';
 import { registerSiteResources } from '@/lib/mcp/resources/site';
+// Webwow: universal ontology template tools (lib/webwow/mcp/universal-template.ts)
+import { registerUniversalTemplateTools } from '@/lib/webwow/mcp/universal-template';
 
 export function createMcpServer(): McpServer {
   // External MCP agents get every tool up front, so they also get the full
@@ -57,6 +59,8 @@ export function createMcpServer(): McpServer {
   registerSettingsTools(server);
   registerPublishingTools(server);
   registerAnimationTools(server);
+  // Webwow: get_universal_ontology / apply_universal_template (external MCP clients only)
+  registerUniversalTemplateTools(server);
 
   registerReferenceResources(server);
   registerSiteResources(server);

@@ -1111,6 +1111,25 @@ async function fetchComponents(supabase: any, isPublished: boolean = false): Pro
   return components || [];
 }
 
+// Webwow: depth cap + request-scoped memos for resolveReferenceFields (docs/UPSTREAM-SYNC.md §2a)
+/**
+ * Maximum number of reference hops resolved for relationship paths
+ * (e.g. author.organization.headquarters.city = 3 hops). Deeper paths are
+ * rarely used in the builder and resolving them on densely linked content
+ * (organizations <-> places <-> people) explodes into thousands of queries.
+ */
+const MAX_REFERENCE_DEPTH = 3;
+
+/** Request-scoped memo for referenced items (the same item is often referenced many times) */
+const getCachedItemWithValues = cache(async (itemId: string, isPublished: boolean) =>
+  getItemWithValues(itemId, isPublished)
+);
+
+/** Request-scoped memo for collection fields used during reference resolution */
+const getCachedReferenceFields = cache(async (collectionId: string, isPublished: boolean) =>
+  getFieldsByCollectionId(collectionId, isPublished, { excludeComputed: true })
+);
+
 /**
  * Resolve reference field values by fetching referenced item data
  * Adds referenced item's fields with a prefix based on the field path
@@ -1118,6 +1137,7 @@ async function fetchComponents(supabase: any, isPublished: boolean = false): Pro
  * @param fields - Collection fields to check for references
  * @param isPublished - Whether to fetch published data
  * @param translations - CMS translations applied to resolved referenced values
+ * @param depth - Reference hops already taken (resolution stops at MAX_REFERENCE_DEPTH)
  * @returns Enhanced item values with resolved reference data
  */
 async function resolveReferenceFields(
@@ -1126,9 +1146,15 @@ async function resolveReferenceFields(
   isPublished: boolean,
   pathPrefix: string = '',
   visited: Set<string> = new Set(),
-  translations?: Record<string, Translation> | null
+  translations?: Record<string, Translation> | null,
+  depth: number = 0
 ): Promise<Record<string, string>> {
   const enhancedValues = { ...itemValues };
+
+  // Webwow: stop at MAX_REFERENCE_DEPTH hops
+  if (depth >= MAX_REFERENCE_DEPTH) {
+    return enhancedValues;
+  }
 
   // Find reference fields (single reference only - multi-reference is used for collection sources)
   const referenceFields = fields.filter(
@@ -1145,10 +1171,11 @@ async function resolveReferenceFields(
     visited.add(visitKey);
 
     try {
-      const refItem = await getItemWithValues(refItemId, isPublished);
+      // Webwow: request-scoped memos instead of getItemWithValues / getFieldsByCollectionId
+      const refItem = await getCachedItemWithValues(refItemId, isPublished);
       if (!refItem) continue;
 
-      const refFields = await getFieldsByCollectionId(field.reference_collection_id, isPublished, { excludeComputed: true });
+      const refFields = await getCachedReferenceFields(field.reference_collection_id, isPublished);
 
       // Translate the referenced item's values so localized pages render
       // referenced CMS content in the active locale (not the source language)
@@ -1176,11 +1203,20 @@ async function resolveReferenceFields(
         isPublished,
         currentPath,
         visited,
-        translations
+        translations,
+        depth + 1
       );
 
-      // Merge nested values (they'll have the full path)
-      Object.assign(enhancedValues, nestedValues);
+      // Webwow: merge only the nested values that carry the full path. The recursive call also
+      // returns the referenced item's own (unprefixed) values, and merging those would
+      // overwrite the current item's fields when a reference chain loops back into the
+      // same collection (e.g. person -> place -> contact person).
+      const nestedPrefix = `${currentPath}.`;
+      for (const [key, value] of Object.entries(nestedValues)) {
+        if (key.startsWith(nestedPrefix)) {
+          enhancedValues[key] = value;
+        }
+      }
     } catch (error) {
       console.error(`Failed to resolve reference field ${field.id}:`, error);
     }

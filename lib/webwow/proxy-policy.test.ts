@@ -69,6 +69,7 @@ test('explicit decisions (SPEC-multisite §5, SPEC-edit §4/§6.5)', () => {
   assert.deepEqual(d('PATCH', '/ycode/api/auth/users'), { kind: 'deny' });
   assert.deepEqual(d('GET', '/ycode/api/webwow/sites'), { kind: 'deny' });
   assert.deepEqual(d('POST', '/ycode/api/webwow/sites/x/duplicate'), { kind: 'deny' });
+  assert.deepEqual(d('POST', '/ycode/api/webwow/templates/universal'), { kind: 'deny' });
   assert.deepEqual(d('DELETE', '/ycode/api/profile'), { kind: 'deny' });
   // rewrites
   assert.deepEqual(d('PUT', '/ycode/api/layers'), { kind: 'rewrite', to: '/ycode/api/webwow/editor/layers' });

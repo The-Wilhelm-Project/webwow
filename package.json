@@ -48,7 +48,8 @@
     "docker:up": "docker compose up -d",
     "prepare": "husky",
     "webwow:user": "NODE_NO_WARNINGS=1 dotenv -- ts-node --transpile-only -r tsconfig-paths/register scripts/webwow-user.ts",
-    "webwow:sites": "NODE_NO_WARNINGS=1 dotenv -- ts-node --transpile-only -r tsconfig-paths/register scripts/webwow-sites.ts"
+    "webwow:sites": "NODE_NO_WARNINGS=1 dotenv -- ts-node --transpile-only -r tsconfig-paths/register scripts/webwow-sites.ts",
+    "webwow:universal-template": "NODE_NO_WARNINGS=1 dotenv -- ts-node --transpile-only -r tsconfig-paths/register scripts/webwow-universal-template.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",

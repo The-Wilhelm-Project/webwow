@@ -127,9 +127,12 @@ DIVERGENT_FILES=(
 
   # Verhaltens-/Fehlerkorrekturen des Forks (Details in docs/UPSTREAM-SYNC.md §2a)
   "lib/mcp/tools/publishing.ts"
+  # Referenzauflösung: verschachtelte Werte nur mit vollem Pfad mergen, max. 3 Hops, Memos pro Request
+  "lib/page-fetcher.ts"
   # MCP im Multi-Site-Betrieb: Token-Cache pro Site (sonst galt ein Token von Site A 60 s lang auf Site B)
   "lib/mcp/token-cache.ts"
-  # White-Label: serverInfo.name des MCP-Servers "webwow" statt "ycode"
+  # White-Label: serverInfo.name des MCP-Servers "webwow" statt "ycode"; registriert die
+  # Tools der Universal-Ontologie (lib/webwow/mcp/universal-template.ts)
   "lib/mcp/server.ts"
   "components/MigrationChecker.tsx"
   "app/(builder)/ycode/api/error-page/route.ts"

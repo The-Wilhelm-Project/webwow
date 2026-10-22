@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### CMS: Universal-Ontologie als Vorlage — [docs/universal-ontology.md](docs/universal-ontology.md)
+
+- **12 an Schema.org angelehnte Collections** (Organisationen, Personen, Orte, Marken, Kanäle, Events, Artikel,
+  Werke, Angebote, Jobs, Merkmale, Kategorien) mit Relationen, Beispieldaten, Ordnern, Listen- und
+  Detailseiten mit SEO-Bindung sowie statischen Wireframe-Seiten (Home, Über uns, Kontakt, FAQ, Rechtliches).
+  Varianten über ein `type`-Feld statt eigener Collections; Rechtstexte hängen an der Organisation.
+- Anwenden über die Rail (**CMS** → **Universal ontology**), `npm run webwow:universal-template`
+  (`--site <slug>` für eine andere Site), `POST /ycode/api/webwow/templates/universal` und die MCP-Tools
+  `get_universal_ontology` / `apply_universal_template`. Additiv und wiederholbar, alles als Entwurf.
+- Code in `lib/webwow/templates/**`; Upstream-Dateien bleiben unverändert bis auf die Tool-Registrierung in
+  `lib/mcp/server.ts`.
+
 ### CMS: verschachtelte Referenzen bleiben bei ihrem Pfad
 
 - **Referenzketten, die in dieselbe Collection zurückführen, überschreiben das Seitenelement nicht mehr.**
